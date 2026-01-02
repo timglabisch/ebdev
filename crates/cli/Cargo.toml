@@ -10,5 +10,7 @@ path = "src/main.rs"
 [dependencies]
 ebdev-toolchain = { path = "../toolchain" }
 ebdev-toolchain-node = { path = "../toolchain_node" }
+ebdev-config = { path = "../ebdev_config" }
 tokio.workspace = true
 anyhow.workspace = true
+clap.workspace = true
