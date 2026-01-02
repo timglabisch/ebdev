@@ -1,0 +1,17 @@
+[toolchain.node]
+version = "22.12.0"
+
+[toolchain.pnpm]
+version = "9.15.0"
+
+[toolchain.mutagen]
+version = "0.17.6"
+
+[mutagen]
+[[mutagen.sync]]
+name = "shared"
+target = "docker://sync@example-sync-target-1/var/www/shared"
+directory = "./shared"
+mode = "two-way"
+stage = 0
+ignore = [".git", "node_modules"]

@@ -1,0 +1,4 @@
+services:
+  sync-target:
+    build: .
+    container_name: example-sync-target-1

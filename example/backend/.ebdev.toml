@@ -1,0 +1,7 @@
+[mutagen]
+[[mutagen.sync]]
+name = "backend-src"
+target = "docker://sync@example-sync-target-1/var/www/backend"
+mode = "two-way"
+stage = 1
+ignore = [".git", "vendor", "var", ".env"]
