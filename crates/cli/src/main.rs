@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
+use ebdev_mutagen_config::{discover_projects, SyncMode};
 
 #[derive(Parser)]
 #[command(name = "ebdev", version, about = "easybill development toolchain")]
@@ -19,6 +20,11 @@ enum Commands {
     Toolchain {
         #[command(subcommand)]
         command: ToolchainCommands,
+    },
+    /// Manage mutagen sync projects
+    Mutagen {
+        #[command(subcommand)]
+        command: MutagenCommands,
     },
     /// Run a command with the configured toolchain environment
     #[command(disable_help_flag = true)]
@@ -44,6 +50,12 @@ enum Commands {
 enum ToolchainCommands {
     /// Install all configured toolchains (node, pnpm)
     Install,
+}
+
+#[derive(Subcommand)]
+enum MutagenCommands {
+    /// Show discovered mutagen sync projects (debug)
+    Debug,
 }
 
 fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>) -> OsString {
@@ -140,6 +152,42 @@ async fn run() -> anyhow::Result<ExitCode> {
 
                 if let Some(mutagen_v) = mutagen_version {
                     ebdev_toolchain_mutagen::install_mutagen(mutagen_v, &base_path).await?;
+                }
+            }
+        },
+        Commands::Mutagen { command } => match command {
+            MutagenCommands::Debug => {
+                let projects = discover_projects(&base_path)?;
+
+                if projects.is_empty() {
+                    println!("No mutagen sync projects found.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+
+                // Sort by stage
+                let mut projects = projects;
+                projects.sort_by_key(|p| p.project.stage);
+
+                println!("Discovered {} mutagen sync project(s):\n", projects.len());
+
+                for (i, p) in projects.iter().enumerate() {
+                    println!("{}. {}", i + 1, p.project.name);
+                    println!("   Config:    {}", p.config_path.display());
+                    println!("   Directory: {}", p.resolved_directory.display());
+                    println!("   Target:    {}", p.project.target);
+                    println!("   Mode:      {}", match p.project.mode {
+                        SyncMode::TwoWay => "two-way",
+                        SyncMode::OneWayCreate => "one-way-create",
+                        SyncMode::OneWayReplica => "one-way-replica",
+                    });
+                    println!("   Stage:     {}", p.project.stage);
+                    if p.project.polling.enabled {
+                        println!("   Polling:   enabled ({}s)", p.project.polling.interval);
+                    }
+                    if !p.project.ignore.is_empty() {
+                        println!("   Ignore:    {}", p.project.ignore.join(", "));
+                    }
+                    println!();
                 }
             }
         },

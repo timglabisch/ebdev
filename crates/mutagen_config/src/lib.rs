@@ -134,6 +134,9 @@ pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, Mut
                         })
                         .unwrap_or_else(|| config_dir.to_path_buf());
 
+                    // Normalize the path to remove . and .. components
+                    let resolved_directory = normalize_path(&resolved_directory);
+
                     discovered.push(DiscoveredProject {
                         project,
                         resolved_directory,
@@ -147,11 +150,30 @@ pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, Mut
     Ok(discovered)
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            c => components.push(c),
+        }
+    }
+    components.iter().collect()
+}
+
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     entry
         .file_name()
         .to_str()
-        .map(|s| s.starts_with('.') && s != ".ebdev.toml")
+        .map(|s| {
+            s.starts_with('.')
+                && s != "."
+                && s != ".."
+                && s != ".ebdev.toml"
+        })
         .unwrap_or(false)
 }
 

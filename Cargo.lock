@@ -247,6 +247,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ebdev-config",
+ "ebdev-mutagen-config",
  "ebdev-toolchain",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
