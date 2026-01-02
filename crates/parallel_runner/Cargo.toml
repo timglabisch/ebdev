@@ -1,0 +1,12 @@
+[package]
+name = "ebdev-parallel-runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "time", "io-util", "sync"] }
+thiserror.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+portable-pty = "0.8"
+vt100 = "0.15"
