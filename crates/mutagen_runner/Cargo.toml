@@ -8,6 +8,10 @@ ebdev-mutagen-config = { path = "../mutagen_config" }
 tokio = { workspace = true, features = ["process", "time"] }
 anyhow.workspace = true
 thiserror.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
