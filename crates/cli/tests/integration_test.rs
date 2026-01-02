@@ -17,6 +17,9 @@ version = "22.12.0"
 
 [toolchain.pnpm]
 version = "9.15.0"
+
+[toolchain.mutagen]
+version = "0.17.6"
 "#;
     fs::write(temp_dir.path().join(".ebdev.toml"), config).unwrap();
 
@@ -48,10 +51,12 @@ version = "9.15.0"
         .assert()
         .success()
         .stdout(predicate::str::contains("Node.js v22.12.0"))
-        .stdout(predicate::str::contains("pnpm 9.15.0"));
+        .stdout(predicate::str::contains("pnpm 9.15.0"))
+        .stdout(predicate::str::contains("Mutagen v0.17.6"));
 
     assert!(temp_dir.path().join(".ebdev/toolchain/node/v22.12.0/bin/node").exists());
     assert!(temp_dir.path().join(".ebdev/toolchain/pnpm/node_22.12.0/pnpm_9.15.0/bin/pnpm").exists());
+    assert!(temp_dir.path().join(".ebdev/toolchain/mutagen/v0.17.6/mutagen").exists());
 
     // Already installed
     println!("Testing already installed...");
@@ -88,6 +93,14 @@ version = "9.15.0"
         .assert()
         .success()
         .stdout(predicate::str::contains("9.15.0"));
+
+    println!("Testing run mutagen...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "mutagen", "version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0.17.6"));
 
     // ========================================================================
     // Argument Passing
@@ -175,6 +188,18 @@ version = "9.15.0"
         .stdout(predicate::str::contains("9.14.0"));
 
     assert!(temp_dir.path().join(".ebdev/toolchain/pnpm/node_22.12.0/pnpm_9.14.0").exists());
+
+    println!("Testing mutagen version override...");
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "--mutagen-version", "0.17.5", "mutagen", "version"])
+        .timeout(std::time::Duration::from_secs(120))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0.17.5"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/mutagen/v0.17.5/mutagen").exists());
 
     // ========================================================================
     // PATH Environment

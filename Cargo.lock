@@ -248,6 +248,7 @@ dependencies = [
  "clap",
  "ebdev-config",
  "ebdev-toolchain",
+ "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
  "predicates",
  "tempfile",
@@ -268,6 +269,18 @@ name = "ebdev-toolchain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tokio",
+]
+
+[[package]]
+name = "ebdev-toolchain-mutagen"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "futures-util",
+ "reqwest",
+ "tar",
+ "thiserror",
  "tokio",
 ]
 

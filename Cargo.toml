@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/toolchain",
     "crates/toolchain_node",
+    "crates/toolchain_mutagen",
     "crates/ebdev_config",
     "crates/cli",
 ]

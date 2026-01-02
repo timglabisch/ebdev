@@ -1,0 +1,12 @@
+[package]
+name = "ebdev-toolchain-mutagen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+flate2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
