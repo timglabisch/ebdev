@@ -1,7 +1,7 @@
 [mutagen]
 [[mutagen.sync]]
 name = "frontend"
-target = "docker://sync@example-sync-target-1/var/www/frontend"
+target = "docker://ebdev@example-sync-target-1/var/www/frontend"
 mode = "two-way"
 stage = 1
 ignore = [".git", "node_modules", "dist", ".next"]

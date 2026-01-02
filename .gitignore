@@ -1,3 +1,4 @@
 .idea/*
 target/*
 .ebdev/toolchain/*
+example/.ebdev/toolchain/*

@@ -6,6 +6,7 @@ members = [
     "crates/toolchain_mutagen",
     "crates/ebdev_config",
     "crates/mutagen_config",
+    "crates/mutagen_runner",
     "crates/cli",
 ]
 

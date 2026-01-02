@@ -13,6 +13,7 @@ ebdev-toolchain-node = { path = "../toolchain_node" }
 ebdev-toolchain-mutagen = { path = "../toolchain_mutagen" }
 ebdev-config = { path = "../ebdev_config" }
 ebdev-mutagen-config = { path = "../mutagen_config" }
+ebdev-mutagen-runner = { path = "../mutagen_runner" }
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

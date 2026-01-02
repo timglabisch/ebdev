@@ -1,0 +1,13 @@
+[package]
+name = "ebdev-mutagen-runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ebdev-mutagen-config = { path = "../mutagen_config" }
+tokio = { workspace = true, features = ["process", "time"] }
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

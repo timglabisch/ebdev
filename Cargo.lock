@@ -248,6 +248,7 @@ dependencies = [
  "clap",
  "ebdev-config",
  "ebdev-mutagen-config",
+ "ebdev-mutagen-runner",
  "ebdev-toolchain",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
@@ -273,6 +274,16 @@ dependencies = [
  "thiserror",
  "toml",
  "walkdir",
+]
+
+[[package]]
+name = "ebdev-mutagen-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ebdev-mutagen-config",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

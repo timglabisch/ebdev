@@ -1,14 +1,14 @@
 [mutagen]
 [[mutagen.sync]]
 name = "backend-src"
-target = "docker://sync@example-sync-target-1/var/www/backend"
+target = "docker://ebdev@example-sync-target-1/var/www/backend"
 mode = "two-way"
 stage = 1
 ignore = [".git", "vendor", "var", ".env"]
 
 [[mutagen.sync]]
 name = "backend-config"
-target = "docker://sync@example-sync-target-1/var/www/backend/config"
+target = "docker://ebdev@example-sync-target-1/var/www/backend/config"
 directory = "./config"
 mode = "one-way-replica"
 stage = 2

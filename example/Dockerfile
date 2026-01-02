@@ -1,7 +1,7 @@
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN adduser -D -s /bin/sh sync && \
+RUN useradd -m -s /bin/bash ebdev && \
     mkdir -p /var/www/frontend /var/www/backend /var/www/shared && \
-    chown -R sync:sync /var/www
+    chown -R ebdev:ebdev /var/www
 
 CMD ["tail", "-f", "/dev/null"]
