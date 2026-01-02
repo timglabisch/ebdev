@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
@@ -59,7 +60,17 @@ async fn ensure_toolchain(base_path: &PathBuf, node_version: &str, pnpm_version:
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     let base_path = PathBuf::from(".");
     let config = Config::load_from_dir(&base_path)?;
@@ -88,9 +99,11 @@ async fn main() -> anyhow::Result<()> {
             let path = env.build_path(pnpm_v);
 
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            env.run(&command, &args_ref, &path).await?;
+            let status = env.run(&command, &args_ref, &path).await?;
+
+            return Ok(ExitCode::from(status.code().unwrap_or(1) as u8));
         }
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

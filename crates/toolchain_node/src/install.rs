@@ -44,7 +44,8 @@ pub async fn install_node(version: &str, base_path: &Path) -> Result<PathBuf, In
         .join(format!("v{version}"));
 
     if install_dir.exists() {
-        return Err(InstallError::AlreadyInstalled(install_dir));
+        println!("Node.js v{version} already installed");
+        return Ok(install_dir);
     }
 
     let extensions = ["tar.xz", "tar.gz"];

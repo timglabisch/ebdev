@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -86,12 +86,11 @@ impl NodeEnv {
         let status = Command::new(cmd)
             .args(args)
             .env("PATH", path)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .status()
             .await?;
-
-        if !status.success() {
-            return Err(NodeEnvError::NonZeroExit(status));
-        }
 
         Ok(status)
     }
