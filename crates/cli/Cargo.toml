@@ -1,0 +1,13 @@
+[package]
+name = "ebdev"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ebdev"
+path = "src/main.rs"
+
+[dependencies]
+ebdev-toolchain = { path = "../toolchain" }
+tokio.workspace = true
+anyhow.workspace = true
