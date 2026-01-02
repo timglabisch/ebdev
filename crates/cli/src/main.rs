@@ -18,6 +18,7 @@ enum Commands {
         command: ToolchainCommands,
     },
     /// Run a command with the configured toolchain environment
+    #[command(disable_help_flag = true)]
     Run {
         /// Override node version from config
         #[arg(long)]

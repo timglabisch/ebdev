@@ -18,34 +18,43 @@ pub enum NodeEnvError {
 
 #[derive(Debug, Clone)]
 pub struct NodeEnv {
-    node_dir: PathBuf,
+    toolchain_dir: PathBuf,
+    node_version: String,
 }
 
 impl NodeEnv {
     pub fn new(base_path: &Path, node_version: &str) -> Result<Self, NodeEnvError> {
-        let node_dir = base_path
-            .join(".ebdev")
-            .join("toolchain")
-            .join("node")
-            .join(format!("v{node_version}"));
+        let toolchain_dir = base_path.join(".ebdev").join("toolchain");
+        let node_dir = toolchain_dir.join("node").join(format!("v{node_version}"));
 
         if !node_dir.exists() {
             return Err(NodeEnvError::NotFound(node_dir));
         }
 
-        Ok(Self { node_dir })
+        Ok(Self {
+            toolchain_dir,
+            node_version: node_version.to_string(),
+        })
+    }
+
+    pub fn node_dir(&self) -> PathBuf {
+        self.toolchain_dir.join("node").join(format!("v{}", self.node_version))
     }
 
     pub fn bin_dir(&self) -> PathBuf {
-        self.node_dir.join("bin")
+        self.node_dir().join("bin")
     }
 
     pub fn npm_bin(&self) -> PathBuf {
         self.bin_dir().join("npm")
     }
 
+    /// .ebdev/toolchain/pnpm/node_22.12.0/pnpm_9.15.0/
     pub fn pnpm_dir(&self, pnpm_version: &str) -> PathBuf {
-        self.node_dir.join(format!("pnpm_{pnpm_version}"))
+        self.toolchain_dir
+            .join("pnpm")
+            .join(format!("node_{}", self.node_version))
+            .join(format!("pnpm_{pnpm_version}"))
     }
 
     pub fn pnpm_bin_dir(&self, pnpm_version: &str) -> PathBuf {
