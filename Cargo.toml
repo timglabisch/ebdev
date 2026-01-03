@@ -4,6 +4,7 @@ members = [
     "crates/toolchain",
     "crates/toolchain_node",
     "crates/toolchain_mutagen",
+    "crates/toolchain_deno",
     "crates/ebdev_config",
     "crates/mutagen_config",
     "crates/mutagen_runner",
@@ -30,9 +31,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 serde_json = "1"
 crc32fast = "1.4"
 notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
 async-trait = "0.1"
+zip = "2"

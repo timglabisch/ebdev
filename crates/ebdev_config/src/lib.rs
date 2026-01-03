@@ -7,8 +7,11 @@ pub enum ConfigError {
     #[error("Failed to read config file: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Failed to parse config: {0}")]
-    Parse(#[from] toml::de::Error),
+    #[error("No config file found (.ebdev.ts)")]
+    NotFound,
+
+    #[error("Failed to load TypeScript config: {0}")]
+    TypeScript(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,13 +44,13 @@ pub struct MutagenConfig {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
-        Ok(config)
-    }
-
-    pub fn load_from_dir(dir: &Path) -> Result<Self, ConfigError> {
-        Self::load(&dir.join(".ebdev.toml"))
+    /// Load config from a directory (looks for .ebdev.ts)
+    pub async fn load_from_dir(dir: &Path) -> Result<Self, ConfigError> {
+        let ts_path = dir.join(".ebdev.ts");
+        if ts_path.exists() {
+            return ebdev_toolchain_deno::load_ts_config(&ts_path).await
+                .map_err(|e| ConfigError::TypeScript(e.to_string()));
+        }
+        Err(ConfigError::NotFound)
     }
 }

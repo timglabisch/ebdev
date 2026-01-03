@@ -1,0 +1,17 @@
+[package]
+name = "ebdev-toolchain-deno"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+deno_core = "0.370"
+deno_ast = { version = "0.52", features = ["transpiling"] }
+deno_error = "0.7"
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,8 +1,0 @@
-[toolchain.node]
-version = "22.12.0"
-
-[toolchain.pnpm]
-version = "9.15.0"
-
-[toolchain.mutagen]
-version = "0.17.6"

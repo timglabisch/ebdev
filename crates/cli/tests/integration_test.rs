@@ -11,17 +11,17 @@ fn ebdev() -> Command {
 fn test_full_integration() {
     let temp_dir = TempDir::new().unwrap();
 
-    let config = r#"
-[toolchain.node]
-version = "22.12.0"
+    let config = r#"import { defineConfig } from "ebdev";
 
-[toolchain.pnpm]
-version = "9.15.0"
-
-[toolchain.mutagen]
-version = "0.17.6"
+export default defineConfig({
+  toolchain: {
+    node: "22.12.0",
+    pnpm: "9.15.0",
+    mutagen: "0.17.6",
+  },
+});
 "#;
-    fs::write(temp_dir.path().join(".ebdev.toml"), config).unwrap();
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
 
     // ========================================================================
     // Help & Version
@@ -242,7 +242,7 @@ fn test_missing_config() {
 #[test]
 fn test_invalid_config() {
     let temp_dir = TempDir::new().unwrap();
-    fs::write(temp_dir.path().join(".ebdev.toml"), "invalid {{{").unwrap();
+    fs::write(temp_dir.path().join(".ebdev.ts"), "invalid {{{").unwrap();
 
     ebdev()
         .current_dir(temp_dir.path())
@@ -255,11 +255,15 @@ fn test_invalid_config() {
 fn test_auto_install_on_run() {
     let temp_dir = TempDir::new().unwrap();
 
-    let config = r#"
-[toolchain.node]
-version = "22.12.0"
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    node: "22.12.0",
+  },
+});
 "#;
-    fs::write(temp_dir.path().join(".ebdev.toml"), config).unwrap();
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
 
     // Should auto-install when running
     ebdev()

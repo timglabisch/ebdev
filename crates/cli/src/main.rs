@@ -50,6 +50,8 @@ enum Commands {
 enum ToolchainCommands {
     /// Install all configured toolchains (node, pnpm)
     Install,
+    /// Show loaded configuration info
+    Info,
 }
 
 #[derive(Subcommand)]
@@ -149,10 +151,22 @@ async fn main() -> ExitCode {
 async fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     let base_path = PathBuf::from(".");
-    let config = Config::load_from_dir(&base_path)?;
+    let config = Config::load_from_dir(&base_path).await?;
 
     match cli.command {
         Commands::Toolchain { command } => match command {
+            ToolchainCommands::Info => {
+                println!("Config: .ebdev.ts");
+                println!();
+                println!("Toolchain:");
+                println!("  Node:    {}", config.toolchain.node.version);
+                if let Some(pnpm) = &config.toolchain.pnpm {
+                    println!("  pnpm:    {}", pnpm.version);
+                }
+                if let Some(mutagen) = &config.toolchain.mutagen {
+                    println!("  Mutagen: {}", mutagen.version);
+                }
+            }
             ToolchainCommands::Install => {
                 let node_version = &config.toolchain.node.version;
                 let pnpm_version = config.toolchain.pnpm.as_ref().map(|p| p.version.as_str());
@@ -209,7 +223,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let mutagen_version = config.toolchain.mutagen
                     .as_ref()
                     .map(|m| m.version.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("No mutagen version configured in .ebdev.toml"))?;
+                    .ok_or_else(|| anyhow::anyhow!("No mutagen version configured in config file"))?;
 
                 // Ensure mutagen is installed
                 let mutagen_env = match MutagenEnv::new(&base_path, mutagen_version) {
