@@ -88,7 +88,7 @@ impl<B: MutagenBackend, U: SyncUI> SyncController<B, U> {
                 // Aktualisiere UI mit Stage-Projekten wenn AdvanceStage
                 if let Action::AdvanceStage { stage, is_final, .. } = action {
                     let sessions = self.desired.sessions_for_stage(stage);
-                    self.ui.set_stage_sessions_v2(
+                    self.ui.set_stage_sessions(
                         self.state.stages_to_run.iter().position(|&s| s == stage).unwrap_or(0),
                         &sessions,
                         is_final,

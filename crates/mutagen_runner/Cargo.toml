@@ -21,3 +21,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+ebdev-mutagen-runner = { path = ".", features = ["test-utils"] }

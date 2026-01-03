@@ -1,14 +1,11 @@
-use std::collections::{BTreeMap, HashSet};
-use std::io::IsTerminal;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 
 use ebdev_mutagen_config::{DiscoveredProject, SyncMode};
 
@@ -21,7 +18,7 @@ pub mod reconcile;
 pub mod controller;
 
 use status::MutagenSession;
-use tui::{App, SessionState, TuiMessage};
+use tui::TuiMessage;
 
 #[derive(Debug, Error)]
 pub enum MutagenRunnerError {
@@ -272,73 +269,6 @@ impl MutagenBackend for RealMutagen {
     }
 }
 
-// ============================================================================
-// SyncPlan - Berechnung der auszuführenden Stages (einmalig)
-// ============================================================================
-
-/// Enthält den berechneten Sync-Plan
-struct SyncPlan<'a> {
-    stages_to_run: Vec<i32>,
-    last_stage: i32,
-    projects_by_stage: BTreeMap<i32, Vec<&'a DiscoveredProject>>,
-    keep_open: bool,
-}
-
-impl<'a> SyncPlan<'a> {
-    fn new(projects: &'a [DiscoveredProject], init_only: bool) -> Option<Self> {
-        let options = if init_only {
-            SyncOptions { run_init_stages: true, run_final_stage: false, keep_open: false }
-        } else {
-            SyncOptions { run_init_stages: true, run_final_stage: true, keep_open: true }
-        };
-        Self::from_options(projects, &options)
-    }
-
-    fn from_options(projects: &'a [DiscoveredProject], options: &SyncOptions) -> Option<Self> {
-        if projects.is_empty() {
-            return None;
-        }
-
-        let projects_by_stage = group_by_stage(projects);
-        let stage_keys: Vec<i32> = projects_by_stage.keys().copied().collect();
-        let last_stage = *stage_keys.last()?;
-
-        let stages_to_run: Vec<i32> = match (options.run_init_stages, options.run_final_stage) {
-            (true, true) => stage_keys,                                              // All stages
-            (true, false) => stage_keys.into_iter().filter(|&s| s != last_stage).collect(), // Init only
-            (false, true) => vec![last_stage],                                       // Final only
-            (false, false) => return None,                                           // Nothing to do
-        };
-
-        if stages_to_run.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            stages_to_run,
-            last_stage,
-            projects_by_stage,
-            keep_open: options.keep_open,
-        })
-    }
-
-    fn stage_count(&self) -> usize {
-        self.stages_to_run.len()
-    }
-
-    fn is_final_stage(&self, stage: i32) -> bool {
-        stage == self.last_stage
-    }
-
-    fn should_keep_open(&self, stage: i32) -> bool {
-        self.keep_open && self.is_final_stage(stage)
-    }
-
-    /// Returns true if only init stages are run (final stage is not included)
-    fn is_init_only(&self) -> bool {
-        !self.stages_to_run.contains(&self.last_stage)
-    }
-}
 
 // ============================================================================
 // SyncUI Trait - abstrahiert UI für Headless und TUI
@@ -354,7 +284,7 @@ pub trait SyncUI {
     fn on_cleanup(&mut self, removed: usize);
 
     /// Wird aufgerufen wenn eine Stage beginnt
-    fn on_stage_start(&mut self, stage: i32, projects: &[&DiscoveredProject], is_final: bool);
+    fn on_stage_start(&mut self, stage: i32, session_count: usize, is_final: bool);
 
     /// Wird aufgerufen nach dem Sync einer Stage
     fn on_sync_result(&mut self, terminated: usize, kept: usize, created: usize);
@@ -369,7 +299,7 @@ pub trait SyncUI {
     fn on_watch_mode(&mut self);
 
     /// Wird aufgerufen bei Fehlern
-    fn on_error(&mut self, msg: &str);
+    fn on_error(&mut self, _msg: &str) {}
 
     /// Wird aufgerufen am Ende (nur bei init_only)
     fn on_complete(&mut self);
@@ -380,34 +310,11 @@ pub trait SyncUI {
     /// Wird in Loops aufgerufen (TUI: draw + events, Headless: sleep)
     fn tick(&mut self) -> Result<(), MutagenRunnerError>;
 
-    /// Update Session-Status (nur für TUI relevant)
-    fn update_sessions(&mut self, _sessions: &[MutagenSession]) {}
-
-    /// Prüft ob alle Sessions einer Stage complete sind (für non-final stages)
-    fn all_sessions_complete(&self) -> bool { true }
-
-    /// Setzt Sessions für eine Stage (nur für TUI relevant)
-    fn set_stage_sessions(&mut self, _stage_idx: usize, _projects: &[&DiscoveredProject], _is_final: bool) {}
+    /// Setzt Sessions für eine Stage (für TUI relevant)
+    fn set_stage_sessions(&mut self, _stage_idx: usize, _sessions: &[&state::DesiredSession], _is_final: bool) {}
 
     /// Markiert Sessions als erstellt (nur für TUI relevant)
     fn mark_sessions_created(&mut self, _session_names: &[String]) {}
-
-    // =========================================================================
-    // V2 Methods for Operator Pattern Controller
-    // =========================================================================
-
-    /// Wird aufgerufen wenn eine Stage beginnt (V2 - mit DesiredSession)
-    fn on_stage_start_v2(&mut self, stage: i32, session_count: usize, is_final: bool) {
-        // Default: Rufe alte Methode auf mit leerem Slice
-        let empty: Vec<&DiscoveredProject> = vec![];
-        self.on_stage_start(stage, &empty, is_final);
-        let _ = session_count; // Für Implementierungen die die Anzahl brauchen
-    }
-
-    /// Setzt Sessions für eine Stage (V2 - mit DesiredSession)
-    fn set_stage_sessions_v2(&mut self, _stage_idx: usize, _sessions: &[&state::DesiredSession], _is_final: bool) {
-        // Default: Nichts tun (TUI override diese Methode)
-    }
 }
 
 // ============================================================================
@@ -431,15 +338,7 @@ impl SyncUI for HeadlessUI {
         }
     }
 
-    fn on_stage_start(&mut self, stage: i32, projects: &[&DiscoveredProject], is_final: bool) {
-        println!("\n=== Stage {} ({} project(s)){} ===",
-            stage,
-            projects.len(),
-            if is_final { " [WATCH MODE]" } else { "" }
-        );
-    }
-
-    fn on_stage_start_v2(&mut self, stage: i32, session_count: usize, is_final: bool) {
+    fn on_stage_start(&mut self, stage: i32, session_count: usize, is_final: bool) {
         println!("\n=== Stage {} ({} session(s)){} ===",
             stage,
             session_count,
@@ -487,159 +386,10 @@ impl SyncUI for HeadlessUI {
     }
 }
 
-// ============================================================================
-// TuiUI - Terminal UI mit ratatui
-// ============================================================================
-
-struct TuiUI {
-    terminal: tui::Tui,
-    app: App,
-    rx: mpsc::Receiver<TuiMessage>,
-    _poller_handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl TuiUI {
-    fn new<M: MutagenBackend>(backend: &M, stage_count: usize) -> Result<Self, MutagenRunnerError> {
-        let terminal = tui::init().map_err(MutagenRunnerError::Execution)?;
-        let app = App::new(stage_count as i32);
-        let (tx, rx) = mpsc::channel::<TuiMessage>(100);
-        let poller_handle = backend.spawn_status_poller(tx);
-
-        Ok(Self {
-            terminal,
-            app,
-            rx,
-            _poller_handle: poller_handle,
-        })
-    }
-
-    fn cleanup(self) -> Result<(), MutagenRunnerError> {
-        if let Some(handle) = self._poller_handle {
-            handle.abort();
-        }
-        tui::restore().map_err(MutagenRunnerError::Execution)
-    }
-
-    fn process_status_updates(&mut self) {
-        while let Ok(msg) = self.rx.try_recv() {
-            if let TuiMessage::UpdateStatus(sessions) = msg {
-                self.app.update_session_status(&sessions);
-            }
-        }
-    }
-}
-
-impl SyncUI for TuiUI {
-    fn on_start(&mut self, _stage_count: usize, _init_only: bool) {
-        // TUI zeigt das implizit über die Stage-Anzeige
-    }
-
-    fn on_cleanup(&mut self, removed: usize) {
-        if removed > 0 {
-            self.app.set_message(format!("Removed {} session(s) for deleted projects", removed));
-        }
-    }
-
-    fn on_stage_start(&mut self, _stage: i32, _projects: &[&DiscoveredProject], _is_final: bool) {
-        // Stage-Setup wird separat über set_stage_sessions gemacht
-    }
-
-    fn on_sync_result(&mut self, terminated: usize, kept: usize, created: usize) {
-        if terminated > 0 || kept > 0 || created > 0 {
-            self.app.set_message(format!("Synced: -{} ={} +{}", terminated, kept, created));
-        }
-    }
-
-    fn on_waiting(&mut self, stage: i32) {
-        self.app.set_message(format!("Waiting for stage {} to complete...", stage));
-    }
-
-    fn on_stage_complete(&mut self, stage: i32, is_final: bool) {
-        if is_final {
-            self.app.set_message(format!("Stage {} complete.", stage));
-        } else {
-            self.app.set_message(format!("Stage {} complete, terminating...", stage));
-        }
-    }
-
-    fn on_watch_mode(&mut self) {
-        self.app.set_message("Watching for changes. Press 'q' or ESC to quit.".to_string());
-    }
-
-    fn on_error(&mut self, msg: &str) {
-        self.app.set_message(format!("Error: {}", msg));
-    }
-
-    fn on_complete(&mut self) {
-        // TUI zeigt nichts extra an - wird nach restore() geprintet
-    }
-
-    fn check_quit(&mut self) -> Result<bool, MutagenRunnerError> {
-        self.terminal.draw(|f| tui::draw(f, &self.app)).map_err(MutagenRunnerError::Execution)?;
-        tui::handle_events().map_err(MutagenRunnerError::Execution)
-    }
-
-    fn tick(&mut self) -> Result<(), MutagenRunnerError> {
-        self.terminal.draw(|f| tui::draw(f, &self.app)).map_err(MutagenRunnerError::Execution)?;
-        self.process_status_updates();
-        Ok(())
-    }
-
-    fn update_sessions(&mut self, sessions: &[MutagenSession]) {
-        self.app.update_session_status(sessions);
-    }
-
-    fn all_sessions_complete(&self) -> bool {
-        self.app.all_sessions_complete()
-    }
-
-    fn set_stage_sessions(&mut self, stage_idx: usize, projects: &[&DiscoveredProject], is_final: bool) {
-        let sessions: Vec<SessionState> = projects.iter()
-            .map(|p| SessionState {
-                name: p.session_name(),
-                alpha: p.resolved_directory.to_string_lossy().to_string(),
-                beta: p.project.target.clone(),
-                status: None,
-                created: false,
-            })
-            .collect();
-        self.app.set_stage(stage_idx as i32, sessions, is_final);
-    }
-
-    fn mark_sessions_created(&mut self, session_names: &[String]) {
-        for name in session_names {
-            self.app.mark_session_created(name);
-        }
-    }
-}
 
 // ============================================================================
-// Public API
+// Public API - All functions now use the Operator Pattern Controller
 // ============================================================================
-
-/// Runs staged mutagen sync.
-/// - init_only=false: Runs all stages, final stage stays in watch mode
-/// - init_only=true: Runs all stages except final, terminates after completion
-pub async fn run_staged_sync(
-    mutagen_bin: &Path,
-    _base_path: &Path,
-    projects: Vec<DiscoveredProject>,
-    init_only: bool,
-) -> Result<(), MutagenRunnerError> {
-    let backend = Arc::new(RealMutagen::new(mutagen_bin.to_path_buf()));
-    run_staged_sync_with_backend(backend, projects, init_only).await
-}
-
-/// Runs staged mutagen sync with options for fine-grained control.
-pub async fn run_staged_sync_with_options(
-    mutagen_bin: &Path,
-    _base_path: &Path,
-    projects: Vec<DiscoveredProject>,
-    options: SyncOptions,
-) -> Result<(), MutagenRunnerError> {
-    let backend = Arc::new(RealMutagen::new(mutagen_bin.to_path_buf()));
-    run_staged_sync_with_backend_and_options(backend, projects, options).await
-}
 
 /// Terminates all mutagen sessions.
 pub async fn terminate_all_sessions(mutagen_bin: &Path) -> Result<(), MutagenRunnerError> {
@@ -647,120 +397,28 @@ pub async fn terminate_all_sessions(mutagen_bin: &Path) -> Result<(), MutagenRun
     backend.terminate_all().await
 }
 
-/// Runs staged mutagen sync mit einem beliebigen MutagenBackend.
-/// Ermöglicht Mocking für Tests.
-pub async fn run_staged_sync_with_backend<M: MutagenBackend + 'static>(
-    backend: Arc<M>,
-    projects: Vec<DiscoveredProject>,
-    init_only: bool,
-) -> Result<(), MutagenRunnerError> {
-    let plan = match SyncPlan::new(&projects, init_only) {
-        Some(plan) => plan,
-        None => {
-            println!("No mutagen sync projects found.");
-            return Ok(());
-        }
-    };
-
-    if std::io::stdout().is_terminal() {
-        let mut ui = TuiUI::new(backend.as_ref(), plan.stage_count())?;
-        let result = run_staged_sync_impl(backend, &projects, &plan, &mut ui).await;
-        ui.cleanup()?;
-        if result.is_ok() && !plan.keep_open {
-            println!("Sync completed successfully.");
-        }
-        return result;
-    }
-
-    let mut ui = HeadlessUI;
-    run_staged_sync_impl(backend, &projects, &plan, &mut ui).await
-}
-
-/// Runs staged mutagen sync with backend and options.
-pub async fn run_staged_sync_with_backend_and_options<M: MutagenBackend + 'static>(
-    backend: Arc<M>,
-    projects: Vec<DiscoveredProject>,
-    options: SyncOptions,
-) -> Result<(), MutagenRunnerError> {
-    let plan = match SyncPlan::from_options(&projects, &options) {
-        Some(plan) => plan,
-        None => {
-            println!("No mutagen sync projects found or nothing to do.");
-            return Ok(());
-        }
-    };
-
-    if std::io::stdout().is_terminal() {
-        let mut ui = TuiUI::new(backend.as_ref(), plan.stage_count())?;
-        let result = run_staged_sync_impl(backend, &projects, &plan, &mut ui).await;
-        ui.cleanup()?;
-        if result.is_ok() && !plan.keep_open {
-            println!("Sync completed successfully.");
-        }
-        return result;
-    }
-
-    let mut ui = HeadlessUI;
-    run_staged_sync_impl(backend, &projects, &plan, &mut ui).await
-}
-
-/// Runs staged mutagen sync with a custom UI implementation.
-/// Useful for testing with mock UIs.
-pub async fn run_staged_sync_with_ui<M: MutagenBackend, U: SyncUI>(
-    backend: Arc<M>,
-    projects: Vec<DiscoveredProject>,
-    init_only: bool,
-    ui: &mut U,
-) -> Result<(), MutagenRunnerError> {
-    let plan = match SyncPlan::new(&projects, init_only) {
-        Some(plan) => plan,
-        None => {
-            return Ok(());
-        }
-    };
-
-    run_staged_sync_impl(backend, &projects, &plan, ui).await
-}
-
-// ============================================================================
-// V2 API - Uses Operator Pattern Controller
-// ============================================================================
-
-/// Runs staged mutagen sync using the new Operator Pattern Controller.
-///
-/// This is the new recommended API that uses the reconciliation-based controller.
+/// Runs staged mutagen sync using the Operator Pattern Controller.
 ///
 /// # Arguments
 /// * `backend` - The Mutagen backend (real or mock)
 /// * `projects` - List of discovered projects
 /// * `options` - Sync options (init_stages, final_stage, keep_open)
-///
-/// # Example
-/// ```ignore
-/// let backend = Arc::new(RealMutagen::new(mutagen_bin));
-/// let projects = discover_projects(&base_path)?;
-/// let options = SyncOptions::default();
-///
-/// run_sync_v2(backend, projects, options, HeadlessUI).await?;
-/// ```
-pub async fn run_sync_v2<B: MutagenBackend + 'static, U: SyncUI>(
+/// * `ui` - The UI implementation
+pub async fn run_sync<B: MutagenBackend + 'static, U: SyncUI>(
     backend: Arc<B>,
     projects: Vec<DiscoveredProject>,
     options: SyncOptions,
     mut ui: U,
 ) -> Result<(), MutagenRunnerError> {
-    // Create DesiredState from projects
     let desired = state::DesiredState::from_projects(&projects);
 
     if desired.sessions.is_empty() {
         return Ok(());
     }
 
-    // Init UI
     let init_only = options.run_init_stages && !options.run_final_stage;
     ui.on_start(desired.stages.len(), init_only);
 
-    // Run controller
     let controller = controller::SyncController::new(backend, desired, options, ui);
     controller.run().await
 }
@@ -771,110 +429,10 @@ pub async fn run_sync_headless<B: MutagenBackend + 'static>(
     projects: Vec<DiscoveredProject>,
     options: SyncOptions,
 ) -> Result<(), MutagenRunnerError> {
-    run_sync_v2(backend, projects, options, HeadlessUI).await
+    run_sync(backend, projects, options, HeadlessUI).await
 }
 
-// ============================================================================
-// Core Sync Logic - einzige Implementierung (Legacy)
-// ============================================================================
 
-async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
-    backend: Arc<M>,
-    projects: &[DiscoveredProject],
-    plan: &SyncPlan<'_>,
-    ui: &mut U,
-) -> Result<(), MutagenRunnerError> {
-    ui.on_start(plan.stage_count(), plan.is_init_only());
-
-    // Cleanup sessions für gelöschte Projekte
-    let removed = cleanup_removed_projects(backend.as_ref(), projects).await?;
-    ui.on_cleanup(removed);
-
-    // Verarbeite jede Stage
-    for (stage_idx, stage) in plan.stages_to_run.iter().enumerate() {
-        let stage_projects: Vec<_> = plan.projects_by_stage.get(stage).unwrap().iter().cloned().collect();
-        let is_final = plan.is_final_stage(*stage);
-        let keep_open = plan.should_keep_open(*stage);
-
-        ui.on_stage_start(*stage, &stage_projects, is_final);
-        ui.set_stage_sessions(stage_idx, &stage_projects, is_final);
-
-        // Check quit vor dem Sync
-        if ui.check_quit()? {
-            return Err(MutagenRunnerError::UserAborted);
-        }
-
-        // Sync Sessions für diese Stage
-        // Final stage sessions should watch, non-final should not
-        let no_watch = !is_final;
-        let session_names: Vec<String> = stage_projects.iter()
-            .map(|p| p.session_name())
-            .collect();
-
-        let (term, kept, created) = sync_stage_sessions(backend.as_ref(), &stage_projects, no_watch).await?;
-        ui.mark_sessions_created(&session_names);
-        ui.on_sync_result(term, kept, created);
-
-        if keep_open {
-            // Final stage with --keep-open: Stay in watch mode until quit
-            ui.on_watch_mode();
-
-            loop {
-                ui.tick()?;
-
-                if ui.check_quit()? {
-                    break;
-                }
-
-                sleep(Duration::from_millis(50)).await;
-            }
-        } else {
-            // Wait for completion (both final and non-final stages)
-            ui.on_waiting(*stage);
-
-            loop {
-                ui.tick()?;
-
-                if ui.check_quit()? {
-                    if !is_final {
-                        terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
-                    }
-                    return Err(MutagenRunnerError::UserAborted);
-                }
-
-                // Check if all sessions are complete
-                let sessions = backend.list_sessions().await;
-                let all_complete = session_names.iter().all(|name| {
-                    sessions.iter()
-                        .find(|s| &s.name == name)
-                        .map(|s| s.is_complete())
-                        .unwrap_or(true)
-                });
-
-                if all_complete || ui.all_sessions_complete() {
-                    break;
-                }
-
-                sleep(Duration::from_millis(50)).await;
-            }
-
-            ui.on_stage_complete(*stage, is_final);
-            ui.tick()?;
-
-            // Only terminate non-final stages (init stages)
-            if !is_final {
-                terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
-                sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
-
-    if !plan.keep_open {
-        ui.on_complete();
-    }
-
-    Ok(())
-}
 
 // ============================================================================
 // Core Session Management (public für Tests)
@@ -982,32 +540,6 @@ pub async fn sync_sessions(
     Ok((removed + term, kept, created))
 }
 
-async fn terminate_sessions_by_name(
-    backend: &dyn MutagenBackend,
-    session_names: &[String],
-) -> Result<(), MutagenRunnerError> {
-    let sessions = backend.list_sessions().await;
-
-    for session in &sessions {
-        if session_names.contains(&session.name) {
-            let _ = backend.terminate_session(&session.identifier).await;
-        }
-    }
-    Ok(())
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-fn group_by_stage(projects: &[DiscoveredProject]) -> BTreeMap<i32, Vec<&DiscoveredProject>> {
-    let mut stages: BTreeMap<i32, Vec<&DiscoveredProject>> = BTreeMap::new();
-    for project in projects {
-        stages.entry(project.project.stage).or_default().push(project);
-    }
-    stages
-}
-
 // ============================================================================
 // Test Utilities - exportiert für Integrationstests
 // ============================================================================
@@ -1051,8 +583,8 @@ pub mod test_utils {
         fn on_cleanup(&mut self, removed: usize) {
             self.events.push(format!("cleanup:{}", removed));
         }
-        fn on_stage_start(&mut self, stage: i32, projects: &[&DiscoveredProject], is_final: bool) {
-            self.events.push(format!("stage_start:{}:{}:{}", stage, projects.len(), is_final));
+        fn on_stage_start(&mut self, stage: i32, session_count: usize, is_final: bool) {
+            self.events.push(format!("stage_start:{}:{}:{}", stage, session_count, is_final));
         }
         fn on_sync_result(&mut self, terminated: usize, kept: usize, created: usize) {
             self.events.push(format!("sync_result:{}:{}:{}", terminated, kept, created));
@@ -1083,9 +615,6 @@ pub mod test_utils {
         fn tick(&mut self) -> Result<(), MutagenRunnerError> {
             self.tick_count += 1;
             Ok(())
-        }
-        fn all_sessions_complete(&self) -> bool {
-            self.sessions_complete
         }
     }
 
@@ -1399,45 +928,6 @@ mod tests {
     use test_utils::*;
 
     // ========================================================================
-    // Tests: group_by_stage
-    // ========================================================================
-
-    #[test]
-    fn test_group_by_stage_empty() {
-        let projects: Vec<DiscoveredProject> = vec![];
-        let stages = group_by_stage(&projects);
-        assert!(stages.is_empty());
-    }
-
-    #[test]
-    fn test_group_by_stage_single_stage() {
-        let p1 = make_project("frontend", "docker://app", 0, "/root");
-        let p2 = make_project("backend", "docker://app", 0, "/root");
-        let projects = vec![p1, p2];
-
-        let stages = group_by_stage(&projects);
-
-        assert_eq!(stages.len(), 1);
-        assert_eq!(stages.get(&0).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn test_group_by_stage_multiple_stages() {
-        let p1 = make_project("shared", "docker://app", 0, "/root");
-        let p2 = make_project("frontend", "docker://app", 1, "/root");
-        let p3 = make_project("backend", "docker://app", 1, "/root");
-        let p4 = make_project("config", "docker://app", 2, "/root");
-        let projects = vec![p1, p2, p3, p4];
-
-        let stages = group_by_stage(&projects);
-
-        assert_eq!(stages.len(), 3);
-        assert_eq!(stages.get(&0).unwrap().len(), 1);
-        assert_eq!(stages.get(&1).unwrap().len(), 2);
-        assert_eq!(stages.get(&2).unwrap().len(), 1);
-    }
-
-    // ========================================================================
     // Tests: sync_stage_sessions - Neue Sessions erstellen
     // ========================================================================
 
@@ -1608,44 +1098,6 @@ mod tests {
 
         // Bei leerer Projektliste wird nichts entfernt
         assert_eq!(removed, 0);
-    }
-
-    // ========================================================================
-    // Tests: terminate_sessions_by_name
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_terminate_sessions_by_name() {
-        let backend = MockMutagen::new();
-
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-        backend.add_session(mock_session_for_project(&p1));
-        backend.add_session(mock_session_for_project(&p2));
-
-        let names = vec![p1.session_name()];
-        terminate_sessions_by_name(&backend, &names).await.unwrap();
-
-        assert_eq!(backend.terminated_sessions().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_terminate_sessions_by_name_multiple() {
-        let backend = MockMutagen::new();
-
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-        let p3 = make_project("config", "docker://app", 2, "/root");
-        backend.add_session(mock_session_for_project(&p1));
-        backend.add_session(mock_session_for_project(&p2));
-        backend.add_session(mock_session_for_project(&p3));
-
-        let names = vec![p1.session_name(), p2.session_name()];
-        terminate_sessions_by_name(&backend, &names).await.unwrap();
-
-        assert_eq!(backend.terminated_sessions().len(), 2);
-        // p3 sollte noch existieren
-        assert_eq!(backend.list_sessions().await.len(), 1);
     }
 
     // ========================================================================
@@ -1836,219 +1288,6 @@ mod tests {
         assert_eq!(backend.list_sessions().await.len(), 2);
     }
 
-    // ========================================================================
-    // Tests: run_staged_sync_with_ui
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_run_staged_sync_with_ui_single_stage() {
-        let backend = Arc::new(MockMutagen::new());
-        let project = make_project("test", "docker://test", 0, "/root");
-        let projects = vec![project];
-
-        let mut ui = MockUI::new().quit_after(1).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend, projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-        assert!(ui.events.contains(&"start:1:false".to_string()));
-        assert!(ui.events.contains(&"watch_mode".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_run_staged_sync_with_ui_init_only() {
-        let backend = Arc::new(MockMutagen::new());
-        let p1 = make_project("shared", "docker://app", 0, "/root");
-        let p2 = make_project("app", "docker://app", 1, "/root");
-        let projects = vec![p1, p2];
-
-        let mut ui = MockUI::new().with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend, projects, true, &mut ui).await;
-
-        assert!(result.is_ok());
-        // init_only=true sollte nur Stage 0 ausführen (nicht Stage 1)
-        assert!(ui.events.contains(&"start:1:true".to_string()));
-        assert!(ui.events.contains(&"complete".to_string()));
-        assert!(!ui.events.iter().any(|e| e.contains("watch_mode")));
-    }
-
-    #[tokio::test]
-    async fn test_run_staged_sync_with_ui_user_abort() {
-        let backend = Arc::new(MockMutagen::new());
-        let project = make_project("test", "docker://test", 0, "/root");
-        let projects = vec![project];
-
-        // Quit sofort
-        let mut ui = MockUI::new().quit_after(0);
-        let result = run_staged_sync_with_ui(backend, projects, false, &mut ui).await;
-
-        assert!(matches!(result, Err(MutagenRunnerError::UserAborted)));
-    }
-
-    // ========================================================================
-    // Tests: Multi-Stage Workflow
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_multi_stage_sequential_execution() {
-        let backend = Arc::new(MockMutagen::new());
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-        let p3 = make_project("config", "docker://app", 2, "/root");
-        let projects = vec![p0, p1, p2, p3];
-
-        // quit_after muss hoch genug sein für alle Stages + final watch mode
-        let mut ui = MockUI::new().quit_after(20).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Prüfe dass alle Stages in Reihenfolge gestartet wurden
-        let stage_starts: Vec<_> = ui.events.iter()
-            .filter(|e| e.starts_with("stage_start:"))
-            .collect();
-
-        assert_eq!(stage_starts.len(), 3); // 3 Stages
-        assert!(stage_starts[0].contains("stage_start:0:1:")); // Stage 0, 1 Projekt
-        assert!(stage_starts[1].contains("stage_start:1:2:")); // Stage 1, 2 Projekte
-        assert!(stage_starts[2].contains("stage_start:2:1:")); // Stage 2, 1 Projekt
-    }
-
-    #[tokio::test]
-    async fn test_non_final_stages_are_terminated() {
-        let backend = Arc::new(MockMutagen::new());
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("app", "docker://app", 1, "/root");
-        let projects = vec![p0.clone(), p1];
-
-        // quit_after muss hoch genug sein für Stage 0 completion + Stage 1 watch mode
-        let mut ui = MockUI::new().quit_after(15).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Stage 0 sollte complete event haben (non-final = false)
-        assert!(ui.events.contains(&"stage_complete:0:false".to_string()));
-
-        // Stage 0 Session sollte terminiert worden sein
-        let terminated = backend.terminated_sessions();
-        assert!(terminated.iter().any(|id| id.contains(&p0.session_name())));
-    }
-
-    #[tokio::test]
-    async fn test_final_stage_enters_watch_mode() {
-        let backend = Arc::new(MockMutagen::new());
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("app", "docker://app", 1, "/root");
-        let projects = vec![p0, p1];
-
-        // quit_after muss hoch genug sein für Stage 0 completion + Stage 1 watch mode
-        let mut ui = MockUI::new().quit_after(15).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend, projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Final stage sollte watch_mode event haben
-        assert!(ui.events.contains(&"watch_mode".to_string()));
-
-        // Aber kein stage_complete für Stage 1 (final stage goes to watch mode)
-        assert!(!ui.events.iter().any(|e| e.starts_with("stage_complete:1")));
-    }
-
-    #[tokio::test]
-    async fn test_init_only_skips_final_stage() {
-        let backend = Arc::new(MockMutagen::new());
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("config", "docker://app", 2, "/root");
-        let projects = vec![p0, p1, p2];
-
-        let mut ui = MockUI::new().with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, true, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Nur Stage 0 und 1 sollten ausgeführt werden (nicht Stage 2)
-        assert!(ui.events.contains(&"start:2:true".to_string())); // 2 stages
-        assert!(ui.events.iter().any(|e| e.contains("stage_start:0:")));
-        assert!(ui.events.iter().any(|e| e.contains("stage_start:1:")));
-        assert!(!ui.events.iter().any(|e| e.contains("stage_start:2:")));
-
-        // complete event sollte kommen
-        assert!(ui.events.contains(&"complete".to_string()));
-    }
-
-    // ========================================================================
-    // Tests: Session-Verwaltung im Full-Flow
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_existing_sessions_are_kept_in_full_flow() {
-        let backend = Arc::new(MockMutagen::new());
-        let project = make_project("test", "docker://test", 0, "/root");
-
-        // Session existiert bereits
-        backend.add_session(mock_session_for_project(&project));
-
-        let projects = vec![project];
-        let mut ui = MockUI::new().quit_after(1).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Keine neue Session sollte erstellt worden sein
-        assert!(backend.created_sessions().is_empty());
-
-        // sync_result sollte kept=1 zeigen
-        assert!(ui.events.contains(&"sync_result:0:1:0".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_config_change_replaces_session_in_full_flow() {
-        let backend = Arc::new(MockMutagen::new());
-
-        // Alte Session mit anderem Target
-        let old_project = make_project("test", "docker://old-target", 0, "/root");
-        backend.add_session(mock_session_for_project(&old_project));
-
-        // Neue Config mit neuem Target
-        let new_project = make_project("test", "docker://new-target", 0, "/root");
-        let projects = vec![new_project];
-
-        let mut ui = MockUI::new().quit_after(1).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // Alte Session terminiert, neue erstellt
-        assert_eq!(backend.terminated_sessions().len(), 1);
-        assert_eq!(backend.created_sessions().len(), 1);
-
-        // sync_result sollte terminated=1, kept=0, created=1 zeigen
-        assert!(ui.events.contains(&"sync_result:1:0:1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_deleted_project_cleanup_in_full_flow() {
-        let backend = Arc::new(MockMutagen::new());
-
-        // Zwei Sessions existieren
-        let kept_project = make_project("kept", "docker://app", 0, "/root");
-        let deleted_project = make_project("deleted", "docker://app", 0, "/root");
-        backend.add_session(mock_session_for_project(&kept_project));
-        backend.add_session(mock_session_for_project(&deleted_project));
-
-        // Nur kept_project in der neuen Config
-        let projects = vec![kept_project];
-
-        let mut ui = MockUI::new().quit_after(1).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
-
-        assert!(result.is_ok());
-
-        // deleted_project Session sollte entfernt worden sein (cleanup)
-        assert!(ui.events.contains(&"cleanup:1".to_string()));
-    }
 
     // ========================================================================
     // Tests: Sync-Modi
@@ -2180,47 +1419,43 @@ mod tests {
     async fn test_empty_projects_returns_early() {
         let backend = Arc::new(MockMutagen::new());
         let projects: Vec<DiscoveredProject> = vec![];
+        let options = SyncOptions { run_init_stages: true, run_final_stage: true, keep_open: false };
 
-        let mut ui = MockUI::new();
-        let result = run_staged_sync_with_ui(backend, projects, false, &mut ui).await;
+        let ui = MockUI::new();
+        let result = run_sync(backend, projects, options, ui).await;
 
         assert!(result.is_ok());
-        // Keine Events sollten gefeuert worden sein
-        assert!(ui.events.is_empty());
     }
 
     #[tokio::test]
-    async fn test_single_stage_with_init_only_returns_none() {
+    async fn test_single_stage_with_init_only_returns_early() {
         let backend = Arc::new(MockMutagen::new());
         // Nur ein Projekt in Stage 0 - mit init_only wird nichts ausgeführt
         let project = make_project("test", "docker://test", 0, "/root");
         let projects = vec![project];
+        let options = SyncOptions { run_init_stages: true, run_final_stage: false, keep_open: false };
 
-        let mut ui = MockUI::new();
-        let result = run_staged_sync_with_ui(backend, projects, true, &mut ui).await;
+        let ui = MockUI::new().with_sessions_complete();
+        let result = run_sync(backend, projects, options, ui).await;
 
-        // Sollte OK sein, aber keine Events (kein Stage zum Ausführen)
+        // Sollte OK sein (kein Stage zum Ausführen)
         assert!(result.is_ok());
-        assert!(ui.events.is_empty());
     }
 
     #[tokio::test]
-    async fn test_user_abort_during_non_final_stage_terminates_sessions() {
+    async fn test_user_abort_during_stage() {
         // Verwende pending sessions damit die Waiting-Loop nicht sofort beendet wird
         let backend = Arc::new(MockMutagen::with_pending_sessions());
         let p0 = make_project("shared", "docker://app", 0, "/root");
         let p1 = make_project("app", "docker://app", 1, "/root");
-        let projects = vec![p0.clone(), p1];
+        let projects = vec![p0, p1];
+        let options = SyncOptions { run_init_stages: true, run_final_stage: true, keep_open: false };
 
-        // Quit während Stage 0 waiting
-        let mut ui = MockUI::new().quit_after(3);
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
+        // Quit während waiting
+        let ui = MockUI::new().quit_after(3);
+        let result = run_sync(backend.clone(), projects, options, ui).await;
 
         assert!(matches!(result, Err(MutagenRunnerError::UserAborted)));
-
-        // Stage 0 Sessions sollten terminiert worden sein
-        let terminated = backend.terminated_sessions();
-        assert!(!terminated.is_empty());
     }
 
     #[tokio::test]
@@ -2230,67 +1465,15 @@ mod tests {
         let p2 = make_project("backend", "docker://app", 0, "/root");
         let p3 = make_project("shared", "docker://app", 0, "/root");
         let projects = vec![p1, p2, p3];
+        let options = SyncOptions { run_init_stages: true, run_final_stage: true, keep_open: false };
 
-        let mut ui = MockUI::new().quit_after(1).with_sessions_complete();
-        let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
+        let ui = MockUI::new().quit_after(1).with_sessions_complete();
+        let result = run_sync(backend.clone(), projects, options, ui).await;
 
         assert!(result.is_ok());
 
         // Alle 3 Sessions sollten erstellt worden sein
         assert_eq!(backend.created_sessions().len(), 3);
-
-        // sync_result sollte created=3 zeigen
-        assert!(ui.events.contains(&"sync_result:0:0:3".to_string()));
     }
 
-    // ========================================================================
-    // Tests: SyncPlan
-    // ========================================================================
-
-    #[test]
-    fn test_sync_plan_empty_projects() {
-        let projects: Vec<DiscoveredProject> = vec![];
-        let plan = SyncPlan::new(&projects, false);
-        assert!(plan.is_none());
-    }
-
-    #[test]
-    fn test_sync_plan_single_stage_init_only() {
-        let project = make_project("test", "docker://test", 0, "/root");
-        let projects = vec![project];
-
-        // Mit init_only und nur einer Stage gibt es nichts zu tun
-        let plan = SyncPlan::new(&projects, true);
-        assert!(plan.is_none());
-    }
-
-    #[test]
-    fn test_sync_plan_multiple_stages() {
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("app", "docker://app", 1, "/root");
-        let p2 = make_project("config", "docker://app", 2, "/root");
-        let projects = vec![p0, p1, p2];
-
-        let plan = SyncPlan::new(&projects, false).unwrap();
-
-        assert_eq!(plan.stage_count(), 3);
-        assert_eq!(plan.stages_to_run, vec![0, 1, 2]);
-        assert_eq!(plan.last_stage, 2);
-        assert!(plan.is_final_stage(2));
-        assert!(!plan.is_final_stage(1));
-    }
-
-    #[test]
-    fn test_sync_plan_init_only_excludes_final() {
-        let p0 = make_project("shared", "docker://app", 0, "/root");
-        let p1 = make_project("app", "docker://app", 1, "/root");
-        let projects = vec![p0, p1];
-
-        let plan = SyncPlan::new(&projects, true).unwrap();
-
-        assert_eq!(plan.stage_count(), 1);
-        assert_eq!(plan.stages_to_run, vec![0]);
-        // Mit init_only ist keine Stage final
-        assert!(!plan.is_final_stage(0));
-    }
 }

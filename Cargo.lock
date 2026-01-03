@@ -409,6 +409,7 @@ dependencies = [
  "crc32fast",
  "crossterm",
  "ebdev-mutagen-config",
+ "ebdev-mutagen-runner",
  "ratatui",
  "serde",
  "serde_json",

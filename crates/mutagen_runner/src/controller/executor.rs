@@ -89,7 +89,7 @@ fn execute_advance_stage<U: SyncUI>(
     state.advance_to_stage(stage);
 
     // UI benötigt die Session-Anzahl für diese Stage
-    ui.on_stage_start_v2(stage, session_count, is_final);
+    ui.on_stage_start(stage, session_count, is_final);
 
     Ok(ExecuteResult::Continue)
 }
