@@ -330,4 +330,62 @@ declare module "ebdev" {
      */
     tryRun(image: string, cmd: string[], options?: DockerRunOptions): Promise<ExecResult>;
   };
+
+  // =============================================================================
+  // On-the-fly Task Registration (Command Palette)
+  // =============================================================================
+
+  /**
+   * Task function type
+   */
+  export type TaskFn = () => Promise<void>;
+
+  /**
+   * Register a task that can be triggered from the TUI Command Palette.
+   * Press `/` in the TUI to open the Command Palette and select a task.
+   *
+   * @param name - Task name (used as identifier and display name if no description)
+   * @param fn - Task function to execute when triggered
+   *
+   * @example
+   * ```typescript
+   * task("fixtures", async () => {
+   *   await exec(["./load-fixtures.sh"]);
+   * });
+   * ```
+   */
+  export function task(name: string, fn: TaskFn): void;
+
+  /**
+   * Register a task that can be triggered from the TUI Command Palette.
+   * Press `/` in the TUI to open the Command Palette and select a task.
+   *
+   * @param name - Task name (used as identifier)
+   * @param description - Description shown in the Command Palette
+   * @param fn - Task function to execute when triggered
+   *
+   * @example
+   * ```typescript
+   * task("fixtures", "Load test fixtures into database", async () => {
+   *   await docker.exec("app", ["php", "artisan", "db:seed"]);
+   * });
+   * ```
+   */
+  export function task(name: string, description: string, fn: TaskFn): void;
+
+  /**
+   * Unregister a task from the Command Palette.
+   *
+   * @param name - Task name to unregister
+   *
+   * @example
+   * ```typescript
+   * // Register a task
+   * task("fixtures", loadFixtures);
+   *
+   * // Later, remove it
+   * untask("fixtures");
+   * ```
+   */
+  export function untask(name: string): void;
 }

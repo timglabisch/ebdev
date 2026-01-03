@@ -1,4 +1,4 @@
-import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage } from "ebdev";
+import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask } from "ebdev";
 
 export default defineConfig({
     toolchain: {
@@ -101,4 +101,43 @@ export async function test_stages() {
     await stage("Deploy");
     await exec(["echo", "Deploying..."], { name: "Deploy to staging" });
     await exec(["echo", "Done!"], { name: "Notify team" });
+}
+
+// Test on-the-fly task registration (Command Palette)
+export async function test_tasks() {
+    console.log("Testing on-the-fly task registration...");
+    console.log("Press '/' to open the Command Palette and run a task!");
+
+    // Register some tasks that can be triggered from the TUI
+    task("fixtures", "Load test fixtures into database", async () => {
+        await exec(["echo", "Loading fixtures..."]);
+        await exec(["sleep", "1"]);
+        await exec(["echo", "Fixtures loaded!"]);
+    });
+
+    task("clear-cache", "Clear all caches", async () => {
+        await exec(["echo", "Clearing caches..."]);
+        await exec(["sleep", "0.5"]);
+        await exec(["echo", "Caches cleared!"]);
+    });
+
+    task("restart", "Restart services", async () => {
+        await exec(["echo", "Restarting services..."]);
+        await exec(["sleep", "1"]);
+        await exec(["echo", "Services restarted!"]);
+    });
+
+    await stage("Main Task");
+    await exec(["echo", "Main task is running..."]);
+
+    // Simulate a long-running task
+    console.log("Waiting for 30 seconds... Press '/' to run a task!");
+    await exec(["sleep", "30"], { name: "Long running process" });
+
+    // Cleanup
+    untask("fixtures");
+    untask("clear-cache");
+    untask("restart");
+
+    console.log("Done!");
 }

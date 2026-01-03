@@ -321,3 +321,112 @@ export const docker = {
     });
   },
 };
+
+// =============================================================================
+// On-the-fly Task Registration (Command Palette)
+// =============================================================================
+
+/**
+ * Registry of tasks that can be triggered from the TUI Command Palette
+ * @type {Map<string, {description: string, fn: () => Promise<void>}>}
+ */
+const taskRegistry = new Map();
+
+/**
+ * Whether the trigger polling loop is running
+ */
+let triggerLoopRunning = false;
+
+/**
+ * Start the background loop that polls for task triggers from the TUI.
+ * Note: This is started automatically when the first task is registered.
+ * The polling is done by the TUI/Executor, this just checks for triggers.
+ */
+async function startTriggerLoop() {
+  if (triggerLoopRunning) return;
+  triggerLoopRunning = true;
+
+  // Run the polling loop in the background using a simple async loop
+  // We rely on op_poll_task_trigger being non-blocking
+  (async () => {
+    while (triggerLoopRunning) {
+      try {
+        const triggeredName = await Deno.core.ops.op_poll_task_trigger();
+        if (triggeredName) {
+          const task = taskRegistry.get(triggeredName);
+          if (task) {
+            // Start the task as a new stage
+            await Deno.core.ops.op_stage(`${triggeredName} (triggered)`);
+            try {
+              await task.fn();
+            } catch (e) {
+              console.error(`Task "${triggeredName}" failed:`, e);
+            }
+          }
+        }
+        // Yield to other tasks - the op itself is async so this provides backpressure
+      } catch (e) {
+        // Ignore errors during polling (e.g., if runtime is shutting down)
+        break;
+      }
+    }
+  })();
+}
+
+/**
+ * Register a task that can be triggered from the TUI Command Palette
+ * @param {string} name - Task name (used as identifier)
+ * @param {string | (() => Promise<void>)} descOrFn - Description or task function
+ * @param {(() => Promise<void>)} [maybeFn] - Task function (if description provided)
+ * @returns {void}
+ *
+ * @example
+ * // Simple form
+ * task("fixtures", loadFixtures);
+ *
+ * // With description
+ * task("fixtures", "Load test fixtures", loadFixtures);
+ */
+export function task(name, descOrFn, maybeFn) {
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Error("task: name must be a non-empty string");
+  }
+
+  let description;
+  let fn;
+
+  if (typeof descOrFn === "function") {
+    // task(name, fn)
+    description = name;
+    fn = descOrFn;
+  } else if (typeof descOrFn === "string" && typeof maybeFn === "function") {
+    // task(name, description, fn)
+    description = descOrFn;
+    fn = maybeFn;
+  } else {
+    throw new Error("task: invalid arguments. Use task(name, fn) or task(name, description, fn)");
+  }
+
+  // Store in local registry
+  taskRegistry.set(name, { description, fn });
+
+  // Register with the TUI
+  Deno.core.ops.op_task_register(name, description);
+
+  // Start the trigger loop if not already running
+  startTriggerLoop();
+}
+
+/**
+ * Unregister a task from the Command Palette
+ * @param {string} name - Task name to unregister
+ * @returns {void}
+ */
+export function untask(name) {
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Error("untask: name must be a non-empty string");
+  }
+
+  taskRegistry.delete(name);
+  Deno.core.ops.op_task_unregister(name);
+}

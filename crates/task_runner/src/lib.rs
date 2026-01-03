@@ -11,6 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 // Re-exports
 pub use command::Command;
 pub use command::CommandResult;
+pub use command::RegisteredTask;
+pub use command::TuiEvent;
 pub use ui::{HeadlessUI, TaskRunnerUI, TuiUI};
 
 #[derive(Debug, Error)]
@@ -39,6 +41,8 @@ fn next_command_id() -> CommandId {
 #[derive(Clone)]
 pub struct TaskRunnerHandle {
     tx: mpsc::UnboundedSender<ExecutorMessage>,
+    /// Receiver for TUI events (shared via Arc for cloning)
+    tui_event_rx: std::sync::Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<TuiEvent>>>,
 }
 
 impl TaskRunnerHandle {
@@ -79,6 +83,32 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
+    /// Register a task that can be triggered from the TUI
+    pub fn task_register(&self, name: &str, description: &str) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::TaskRegister {
+                name: name.to_string(),
+                description: description.to_string(),
+            })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Unregister a task
+    pub fn task_unregister(&self, name: &str) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::TaskUnregister { name: name.to_string() })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Poll for a task trigger event from the TUI (non-blocking)
+    pub async fn poll_task_trigger(&self) -> Option<String> {
+        let mut rx = self.tui_event_rx.lock().await;
+        match rx.try_recv() {
+            Ok(TuiEvent::TaskTriggered { name }) => Some(name),
+            Err(_) => None,
+        }
+    }
+
     /// Shutdown the executor
     pub fn shutdown(&self) -> Result<(), TaskRunnerError> {
         self.tx
@@ -88,10 +118,19 @@ impl TaskRunnerHandle {
 }
 
 /// Create a new task runner (internal)
-/// Returns a handle for sending commands and a receiver for the executor
-fn create_task_runner() -> (TaskRunnerHandle, mpsc::UnboundedReceiver<ExecutorMessage>) {
+/// Returns a handle for sending commands, a receiver for the executor, and a sender for TUI events
+fn create_task_runner() -> (
+    TaskRunnerHandle,
+    mpsc::UnboundedReceiver<ExecutorMessage>,
+    mpsc::UnboundedSender<TuiEvent>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (TaskRunnerHandle { tx }, rx)
+    let (tui_event_tx, tui_event_rx) = mpsc::unbounded_channel();
+    let handle = TaskRunnerHandle {
+        tx,
+        tui_event_rx: std::sync::Arc::new(tokio::sync::Mutex::new(tui_event_rx)),
+    };
+    (handle, rx, tui_event_tx)
 }
 
 /// Run the task runner with TUI visualization
@@ -107,13 +146,13 @@ pub fn run_with_tui(
         return Err(TaskRunnerError::NotATty);
     }
 
-    let (handle, rx) = create_task_runner();
+    let (handle, rx, tui_event_tx) = create_task_runner();
 
     // Use a sync channel to signal when TUI is ready
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     let thread_handle = std::thread::spawn(move || {
-        let mut executor = Executor::new(rx, default_cwd);
+        let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
         match TuiUI::new(task_name) {
             Ok(mut ui) => {
                 // Signal that we're ready
@@ -140,10 +179,10 @@ pub fn run_with_tui(
 pub fn run_headless(
     default_cwd: Option<String>,
 ) -> (TaskRunnerHandle, std::thread::JoinHandle<std::io::Result<()>>) {
-    let (handle, rx) = create_task_runner();
+    let (handle, rx, tui_event_tx) = create_task_runner();
 
     let thread_handle = std::thread::spawn(move || {
-        let mut executor = Executor::new(rx, default_cwd);
+        let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
         let mut ui = HeadlessUI::new();
         executor.run(&mut ui)
     });

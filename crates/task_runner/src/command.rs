@@ -194,6 +194,13 @@ pub struct CommandRequest {
     pub result_tx: oneshot::Sender<CommandResult>,
 }
 
+/// A registered task that can be triggered from the TUI
+#[derive(Debug, Clone)]
+pub struct RegisteredTask {
+    pub name: String,
+    pub description: String,
+}
+
 /// Control messages from Deno to the executor
 pub enum ExecutorMessage {
     /// Execute a command
@@ -204,6 +211,17 @@ pub enum ExecutorMessage {
     ParallelEnd,
     /// Begin a new stage (collapses previous stage, shows new header)
     StageBegin { name: String },
+    /// Register a task that can be triggered from TUI
+    TaskRegister { name: String, description: String },
+    /// Unregister a task
+    TaskUnregister { name: String },
     /// Shutdown the executor
     Shutdown,
+}
+
+/// Events from TUI back to TypeScript
+#[derive(Debug, Clone)]
+pub enum TuiEvent {
+    /// A registered task was triggered by the user
+    TaskTriggered { name: String },
 }

@@ -1,4 +1,4 @@
-use crate::command::{CommandId, CommandRequest, CommandResult, ExecutorMessage};
+use crate::command::{CommandId, CommandRequest, CommandResult, ExecutorMessage, RegisteredTask, TuiEvent};
 use crate::ui::TaskRunnerUI;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
@@ -29,10 +29,18 @@ pub struct Executor {
     /// Terminal-Größe für PTY
     pub rows: u16,
     pub cols: u16,
+    /// Channel um TUI Events zurück an TypeScript zu senden
+    tui_event_tx: mpsc::UnboundedSender<TuiEvent>,
+    /// Registrierte Tasks die von der TUI getriggert werden können
+    registered_tasks: Vec<RegisteredTask>,
 }
 
 impl Executor {
-    pub fn new(rx: mpsc::UnboundedReceiver<ExecutorMessage>, default_cwd: Option<String>) -> Self {
+    pub fn new(
+        rx: mpsc::UnboundedReceiver<ExecutorMessage>,
+        default_cwd: Option<String>,
+        tui_event_tx: mpsc::UnboundedSender<TuiEvent>,
+    ) -> Self {
         let (pty_tx, pty_rx) = std_mpsc::channel();
         Self {
             rx,
@@ -42,7 +50,21 @@ impl Executor {
             default_cwd,
             rows: 24,
             cols: 80,
+            tui_event_tx,
+            registered_tasks: Vec::new(),
         }
+    }
+
+    /// Get the list of registered tasks
+    pub fn registered_tasks(&self) -> &[RegisteredTask] {
+        &self.registered_tasks
+    }
+
+    /// Trigger a task (sends event back to TypeScript)
+    pub fn trigger_task(&self, name: &str) {
+        let _ = self.tui_event_tx.send(TuiEvent::TaskTriggered {
+            name: name.to_string(),
+        });
     }
 
     pub fn set_size(&mut self, rows: u16, cols: u16) {
@@ -67,6 +89,19 @@ impl Executor {
                     }
                     ExecutorMessage::StageBegin { name } => {
                         ui.on_stage_begin(&name);
+                    }
+                    ExecutorMessage::TaskRegister { name, description } => {
+                        // Remove existing task with same name if any
+                        self.registered_tasks.retain(|t| t.name != name);
+                        self.registered_tasks.push(RegisteredTask {
+                            name: name.clone(),
+                            description: description.clone(),
+                        });
+                        ui.on_task_registered(&name, &description);
+                    }
+                    ExecutorMessage::TaskUnregister { name } => {
+                        self.registered_tasks.retain(|t| t.name != name);
+                        ui.on_task_unregistered(&name);
                     }
                     ExecutorMessage::Shutdown => {
                         ui.cleanup()?;
@@ -105,7 +140,12 @@ impl Executor {
             // 3. UI tick (draw, handle input)
             ui.tick()?;
 
-            // 4. Check quit
+            // 4. Check for triggered tasks from Command Palette
+            if let Some(task_name) = ui.poll_triggered_task() {
+                self.trigger_task(&task_name);
+            }
+
+            // 5. Check quit
             if ui.check_quit()? {
                 ui.cleanup()?;
                 return Ok(());

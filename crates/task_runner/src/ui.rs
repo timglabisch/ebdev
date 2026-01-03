@@ -1,4 +1,4 @@
-use crate::command::{CommandId, CommandResult};
+use crate::command::{CommandId, CommandResult, RegisteredTask};
 use std::io::{self, Write};
 
 /// Trait für UI-Interaktionen während der Task-Ausführung.
@@ -25,6 +25,16 @@ pub trait TaskRunnerUI {
     /// Wird aufgerufen wenn eine neue Stage beginnt
     /// Kollabiert die vorherige Stage und zeigt den neuen Stage-Header
     fn on_stage_begin(&mut self, name: &str);
+
+    /// Wird aufgerufen wenn ein Task registriert wird (für Command Palette)
+    fn on_task_registered(&mut self, _name: &str, _description: &str) {}
+
+    /// Wird aufgerufen wenn ein Task deregistriert wird
+    fn on_task_unregistered(&mut self, _name: &str) {}
+
+    /// Gibt zurück ob ein Task getriggert werden soll (von TUI Command Palette)
+    /// Gibt den Namen des zu triggernden Tasks zurück, falls vorhanden
+    fn poll_triggered_task(&mut self) -> Option<String> { None }
 
     /// Prüft ob der Benutzer abbrechen möchte
     fn check_quit(&mut self) -> io::Result<bool>;
@@ -153,6 +163,13 @@ pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 // Display constants
 const MAX_STAGE_NAME_LEN: usize = 20;
 const MAX_TASK_NAME_LEN: usize = 25;
+
+// Command Palette constants
+const PALETTE_MAX_WIDTH: u16 = 60;
+const PALETTE_MAX_HEIGHT: u16 = 15;
+const PALETTE_MARGIN: u16 = 4;
+const PALETTE_NAME_LEN: usize = 20;
+const PALETTE_DESC_LEN: usize = 30;
 
 /// Task state for TUI visualization
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +325,14 @@ pub struct TuiUI {
     collapsed_stages: Vec<CollapsedStage>,
     /// Current stage name (None = default stage)
     current_stage: Option<String>,
+    /// Registered tasks for Command Palette
+    registered_tasks: Vec<RegisteredTask>,
+    /// Command Palette state
+    command_palette_open: bool,
+    command_palette_input: String,
+    command_palette_selected: usize,
+    /// Task that was triggered and needs to be returned via poll_triggered_task
+    triggered_task: Option<String>,
 }
 
 impl TuiUI {
@@ -332,10 +357,41 @@ impl TuiUI {
             cols,
             collapsed_stages: Vec::new(),
             current_stage: None,
+            registered_tasks: Vec::new(),
+            command_palette_open: false,
+            command_palette_input: String::new(),
+            command_palette_selected: 0,
+            triggered_task: None,
         })
     }
 
+    /// Get filtered tasks matching the current input
+    fn get_filtered_tasks(&self) -> Vec<&RegisteredTask> {
+        let input_lower = self.command_palette_input.to_lowercase();
+        self.registered_tasks
+            .iter()
+            .filter(|t| {
+                if input_lower.is_empty() {
+                    true
+                } else {
+                    t.name.to_lowercase().contains(&input_lower)
+                        || t.description.to_lowercase().contains(&input_lower)
+                }
+            })
+            .collect()
+    }
+
     fn draw(&mut self) -> io::Result<()> {
+        // Collect all data we need before borrowing terminal mutably
+        let command_palette_open = self.command_palette_open;
+        let command_palette_input = self.command_palette_input.clone();
+        let command_palette_selected = self.command_palette_selected;
+        let filtered_tasks: Vec<RegisteredTask> = self.get_filtered_tasks()
+            .into_iter()
+            .cloned()
+            .collect();
+        let has_registered_tasks = !self.registered_tasks.is_empty();
+
         let terminal = self.terminal.as_mut().unwrap();
         let tasks = &self.tasks;
         let task_name = &self.task_name;
@@ -371,10 +427,85 @@ impl TuiUI {
             }
 
             // Help line
-            Self::draw_help(frame, chunks[2]);
+            Self::draw_help(frame, chunks[2], has_registered_tasks);
+
+            // Command Palette overlay
+            if command_palette_open {
+                Self::draw_command_palette(frame, area, &command_palette_input, &filtered_tasks, command_palette_selected);
+            }
         })?;
 
         Ok(())
+    }
+
+    fn draw_command_palette(frame: &mut Frame, area: Rect, input: &str, filtered_tasks: &[RegisteredTask], selected: usize) {
+        use ratatui::widgets::Clear;
+
+        // Center the palette
+        let width = PALETTE_MAX_WIDTH.min(area.width.saturating_sub(PALETTE_MARGIN));
+        let height = PALETTE_MAX_HEIGHT.min(area.height.saturating_sub(PALETTE_MARGIN));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let palette_area = Rect::new(x, y, width, height);
+
+        // Clear background
+        frame.render_widget(Clear, palette_area);
+
+        // Layout: input + list
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Input
+                Constraint::Min(3),    // Task list
+            ])
+            .split(palette_area);
+
+        // Input field
+        let input_text = if input.is_empty() {
+            Span::styled("Type to search...", Style::default().fg(Color::DarkGray))
+        } else {
+            Span::raw(input)
+        };
+        let input_widget = Paragraph::new(input_text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Run Task (/) "));
+        frame.render_widget(input_widget, chunks[0]);
+
+        // Task list
+        let lines: Vec<Line> = if filtered_tasks.is_empty() {
+            vec![Line::from(Span::styled(
+                "  No tasks registered",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            filtered_tasks.iter().enumerate().map(|(i, task)| {
+                let is_selected = i == selected;
+                let prefix = if is_selected { "→ " } else { "  " };
+                let style = if is_selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                let name = truncate_string(&task.name, PALETTE_NAME_LEN);
+                let desc = truncate_string(&task.description, PALETTE_DESC_LEN);
+
+                Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(name, style),
+                    Span::raw("  "),
+                    Span::styled(desc, Style::default().fg(Color::DarkGray)),
+                ])
+            }).collect()
+        };
+
+        let task_list = Paragraph::new(lines)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)));
+        frame.render_widget(task_list, chunks[1]);
     }
 
     fn draw_header(frame: &mut Frame, area: Rect, task_name: &str, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage]) {
@@ -539,8 +670,13 @@ impl TuiUI {
         }
     }
 
-    fn draw_help(frame: &mut Frame, area: Rect) {
-        let help = Paragraph::new(" Up/Down/Tab: select task | PageUp/Down: scroll | q/Esc: quit ")
+    fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool) {
+        let help_text = if has_registered_tasks {
+            " Up/Down/Tab: select | PageUp/Down: scroll | /: run task | q/Esc: quit "
+        } else {
+            " Up/Down/Tab: select task | PageUp/Down: scroll | q/Esc: quit "
+        };
+        let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(help, area);
     }
@@ -549,10 +685,23 @@ impl TuiUI {
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    if self.command_palette_open {
+                        // Handle Command Palette input
+                        return self.handle_command_palette_input(key.code);
+                    }
+
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
                             self.should_quit = true;
                             return Ok(true);
+                        }
+                        KeyCode::Char('/') => {
+                            // Open Command Palette if there are registered tasks
+                            if !self.registered_tasks.is_empty() {
+                                self.command_palette_open = true;
+                                self.command_palette_input.clear();
+                                self.command_palette_selected = 0;
+                            }
                         }
                         KeyCode::Tab | KeyCode::Down => {
                             if !self.tasks.is_empty() {
@@ -576,6 +725,52 @@ impl TuiUI {
                     }
                 }
             }
+        }
+        Ok(false)
+    }
+
+    fn handle_command_palette_input(&mut self, key: KeyCode) -> io::Result<bool> {
+        let filtered_count = self.get_filtered_tasks().len();
+
+        match key {
+            KeyCode::Esc => {
+                // Close Command Palette
+                self.command_palette_open = false;
+                self.command_palette_input.clear();
+            }
+            KeyCode::Enter => {
+                // Trigger selected task
+                let filtered_tasks = self.get_filtered_tasks();
+                if let Some(task) = filtered_tasks.get(self.command_palette_selected) {
+                    self.triggered_task = Some(task.name.clone());
+                }
+                // Close palette
+                self.command_palette_open = false;
+                self.command_palette_input.clear();
+            }
+            KeyCode::Up => {
+                if filtered_count > 0 {
+                    self.command_palette_selected = self.command_palette_selected
+                        .saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if filtered_count > 0 {
+                    self.command_palette_selected = (self.command_palette_selected + 1)
+                        .min(filtered_count.saturating_sub(1));
+                }
+            }
+            KeyCode::Backspace => {
+                self.command_palette_input.pop();
+                // Reset selection when input changes
+                self.command_palette_selected = 0;
+            }
+            KeyCode::Char(c) => {
+                self.command_palette_input.push(c);
+                // Reset selection when input changes
+                self.command_palette_selected = 0;
+            }
+            _ => {}
         }
         Ok(false)
     }
@@ -648,6 +843,23 @@ impl TaskRunnerUI for TuiUI {
 
         // Set new stage name
         self.current_stage = Some(name.to_string());
+    }
+
+    fn on_task_registered(&mut self, name: &str, description: &str) {
+        // Remove existing task with same name if any
+        self.registered_tasks.retain(|t| t.name != name);
+        self.registered_tasks.push(RegisteredTask {
+            name: name.to_string(),
+            description: description.to_string(),
+        });
+    }
+
+    fn on_task_unregistered(&mut self, name: &str) {
+        self.registered_tasks.retain(|t| t.name != name);
+    }
+
+    fn poll_triggered_task(&mut self) -> Option<String> {
+        self.triggered_task.take()
     }
 
     fn check_quit(&mut self) -> io::Result<bool> {

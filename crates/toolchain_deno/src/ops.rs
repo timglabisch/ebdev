@@ -243,6 +243,63 @@ pub async fn op_stage(
     Ok(())
 }
 
+#[op2(async)]
+pub async fn op_task_register(
+    state: Rc<RefCell<OpState>>,
+    #[string] name: String,
+    #[string] description: String,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.task_register(&name, &description)
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
+#[op2(async)]
+pub async fn op_task_unregister(
+    state: Rc<RefCell<OpState>>,
+    #[string] name: String,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.task_unregister(&name)
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
+#[op2(async)]
+#[string]
+pub async fn op_poll_task_trigger(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Option<String>, JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        let result = h.poll_task_trigger().await;
+        if result.is_none() {
+            // Small delay to prevent busy-waiting when no trigger is available
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(result)
+    } else {
+        Ok(None)
+    }
+}
+
 async fn execute_command(
     handle: Option<TaskRunnerHandle>,
     command: Command,
@@ -299,5 +356,8 @@ deno_core::extension!(
         op_parallel_begin,
         op_parallel_end,
         op_stage,
+        op_task_register,
+        op_task_unregister,
+        op_poll_task_trigger,
     ],
 );
