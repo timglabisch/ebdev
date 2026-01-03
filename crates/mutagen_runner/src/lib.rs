@@ -44,6 +44,19 @@ pub async fn run_staged_sync(
     }
 }
 
+/// Runs only init stages (all except the final watch stage).
+/// Automatically uses TUI if running in a terminal, otherwise uses headless mode.
+pub async fn run_staged_sync_init(
+    mutagen_bin: &Path,
+    projects: Vec<DiscoveredProject>,
+) -> Result<(), MutagenRunnerError> {
+    if std::io::stdout().is_terminal() {
+        run_staged_sync_init_tui(mutagen_bin, projects).await
+    } else {
+        run_staged_sync_init_headless(mutagen_bin, projects).await
+    }
+}
+
 /// Runs staged mutagen sync with TUI visualization
 pub async fn run_staged_sync_tui(
     mutagen_bin: &Path,
@@ -172,6 +185,228 @@ pub async fn run_staged_sync_headless(
                 terminate_session(mutagen_bin, name).await?;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Runs only init stages (all except the final watch stage) without TUI
+pub async fn run_staged_sync_init_headless(
+    mutagen_bin: &Path,
+    projects: Vec<DiscoveredProject>,
+) -> Result<(), MutagenRunnerError> {
+    if projects.is_empty() {
+        println!("No mutagen sync projects found.");
+        return Ok(());
+    }
+
+    // Group projects by stage
+    let mut stages: BTreeMap<i32, Vec<&DiscoveredProject>> = BTreeMap::new();
+    for project in &projects {
+        stages
+            .entry(project.project.stage)
+            .or_default()
+            .push(project);
+    }
+
+    let stage_keys: Vec<i32> = stages.keys().copied().collect();
+    let last_stage = *stage_keys.last().unwrap();
+
+    // Filter out the last stage
+    let init_stage_keys: Vec<i32> = stage_keys.into_iter().filter(|&s| s != last_stage).collect();
+
+    if init_stage_keys.is_empty() {
+        println!("No init stages to run (only final stage exists).");
+        return Ok(());
+    }
+
+    println!(
+        "Running {} init stage(s) (excluding final watch stage)",
+        init_stage_keys.len()
+    );
+
+    for stage in init_stage_keys {
+        let stage_projects = stages.get(&stage).unwrap();
+
+        println!();
+        println!(
+            "=== Stage {} ({} project(s)) ===",
+            stage,
+            stage_projects.len()
+        );
+
+        // Create sync sessions for this stage (all with no_watch since we're doing init)
+        let mut session_names = Vec::new();
+        for project in stage_projects {
+            let session_name = create_sync_session(mutagen_bin, project, true).await?;
+            session_names.push(session_name);
+        }
+
+        // Wait for sync completion, then terminate
+        println!("Waiting for stage {} to complete sync...", stage);
+
+        for name in &session_names {
+            wait_for_sync_complete_headless(mutagen_bin, name).await?;
+        }
+
+        println!("Stage {} sync complete. Terminating sessions...", stage);
+
+        for name in &session_names {
+            terminate_session(mutagen_bin, name).await?;
+        }
+    }
+
+    println!();
+    println!("All init stages completed successfully.");
+
+    Ok(())
+}
+
+/// Runs only init stages (all except the final watch stage) with TUI
+pub async fn run_staged_sync_init_tui(
+    mutagen_bin: &Path,
+    projects: Vec<DiscoveredProject>,
+) -> Result<(), MutagenRunnerError> {
+    if projects.is_empty() {
+        println!("No mutagen sync projects found.");
+        return Ok(());
+    }
+
+    // Group projects by stage
+    let mut stages: BTreeMap<i32, Vec<&DiscoveredProject>> = BTreeMap::new();
+    for project in &projects {
+        stages
+            .entry(project.project.stage)
+            .or_default()
+            .push(project);
+    }
+
+    let stage_keys: Vec<i32> = stages.keys().copied().collect();
+    let last_stage = *stage_keys.last().unwrap();
+
+    // Filter out the last stage
+    let init_stage_keys: Vec<i32> = stage_keys.into_iter().filter(|&s| s != last_stage).collect();
+
+    if init_stage_keys.is_empty() {
+        println!("No init stages to run (only final stage exists).");
+        return Ok(());
+    }
+
+    let total_stages = init_stage_keys.len() as i32;
+
+    // Initialize TUI
+    let mut terminal = tui::init().map_err(MutagenRunnerError::Execution)?;
+    let mut app = App::new(total_stages);
+
+    // Channel for communication
+    let (tx, mut rx) = mpsc::channel::<TuiMessage>(100);
+
+    // Start status poller
+    let mutagen_bin_clone = mutagen_bin.to_path_buf();
+    let poller_handle = tui::spawn_status_poller(mutagen_bin_clone, tx.clone());
+
+    let result = run_init_stages_with_tui(
+        &mut terminal,
+        &mut app,
+        &mut rx,
+        mutagen_bin,
+        &stages,
+        &init_stage_keys,
+    )
+    .await;
+
+    // Cleanup
+    poller_handle.abort();
+    tui::restore().map_err(MutagenRunnerError::Execution)?;
+
+    if result.is_ok() {
+        println!("All init stages completed successfully.");
+    }
+
+    result
+}
+
+async fn run_init_stages_with_tui(
+    terminal: &mut tui::Tui,
+    app: &mut App,
+    rx: &mut mpsc::Receiver<TuiMessage>,
+    mutagen_bin: &Path,
+    stages: &BTreeMap<i32, Vec<&DiscoveredProject>>,
+    stage_keys: &[i32],
+) -> Result<(), MutagenRunnerError> {
+    for (stage_idx, stage) in stage_keys.iter().enumerate() {
+        let stage_projects = stages.get(stage).unwrap();
+
+        // Prepare session states
+        let sessions: Vec<SessionState> = stage_projects
+            .iter()
+            .map(|p| SessionState {
+                name: p.project.name.clone(),
+                alpha: p.resolved_directory.to_string_lossy().to_string(),
+                beta: p.project.target.clone(),
+                status: None,
+                created: false,
+            })
+            .collect();
+
+        // false = not final stage (all init stages are non-final)
+        app.set_stage(stage_idx as i32, sessions, false);
+
+        // Create sync sessions for this stage
+        for project in stage_projects {
+            // Check for quit before creating each session
+            terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
+            if tui::handle_events().map_err(MutagenRunnerError::Execution)? {
+                app.should_quit = true;
+                terminate_all_sessions(mutagen_bin, stage_projects).await;
+                return Err(MutagenRunnerError::UserAborted);
+            }
+
+            create_sync_session(mutagen_bin, project, true).await?;
+            app.mark_session_created(&project.project.name);
+
+            // Small delay to let mutagen start
+            sleep(Duration::from_millis(200)).await;
+        }
+
+        // Wait for sync completion, then terminate
+        app.set_message(format!("Waiting for stage {} to complete...", stage + 1));
+
+        loop {
+            terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
+
+            // Handle events
+            if tui::handle_events().map_err(MutagenRunnerError::Execution)? {
+                app.should_quit = true;
+                terminate_all_sessions(mutagen_bin, stage_projects).await;
+                return Err(MutagenRunnerError::UserAborted);
+            }
+
+            // Process status updates
+            while let Ok(msg) = rx.try_recv() {
+                if let TuiMessage::UpdateStatus(sessions) = msg {
+                    app.update_session_status(&sessions);
+                }
+            }
+
+            // Check if all sessions complete
+            if app.all_sessions_complete() {
+                break;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        // Terminate sessions for this stage
+        app.set_message(format!("Stage {} complete. Terminating...", stage + 1));
+        terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
+
+        for project in stage_projects {
+            terminate_session(mutagen_bin, &project.project.name).await?;
+        }
+
+        // Small delay before next stage
+        sleep(Duration::from_millis(500)).await;
     }
 
     Ok(())

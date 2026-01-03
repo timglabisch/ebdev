@@ -6,7 +6,7 @@ use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
 use ebdev_mutagen_config::{discover_projects, SyncMode};
-use ebdev_mutagen_runner::run_staged_sync;
+use ebdev_mutagen_runner::{run_staged_sync, run_staged_sync_init};
 
 #[derive(Parser)]
 #[command(name = "ebdev", version, about = "easybill development toolchain")]
@@ -58,7 +58,11 @@ enum MutagenCommands {
     /// Show discovered mutagen sync projects (debug)
     Debug,
     /// Start staged mutagen sync
-    Sync,
+    Sync {
+        /// Run only init stages (all except the final watch stage)
+        #[arg(long)]
+        init: bool,
+    },
 }
 
 fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>) -> OsString {
@@ -193,7 +197,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     println!();
                 }
             }
-            MutagenCommands::Sync => {
+            MutagenCommands::Sync { init } => {
                 let mutagen_version = config.toolchain.mutagen
                     .as_ref()
                     .map(|m| m.version.as_str())
@@ -212,7 +216,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let mutagen_bin = mutagen_env.bin_path();
                 let projects = discover_projects(&base_path)?;
 
-                run_staged_sync(&mutagen_bin, projects).await?;
+                if init {
+                    run_staged_sync_init(&mutagen_bin, projects).await?;
+                } else {
+                    run_staged_sync(&mutagen_bin, projects).await?;
+                }
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {
