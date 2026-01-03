@@ -1,4 +1,4 @@
-import { defineConfig } from "ebdev";
+import { defineConfig, exec, shell, parallel } from "ebdev";
 
 export default defineConfig({
     toolchain: {
@@ -17,3 +17,36 @@ export default defineConfig({
         }],
     },
 });
+
+// =============================================================================
+// Tasks - exported async functions that can be run with `ebdev task <name>`
+// =============================================================================
+
+export async function hello() {
+    await exec(["echo", "Hello from ebdev task runner!"]);
+}
+
+export async function greet() {
+    const name = "World";
+    await exec(["echo", `Hello, ${name}!`]);
+}
+
+export async function info() {
+    console.log("Running multiple commands...");
+    await exec(["uname", "-a"]);
+    await exec(["date"]);
+}
+
+export async function test_parallel() {
+    console.log("Running commands in parallel...");
+    await parallel(
+        () => exec(["echo", "Task 1"]),
+        () => exec(["echo", "Task 2"]),
+        () => exec(["echo", "Task 3"]),
+    );
+    console.log("All parallel tasks completed!");
+}
+
+export async function test_shell() {
+    await shell("echo 'Using shell:' && date && echo 'Done!'");
+}
