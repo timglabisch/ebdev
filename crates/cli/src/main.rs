@@ -219,7 +219,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 if init {
                     run_staged_sync_init(&mutagen_bin, projects).await?;
                 } else {
-                    run_staged_sync(&mutagen_bin, projects).await?;
+                    run_staged_sync(&mutagen_bin, &base_path, projects).await?;
                 }
             }
         },

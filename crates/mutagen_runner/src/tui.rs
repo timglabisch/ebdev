@@ -220,6 +220,7 @@ pub enum TuiMessage {
     SessionCreated(String),
     StageComplete,
     SetMessage(String),
+    ConfigChanged,
     Quit,
 }
 

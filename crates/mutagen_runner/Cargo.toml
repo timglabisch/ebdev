@@ -5,13 +5,15 @@ edition.workspace = true
 
 [dependencies]
 ebdev-mutagen-config = { path = "../mutagen_config" }
-tokio = { workspace = true, features = ["process", "time"] }
+tokio = { workspace = true, features = ["process", "time", "sync"] }
 anyhow.workspace = true
 thiserror.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+crc32fast.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -100,10 +100,79 @@ pub struct DiscoveredProject {
     pub resolved_directory: PathBuf,
     /// Path to the config file this project was found in
     pub config_path: PathBuf,
+    /// Path to the root config file (the base_path .ebdev.toml)
+    pub root_config_path: PathBuf,
+}
+
+impl DiscoveredProject {
+    /// Compute CRC32 of the configuration content (for detecting config changes)
+    pub fn config_crc32(&self) -> u32 {
+        let mut hasher = crc32fast::Hasher::new();
+        // Hash all relevant config fields
+        hasher.update(self.project.name.as_bytes());
+        hasher.update(self.project.target.as_bytes());
+        if let Some(ref dir) = self.project.directory {
+            hasher.update(dir.to_string_lossy().as_bytes());
+        }
+        hasher.update(&[self.project.mode as u8]);
+        hasher.update(&self.project.polling.enabled.to_string().as_bytes());
+        hasher.update(&self.project.polling.interval.to_le_bytes());
+        for pattern in &self.project.ignore {
+            hasher.update(pattern.as_bytes());
+        }
+        hasher.update(&self.project.stage.to_le_bytes());
+        hasher.finalize()
+    }
+
+    /// Compute CRC32 of the root config path (for scoping sessions to this installation)
+    pub fn root_crc32(&self) -> u32 {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(self.root_config_path.to_string_lossy().as_bytes());
+        hasher.finalize()
+    }
+
+    /// Generate the session name with CRC32 suffixes
+    /// Format: {project_name}_{config_crc32:08x}_{root_crc32:08x}
+    pub fn session_name(&self) -> String {
+        format!(
+            "{}_{:08x}_{:08x}",
+            self.project.name,
+            self.config_crc32(),
+            self.root_crc32()
+        )
+    }
+
+    /// Extract root_crc32 suffix from a session name (last 8 hex chars)
+    pub fn extract_root_crc32_suffix(session_name: &str) -> Option<&str> {
+        // Format: name_configcrc_rootcrc
+        // We need the last 8 characters (root_crc32)
+        if session_name.len() < 18 {
+            // minimum: a_xxxxxxxx_xxxxxxxx
+            return None;
+        }
+        let parts: Vec<&str> = session_name.rsplitn(2, '_').collect();
+        if parts.len() == 2 && parts[0].len() == 8 {
+            Some(parts[0])
+        } else {
+            None
+        }
+    }
+
+    /// Check if a session name belongs to this root installation
+    pub fn session_belongs_to_root(&self, session_name: &str) -> bool {
+        let root_suffix = format!("{:08x}", self.root_crc32());
+        Self::extract_root_crc32_suffix(session_name)
+            .map(|s| s == root_suffix)
+            .unwrap_or(false)
+    }
 }
 
 /// Discovers all mutagen sync projects by recursively walking from base_path
 pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, MutagenConfigError> {
+    // Canonicalize base_path to get absolute path for root_config_path
+    let canonical_base = base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf());
+    let root_config_path = canonical_base.join(".ebdev.toml");
+
     let mut discovered = Vec::new();
 
     for entry in WalkDir::new(base_path)
@@ -141,6 +210,7 @@ pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, Mut
                         project,
                         resolved_directory,
                         config_path: config_path.clone(),
+                        root_config_path: root_config_path.clone(),
                     });
                 }
             }
@@ -148,6 +218,16 @@ pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, Mut
     }
 
     Ok(discovered)
+}
+
+/// Returns a list of all config file paths that were discovered
+pub fn get_config_paths(projects: &[DiscoveredProject]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = projects.iter()
+        .map(|p| p.config_path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

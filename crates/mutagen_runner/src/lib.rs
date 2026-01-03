@@ -1,14 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-use ebdev_mutagen_config::{DiscoveredProject, SyncMode};
+use ebdev_mutagen_config::{discover_projects, get_config_paths, DiscoveredProject, SyncMode};
 
 pub mod status;
 pub mod tui;
@@ -29,27 +30,152 @@ pub enum MutagenRunnerError {
 
     #[error("User aborted")]
     UserAborted,
+
+    #[error("Config error: {0}")]
+    Config(#[from] ebdev_mutagen_config::MutagenConfigError),
+
+    #[error("Watch error: {0}")]
+    WatchError(String),
+}
+
+/// Cleanup all sessions that belong to this root installation (by root_crc32 suffix)
+pub async fn cleanup_sessions_by_root(
+    mutagen_bin: &Path,
+    root_crc32: u32,
+) -> Result<Vec<String>, MutagenRunnerError> {
+    let root_suffix = format!("{:08x}", root_crc32);
+    let sessions = poll_status(mutagen_bin).await;
+    let mut terminated = Vec::new();
+
+    for session in sessions {
+        if let Some(suffix) = DiscoveredProject::extract_root_crc32_suffix(&session.name) {
+            if suffix == root_suffix {
+                terminate_session_by_name(mutagen_bin, &session.name).await?;
+                terminated.push(session.name);
+            }
+        }
+    }
+
+    Ok(terminated)
+}
+
+/// Start watching config files and return a channel that receives change events
+fn start_config_watcher(
+    config_paths: Vec<PathBuf>,
+) -> Result<(RecommendedWatcher, std::sync::mpsc::Receiver<PathBuf>), MutagenRunnerError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        if let Ok(event) = res {
+            if event.kind.is_modify() || event.kind.is_create() {
+                for path in event.paths {
+                    let _ = tx.send(path);
+                }
+            }
+        }
+    })
+    .map_err(|e| MutagenRunnerError::WatchError(e.to_string()))?;
+
+    // Watch all config file directories (watching files directly can be unreliable)
+    for path in &config_paths {
+        if let Some(parent) = path.parent() {
+            watcher
+                .watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|e| MutagenRunnerError::WatchError(e.to_string()))?;
+        }
+    }
+
+    Ok((watcher, rx))
+}
+
+/// Synchronize sessions: terminate outdated ones, keep matching ones, create new ones
+/// Returns (terminated, kept, created) session names
+pub async fn sync_sessions(
+    mutagen_bin: &Path,
+    projects: &[DiscoveredProject],
+    no_watch: bool,
+) -> Result<(Vec<String>, Vec<String>, Vec<String>), MutagenRunnerError> {
+    if projects.is_empty() {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+
+    let root_crc32 = projects[0].root_crc32();
+    let root_suffix = format!("{:08x}", root_crc32);
+
+    // Get current sessions
+    let current_sessions = poll_status(mutagen_bin).await;
+
+    // Build set of expected session names
+    let expected_names: HashSet<String> = projects.iter()
+        .map(|p| p.session_name())
+        .collect();
+
+    let mut terminated = Vec::new();
+    let mut kept = Vec::new();
+
+    // Check existing sessions
+    for session in &current_sessions {
+        if let Some(suffix) = DiscoveredProject::extract_root_crc32_suffix(&session.name) {
+            if suffix == root_suffix {
+                if expected_names.contains(&session.name) {
+                    // Session still valid, keep it
+                    kept.push(session.name.clone());
+                } else {
+                    // Session outdated (config changed or project removed), terminate it
+                    terminate_session_by_name(mutagen_bin, &session.name).await?;
+                    terminated.push(session.name.clone());
+                }
+            }
+        }
+    }
+
+    // Create sessions that don't exist yet
+    let mut created = Vec::new();
+    for project in projects {
+        let session_name = project.session_name();
+        if !kept.contains(&session_name) {
+            create_sync_session(mutagen_bin, project, no_watch).await?;
+            created.push(session_name);
+        }
+    }
+
+    Ok((terminated, kept, created))
 }
 
 /// Runs staged mutagen sync.
 /// Automatically uses TUI if running in a terminal, otherwise uses headless mode.
+/// Supports hot-reload: watches config files and updates sessions when they change.
 pub async fn run_staged_sync(
     mutagen_bin: &Path,
+    base_path: &Path,
     projects: Vec<DiscoveredProject>,
 ) -> Result<(), MutagenRunnerError> {
     if std::io::stdout().is_terminal() {
-        run_staged_sync_tui(mutagen_bin, projects).await
+        run_staged_sync_tui(mutagen_bin, base_path, projects).await
     } else {
-        run_staged_sync_headless(mutagen_bin, projects).await
+        run_staged_sync_headless(mutagen_bin, base_path, projects).await
     }
 }
 
 /// Runs only init stages (all except the final watch stage).
 /// Automatically uses TUI if running in a terminal, otherwise uses headless mode.
+/// Before starting, cleans up all existing sessions belonging to this root installation.
 pub async fn run_staged_sync_init(
     mutagen_bin: &Path,
     projects: Vec<DiscoveredProject>,
 ) -> Result<(), MutagenRunnerError> {
+    if projects.is_empty() {
+        println!("No mutagen sync projects found.");
+        return Ok(());
+    }
+
+    // Cleanup all sessions belonging to this root installation before starting
+    let root_crc32 = projects[0].root_crc32();
+    let terminated = cleanup_sessions_by_root(mutagen_bin, root_crc32).await?;
+    if !terminated.is_empty() {
+        println!("Cleaned up {} existing session(s)", terminated.len());
+    }
+
     if std::io::stdout().is_terminal() {
         run_staged_sync_init_tui(mutagen_bin, projects).await
     } else {
@@ -60,6 +186,7 @@ pub async fn run_staged_sync_init(
 /// Runs staged mutagen sync with TUI visualization
 pub async fn run_staged_sync_tui(
     mutagen_bin: &Path,
+    base_path: &Path,
     projects: Vec<DiscoveredProject>,
 ) -> Result<(), MutagenRunnerError> {
     if projects.is_empty() {
@@ -96,6 +223,7 @@ pub async fn run_staged_sync_tui(
         &mut app,
         &mut rx,
         mutagen_bin,
+        base_path,
         &stages,
         &stage_keys,
         last_stage,
@@ -112,6 +240,7 @@ pub async fn run_staged_sync_tui(
 /// Runs staged mutagen sync without TUI (for tests and non-interactive environments)
 pub async fn run_staged_sync_headless(
     mutagen_bin: &Path,
+    base_path: &Path,
     projects: Vec<DiscoveredProject>,
 ) -> Result<(), MutagenRunnerError> {
     if projects.is_empty() {
@@ -162,14 +291,57 @@ pub async fn run_staged_sync_headless(
         }
 
         if is_last_stage {
-            // Last stage: keep running, don't terminate
+            // Last stage: keep running with config watching
             println!();
             println!("Final stage started in watch mode. Syncs are running...");
-            println!("Press Ctrl+C to stop.");
+            println!("Watching for config changes. Press Ctrl+C to stop.");
 
-            // Wait indefinitely (user will Ctrl+C)
+            // Start config watcher
+            let config_paths = get_config_paths(&projects);
+            let (_watcher, config_rx) = start_config_watcher(config_paths)?;
+
+            // Watch loop with hot-reload support
             loop {
-                sleep(Duration::from_secs(60)).await;
+                // Check for config changes (non-blocking)
+                if config_rx.try_recv().is_ok() {
+                    // Debounce: collect all events within 500ms
+                    sleep(Duration::from_millis(500)).await;
+                    while config_rx.try_recv().is_ok() {}
+
+                    println!("\nConfig change detected, reloading...");
+
+                    // Reload projects
+                    match discover_projects(base_path) {
+                        Ok(new_projects) => {
+                            // Filter to only final stage projects
+                            let final_stage_projects: Vec<_> = new_projects.iter()
+                                .filter(|p| p.project.stage == last_stage)
+                                .cloned()
+                                .collect();
+
+                            let (terminated, kept, created) = sync_sessions(
+                                mutagen_bin,
+                                &final_stage_projects,
+                                false, // watch mode
+                            ).await?;
+
+                            if !terminated.is_empty() {
+                                println!("  Terminated {} outdated session(s)", terminated.len());
+                            }
+                            if !kept.is_empty() {
+                                println!("  Kept {} unchanged session(s)", kept.len());
+                            }
+                            if !created.is_empty() {
+                                println!("  Created {} new session(s)", created.len());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to reload config: {}", e);
+                        }
+                    }
+                }
+
+                sleep(Duration::from_secs(1)).await;
             }
         } else {
             // Non-last stage: wait for sync completion, then terminate
@@ -182,7 +354,7 @@ pub async fn run_staged_sync_headless(
             println!("Stage {} sync complete. Terminating sessions...", stage);
 
             for name in &session_names {
-                terminate_session(mutagen_bin, name).await?;
+                terminate_session_by_name(mutagen_bin, name).await?;
             }
         }
     }
@@ -252,7 +424,7 @@ pub async fn run_staged_sync_init_headless(
         println!("Stage {} sync complete. Terminating sessions...", stage);
 
         for name in &session_names {
-            terminate_session(mutagen_bin, name).await?;
+            terminate_session_by_name(mutagen_bin, name).await?;
         }
     }
 
@@ -341,7 +513,7 @@ async fn run_init_stages_with_tui(
         let sessions: Vec<SessionState> = stage_projects
             .iter()
             .map(|p| SessionState {
-                name: p.project.name.clone(),
+                name: p.session_name(),
                 alpha: p.resolved_directory.to_string_lossy().to_string(),
                 beta: p.project.target.clone(),
                 status: None,
@@ -363,7 +535,7 @@ async fn run_init_stages_with_tui(
             }
 
             create_sync_session(mutagen_bin, project, true).await?;
-            app.mark_session_created(&project.project.name);
+            app.mark_session_created(&project.session_name());
 
             // Small delay to let mutagen start
             sleep(Duration::from_millis(200)).await;
@@ -402,7 +574,7 @@ async fn run_init_stages_with_tui(
         terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
 
         for project in stage_projects {
-            terminate_session(mutagen_bin, &project.project.name).await?;
+            terminate_session(mutagen_bin, project).await?;
         }
 
         // Small delay before next stage
@@ -417,10 +589,16 @@ async fn run_stages_with_tui(
     app: &mut App,
     rx: &mut mpsc::Receiver<TuiMessage>,
     mutagen_bin: &Path,
+    base_path: &Path,
     stages: &BTreeMap<i32, Vec<&DiscoveredProject>>,
     stage_keys: &[i32],
     last_stage: i32,
 ) -> Result<(), MutagenRunnerError> {
+    // Collect all projects for config watching
+    let all_projects: Vec<DiscoveredProject> = stages.values()
+        .flat_map(|v| v.iter().map(|p| (*p).clone()))
+        .collect();
+
     for (stage_idx, stage) in stage_keys.iter().enumerate() {
         let stage_projects = stages.get(stage).unwrap();
         let is_last_stage = *stage == last_stage;
@@ -429,7 +607,7 @@ async fn run_stages_with_tui(
         let sessions: Vec<SessionState> = stage_projects
             .iter()
             .map(|p| SessionState {
-                name: p.project.name.clone(),
+                name: p.session_name(),
                 alpha: p.resolved_directory.to_string_lossy().to_string(),
                 beta: p.project.target.clone(),
                 status: None,
@@ -450,23 +628,78 @@ async fn run_stages_with_tui(
             }
 
             create_sync_session(mutagen_bin, project, !is_last_stage).await?;
-            app.mark_session_created(&project.project.name);
+            app.mark_session_created(&project.session_name());
 
             // Small delay to let mutagen start
             sleep(Duration::from_millis(200)).await;
         }
 
         if is_last_stage {
-            // Final stage: keep running until user quits
-            app.set_message("Final stage running. Press 'q' to quit.".to_string());
+            // Final stage: keep running with config watching
+            app.set_message("Final stage running. Watching configs. Press 'q' to quit.".to_string());
+
+            // Start config watcher
+            let config_paths = get_config_paths(&all_projects);
+            let (_watcher, config_rx) = start_config_watcher(config_paths)?;
+            let mut pending_config_change = false;
 
             loop {
                 terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
 
-                // Handle events
+                // Handle keyboard events
                 if tui::handle_events().map_err(MutagenRunnerError::Execution)? {
                     app.should_quit = true;
                     break;
+                }
+
+                // Check for config changes (non-blocking)
+                if config_rx.try_recv().is_ok() {
+                    pending_config_change = true;
+                }
+
+                // Process pending config change (with debounce)
+                if pending_config_change {
+                    // Consume remaining events
+                    while config_rx.try_recv().is_ok() {}
+                    pending_config_change = false;
+
+                    app.set_message("Config changed, reloading sessions...".to_string());
+                    terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
+
+                    // Reload projects
+                    if let Ok(new_projects) = discover_projects(base_path) {
+                        // Filter to only final stage projects
+                        let final_stage_projects: Vec<_> = new_projects.iter()
+                            .filter(|p| p.project.stage == last_stage)
+                            .cloned()
+                            .collect();
+
+                        match sync_sessions(mutagen_bin, &final_stage_projects, false).await {
+                            Ok((terminated, kept, created)) => {
+                                // Update app sessions
+                                let new_sessions: Vec<SessionState> = final_stage_projects
+                                    .iter()
+                                    .map(|p| SessionState {
+                                        name: p.session_name(),
+                                        alpha: p.resolved_directory.to_string_lossy().to_string(),
+                                        beta: p.project.target.clone(),
+                                        status: None,
+                                        created: true,
+                                    })
+                                    .collect();
+                                app.stage_sessions = new_sessions;
+
+                                let msg = format!(
+                                    "Reloaded: {} terminated, {} kept, {} created",
+                                    terminated.len(), kept.len(), created.len()
+                                );
+                                app.set_message(msg);
+                            }
+                            Err(e) => {
+                                app.set_message(format!("Reload error: {}", e));
+                            }
+                        }
+                    }
                 }
 
                 // Process status updates
@@ -477,6 +710,9 @@ async fn run_stages_with_tui(
                         }
                         TuiMessage::Quit => {
                             app.should_quit = true;
+                        }
+                        TuiMessage::ConfigChanged => {
+                            pending_config_change = true;
                         }
                         _ => {}
                     }
@@ -522,7 +758,7 @@ async fn run_stages_with_tui(
             terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
 
             for project in stage_projects {
-                terminate_session(mutagen_bin, &project.project.name).await?;
+                terminate_session(mutagen_bin, project).await?;
             }
 
             // Small delay before next stage
@@ -538,10 +774,7 @@ async fn create_sync_session(
     project: &DiscoveredProject,
     no_watch: bool,
 ) -> Result<String, MutagenRunnerError> {
-    let name = &project.project.name;
-
-    // First, try to terminate any existing session with this name
-    let _ = terminate_session(mutagen_bin, name).await;
+    let session_name = project.session_name();
 
     let alpha = project.resolved_directory.to_string_lossy().to_string();
     let beta = &project.project.target;
@@ -551,7 +784,7 @@ async fn create_sync_session(
         "create".to_string(),
         alpha,
         beta.clone(),
-        format!("--name={}", name),
+        format!("--name={}", session_name),
     ];
 
     // Add sync mode
@@ -589,11 +822,11 @@ async fn create_sync_session(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(MutagenRunnerError::CommandFailed(format!(
             "Failed to create sync '{}': {}",
-            name, stderr
+            session_name, stderr
         )));
     }
 
-    Ok(name.clone())
+    Ok(session_name)
 }
 
 async fn wait_for_sync_complete_headless(
@@ -639,7 +872,8 @@ async fn poll_status(mutagen_bin: &Path) -> Vec<MutagenSession> {
     }
 }
 
-async fn terminate_session(
+/// Terminate a session by its full name (with CRC32 suffixes)
+async fn terminate_session_by_name(
     mutagen_bin: &Path,
     session_name: &str,
 ) -> Result<(), MutagenRunnerError> {
@@ -664,9 +898,17 @@ async fn terminate_session(
     Ok(())
 }
 
+/// Terminate a session for a project (uses session_name())
+async fn terminate_session(
+    mutagen_bin: &Path,
+    project: &DiscoveredProject,
+) -> Result<(), MutagenRunnerError> {
+    terminate_session_by_name(mutagen_bin, &project.session_name()).await
+}
+
 async fn terminate_all_sessions(mutagen_bin: &Path, projects: &[&DiscoveredProject]) {
     for project in projects {
-        let _ = terminate_session(mutagen_bin, &project.project.name).await;
+        let _ = terminate_session(mutagen_bin, project).await;
     }
 }
 
