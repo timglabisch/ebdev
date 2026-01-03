@@ -711,8 +711,8 @@ pub mod test_utils {
                 polling: PollingConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
-            config_path: PathBuf::from(format!("{}/.ebdev.toml", root)),
-            root_config_path: PathBuf::from(format!("{}/.ebdev.toml", root)),
+            config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
+            root_config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
         }
     }
 
@@ -1193,8 +1193,8 @@ mod tests {
                 polling: PollingConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
-            config_path: PathBuf::from("/root/.ebdev.toml"),
-            root_config_path: PathBuf::from("/root/.ebdev.toml"),
+            config_path: PathBuf::from("/root/.ebdev.ts"),
+            root_config_path: PathBuf::from("/root/.ebdev.ts"),
         };
 
         let projects = vec![&project];
@@ -1220,8 +1220,8 @@ mod tests {
                 polling: PollingConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
-            config_path: PathBuf::from("/root/.ebdev.toml"),
-            root_config_path: PathBuf::from("/root/.ebdev.toml"),
+            config_path: PathBuf::from("/root/.ebdev.ts"),
+            root_config_path: PathBuf::from("/root/.ebdev.ts"),
         };
 
         let projects = vec![&project];
@@ -1253,8 +1253,8 @@ mod tests {
                 },
             },
             resolved_directory: PathBuf::from("/root/test"),
-            config_path: PathBuf::from("/root/.ebdev.toml"),
-            root_config_path: PathBuf::from("/root/.ebdev.toml"),
+            config_path: PathBuf::from("/root/.ebdev.ts"),
+            root_config_path: PathBuf::from("/root/.ebdev.ts"),
         };
 
         let projects = vec![&project];
@@ -1284,8 +1284,8 @@ mod tests {
                 polling: PollingConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
-            config_path: PathBuf::from("/root/.ebdev.toml"),
-            root_config_path: PathBuf::from("/root/.ebdev.toml"),
+            config_path: PathBuf::from("/root/.ebdev.ts"),
+            root_config_path: PathBuf::from("/root/.ebdev.ts"),
         };
 
         let projects = vec![&project];

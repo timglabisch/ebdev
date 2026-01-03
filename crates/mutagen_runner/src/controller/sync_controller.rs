@@ -173,8 +173,8 @@ mod tests {
                 polling: PollingConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
-            config_path: PathBuf::from(format!("{}/.ebdev.toml", root)),
-            root_config_path: PathBuf::from(format!("{}/.ebdev.toml", root)),
+            config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
+            root_config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
         }
     }
 

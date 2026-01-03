@@ -8,8 +8,8 @@ pub enum MutagenConfigError {
     #[error("Failed to read config file: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Failed to parse config: {0}")]
-    Parse(#[from] toml::de::Error),
+    #[error("Failed to parse TypeScript config: {0}")]
+    TypeScript(String),
 
     #[error("WalkDir error: {0}")]
     WalkDir(#[from] walkdir::Error),
@@ -76,7 +76,7 @@ pub struct MutagenSyncProject {
     pub stage: i32,
 }
 
-/// Mutagen section in .ebdev.toml
+/// Mutagen section in .ebdev.ts
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MutagenSyncConfig {
     /// List of sync projects
@@ -100,7 +100,7 @@ pub struct DiscoveredProject {
     pub resolved_directory: PathBuf,
     /// Path to the config file this project was found in
     pub config_path: PathBuf,
-    /// Path to the root config file (the base_path .ebdev.toml)
+    /// Path to the root config file (the base_path .ebdev.ts)
     pub root_config_path: PathBuf,
 }
 
@@ -169,51 +169,56 @@ impl DiscoveredProject {
 }
 
 /// Discovers all mutagen sync projects by recursively walking from base_path
-pub fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, MutagenConfigError> {
+pub async fn discover_projects(base_path: &Path) -> Result<Vec<DiscoveredProject>, MutagenConfigError> {
     // Canonicalize base_path to get absolute path for root_config_path
     let canonical_base = base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf());
-    let root_config_path = canonical_base.join(".ebdev.toml");
+    let root_config_path = canonical_base.join(".ebdev.ts");
 
-    let mut discovered = Vec::new();
-
+    // First collect all .ebdev.ts file paths
+    let mut config_paths = Vec::new();
     for entry in WalkDir::new(base_path)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
     {
         let entry = entry?;
+        if entry.file_type().is_file() && entry.file_name() == ".ebdev.ts" {
+            config_paths.push(entry.path().to_path_buf());
+        }
+    }
 
-        if entry.file_type().is_file() && entry.file_name() == ".ebdev.toml" {
-            let config_path = entry.path().to_path_buf();
-            let config_dir = config_path.parent().unwrap_or(base_path);
+    let mut discovered = Vec::new();
 
-            let content = std::fs::read_to_string(&config_path)?;
-            let partial: PartialConfig = toml::from_str(&content)?;
+    // Process each config file
+    for config_path in config_paths {
+        let config_dir = config_path.parent().unwrap_or(base_path);
 
-            if let Some(mutagen_config) = partial.mutagen {
-                for project in mutagen_config.sync {
-                    let resolved_directory = project
-                        .directory
-                        .clone()
-                        .map(|d| {
-                            if d.is_absolute() {
-                                d
-                            } else {
-                                config_dir.join(d)
-                            }
-                        })
-                        .unwrap_or_else(|| config_dir.to_path_buf());
+        let partial: PartialConfig = ebdev_toolchain_deno::load_ts_config(&config_path).await
+            .map_err(|e| MutagenConfigError::TypeScript(e.to_string()))?;
 
-                    // Normalize the path to remove . and .. components
-                    let resolved_directory = normalize_path(&resolved_directory);
+        if let Some(mutagen_config) = partial.mutagen {
+            for project in mutagen_config.sync {
+                let resolved_directory = project
+                    .directory
+                    .clone()
+                    .map(|d| {
+                        if d.is_absolute() {
+                            d
+                        } else {
+                            config_dir.join(d)
+                        }
+                    })
+                    .unwrap_or_else(|| config_dir.to_path_buf());
 
-                    discovered.push(DiscoveredProject {
-                        project,
-                        resolved_directory,
-                        config_path: config_path.clone(),
-                        root_config_path: root_config_path.clone(),
-                    });
-                }
+                // Normalize the path to remove . and .. components
+                let resolved_directory = normalize_path(&resolved_directory);
+
+                discovered.push(DiscoveredProject {
+                    project,
+                    resolved_directory,
+                    config_path: config_path.clone(),
+                    root_config_path: root_config_path.clone(),
+                });
             }
         }
     }
@@ -253,7 +258,7 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
             s.starts_with('.')
                 && s != "."
                 && s != ".."
-                && s != ".ebdev.toml"
+                && s != ".ebdev.ts"
         })
         .unwrap_or(false)
 }
@@ -269,42 +274,41 @@ mod tests {
 
     #[test]
     fn test_parse_sync_mode() {
-        let toml_str = r#"mode = "one-way-create""#;
+        let json_str = r#"{"mode": "one-way-create"}"#;
         #[derive(Deserialize)]
         struct Test {
             mode: SyncMode,
         }
-        let t: Test = toml::from_str(toml_str).unwrap();
+        let t: Test = serde_json::from_str(json_str).unwrap();
         assert_eq!(t.mode, SyncMode::OneWayCreate);
     }
 
     #[test]
     fn test_parse_mutagen_config_multiple_syncs() {
-        let toml_str = r#"
-[mutagen]
-[[mutagen.sync]]
-name = "frontend"
-target = "user@host:/var/www/frontend"
-mode = "two-way"
-ignore = ["node_modules", ".git", "dist"]
-stage = 1
-
-[mutagen.sync.polling]
-enabled = true
-interval = 5
-
-[[mutagen.sync]]
-name = "backend"
-target = "user@host:/var/www/backend"
-directory = "./backend"
-mode = "one-way-replica"
-ignore = ["vendor", ".git"]
-stage = 2
-
-[mutagen.sync.polling]
-enabled = false
-"#;
-        let config: PartialConfig = toml::from_str(toml_str).unwrap();
+        let json_str = r#"{
+            "mutagen": {
+                "sync": [
+                    {
+                        "name": "frontend",
+                        "target": "user@host:/var/www/frontend",
+                        "mode": "two-way",
+                        "ignore": ["node_modules", ".git", "dist"],
+                        "stage": 1,
+                        "polling": { "enabled": true, "interval": 5 }
+                    },
+                    {
+                        "name": "backend",
+                        "target": "user@host:/var/www/backend",
+                        "directory": "./backend",
+                        "mode": "one-way-replica",
+                        "ignore": ["vendor", ".git"],
+                        "stage": 2,
+                        "polling": { "enabled": false }
+                    }
+                ]
+            }
+        }"#;
+        let config: PartialConfig = serde_json::from_str(json_str).unwrap();
         let mutagen = config.mutagen.unwrap();
 
         // Should have 2 sync projects

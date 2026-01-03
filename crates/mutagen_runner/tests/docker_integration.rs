@@ -171,7 +171,7 @@ fn test_staged_sync_with_docker() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(async {
         let example_dir = workspace_root().join("example");
-        let projects = ebdev_mutagen_config::discover_projects(&example_dir)
+        let projects = ebdev_mutagen_config::discover_projects(&example_dir).await
             .expect("Failed to discover projects");
 
         // Filter to only stage 0 for this test (shared directory)
@@ -344,9 +344,9 @@ fn test_file_sync_to_container() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires Docker"]
-fn test_stage_ordering() {
+async fn test_stage_ordering() {
     if !docker_available() {
         eprintln!("Docker not available, skipping test");
         return;
@@ -354,7 +354,7 @@ fn test_stage_ordering() {
 
     let example_dir = workspace_root().join("example");
     let projects =
-        ebdev_mutagen_config::discover_projects(&example_dir).expect("Failed to discover projects");
+        ebdev_mutagen_config::discover_projects(&example_dir).await.expect("Failed to discover projects");
 
     // Sort by stage
     let mut sorted = projects.clone();

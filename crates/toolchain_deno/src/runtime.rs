@@ -44,7 +44,12 @@ pub async fn load_ts_config<T: serde::de::DeserializeOwned>(path: &Path) -> Resu
 fn v8_string(rt: &mut JsRuntime, val: v8::Global<v8::Value>) -> Result<String, Error> {
     let iso = rt.v8_isolate();
     let v = val.open(iso);
-    if !v.is_string() { return Err(Error("Expected string".into())); }
+    if v.is_undefined() || v.is_null() {
+        return Err(Error("Config file must have a default export (export default ...)".into()));
+    }
+    if !v.is_string() {
+        return Err(Error("Default export must be an object (use defineConfig)".into()));
+    }
     let s: &v8::String = unsafe { &*(v as *const v8::Value as *const v8::String) };
     Ok(s.to_rust_string_lossy(iso))
 }

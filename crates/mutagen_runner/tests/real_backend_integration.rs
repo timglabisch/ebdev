@@ -80,8 +80,8 @@ impl RealTestContext {
                 polling: PollingConfig::default(),
             },
             resolved_directory: shared_dir,
-            config_path: workspace_root().join("example/.ebdev.toml"),
-            root_config_path: workspace_root().join("example/.ebdev.toml"),
+            config_path: workspace_root().join("example/.ebdev.ts"),
+            root_config_path: workspace_root().join("example/.ebdev.ts"),
         }
     }
 
@@ -104,8 +104,8 @@ impl RealTestContext {
                 polling: PollingConfig::default(),
             },
             resolved_directory: shared_dir,
-            config_path: workspace_root().join("example/.ebdev.toml"),
-            root_config_path: workspace_root().join("example/.ebdev.toml"),
+            config_path: workspace_root().join("example/.ebdev.ts"),
+            root_config_path: workspace_root().join("example/.ebdev.ts"),
         }
     }
 

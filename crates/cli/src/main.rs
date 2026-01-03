@@ -186,7 +186,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         },
         Commands::Mutagen { command } => match command {
             MutagenCommands::Debug => {
-                let projects = discover_projects(&base_path)?;
+                let projects = discover_projects(&base_path).await?;
 
                 if projects.is_empty() {
                     println!("No mutagen sync projects found.");
@@ -245,7 +245,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 }
 
-                let projects = discover_projects(&base_path)?;
+                let projects = discover_projects(&base_path).await?;
 
                 // Default behavior: --sync only (just final stage)
                 let (run_init, run_sync) = match (init, sync) {
