@@ -928,81 +928,8 @@ mod tests {
     use test_utils::*;
 
     // ========================================================================
-    // Tests: sync_stage_sessions - Neue Sessions erstellen
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_sync_stage_sessions_creates_new_session() {
-        let backend = MockMutagen::new();
-        let project = make_project("test", "docker://test", 0, "/root");
-
-        let projects = vec![&project];
-        let (terminated, kept, created) = sync_stage_sessions(&backend, &projects, true).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 0);
-        assert_eq!(created, 1);
-        assert_eq!(backend.created_sessions().len(), 1);
-        assert_eq!(backend.created_sessions()[0].0, project.session_name());
-    }
-
-    #[tokio::test]
-    async fn test_sync_stage_sessions_creates_multiple_sessions() {
-        let backend = MockMutagen::new();
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-
-        let projects = vec![&p1, &p2];
-        let (terminated, kept, created) = sync_stage_sessions(&backend, &projects, false).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 0);
-        assert_eq!(created, 2);
-        assert_eq!(backend.created_sessions().len(), 2);
-    }
-
-    // ========================================================================
-    // Tests: sync_stage_sessions - Stateless Verhalten (Sessions behalten)
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_sync_stage_sessions_keeps_matching_session() {
-        let backend = MockMutagen::new();
-        let project = make_project("test", "docker://test", 0, "/root");
-
-        // Füge existierende Session hinzu die genau passt
-        backend.add_session(mock_session_for_project(&project));
-
-        let projects = vec![&project];
-        let (terminated, kept, created) = sync_stage_sessions(&backend, &projects, true).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 1);
-        assert_eq!(created, 0);
-        assert!(backend.created_sessions().is_empty());
-        assert!(backend.terminated_sessions().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_sync_stage_sessions_keeps_multiple_matching_sessions() {
-        let backend = MockMutagen::new();
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-
-        // Beide Sessions existieren bereits
-        backend.add_session(mock_session_for_project(&p1));
-        backend.add_session(mock_session_for_project(&p2));
-
-        let projects = vec![&p1, &p2];
-        let (terminated, kept, created) = sync_stage_sessions(&backend, &projects, false).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 2);
-        assert_eq!(created, 0);
-    }
-
-    // ========================================================================
     // Tests: sync_stage_sessions - Config-Änderung (Session ersetzen)
+    // Note: Basic create/keep tests are covered by controller and reconcile tests
     // ========================================================================
 
     #[tokio::test]
@@ -1102,39 +1029,8 @@ mod tests {
 
     // ========================================================================
     // Tests: sync_sessions (Full Sync: Cleanup + Stage Sync)
+    // Note: Basic create/keep tests are covered by controller tests
     // ========================================================================
-
-    #[tokio::test]
-    async fn test_sync_sessions_creates_all_new() {
-        let backend = MockMutagen::new();
-
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-        let projects = vec![p1, p2];
-
-        let (terminated, kept, created) = sync_sessions(&backend, &projects, false).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 0);
-        assert_eq!(created, 2);
-    }
-
-    #[tokio::test]
-    async fn test_sync_sessions_keeps_existing() {
-        let backend = MockMutagen::new();
-
-        let p1 = make_project("frontend", "docker://app", 1, "/root");
-        let p2 = make_project("backend", "docker://app", 1, "/root");
-        backend.add_session(mock_session_for_project(&p1));
-        backend.add_session(mock_session_for_project(&p2));
-
-        let projects = vec![p1, p2];
-        let (terminated, kept, created) = sync_sessions(&backend, &projects, false).await.unwrap();
-
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 2);
-        assert_eq!(created, 0);
-    }
 
     #[tokio::test]
     async fn test_sync_sessions_mixed_scenario() {
@@ -1248,18 +1144,6 @@ mod tests {
         let (terminated, kept, created) = sync_sessions(&backend, &projects, false).await.unwrap();
 
         // Leere Projektliste ändert nichts
-        assert_eq!(terminated, 0);
-        assert_eq!(kept, 0);
-        assert_eq!(created, 0);
-    }
-
-    #[tokio::test]
-    async fn test_sync_stage_empty_projects() {
-        let backend = MockMutagen::new();
-        let projects: Vec<&DiscoveredProject> = vec![];
-
-        let (terminated, kept, created) = sync_stage_sessions(&backend, &projects, false).await.unwrap();
-
         assert_eq!(terminated, 0);
         assert_eq!(kept, 0);
         assert_eq!(created, 0);
