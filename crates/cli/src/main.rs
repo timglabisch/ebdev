@@ -6,7 +6,6 @@ use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
 use ebdev_mutagen_config::{discover_projects, SyncMode};
-use ebdev_mutagen_runner::run_staged_sync;
 
 #[derive(Parser)]
 #[command(name = "ebdev", version, about = "easybill development toolchain")]
@@ -59,9 +58,18 @@ enum MutagenCommands {
     Debug,
     /// Start staged mutagen sync
     Sync {
-        /// Run only init stages (all except the final watch stage)
+        /// Terminate all sessions and run init stages (0..N-1)
         #[arg(long)]
         init: bool,
+        /// Run the final sync stage
+        #[arg(long)]
+        sync: bool,
+        /// Stay in watch mode after sync completes (requires --sync)
+        #[arg(long)]
+        keep_open: bool,
+        /// Terminate all sessions for this project and exit
+        #[arg(long)]
+        terminate: bool,
     },
 }
 
@@ -197,7 +205,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     println!();
                 }
             }
-            MutagenCommands::Sync { init } => {
+            MutagenCommands::Sync { init, sync, keep_open, terminate } => {
                 let mutagen_version = config.toolchain.mutagen
                     .as_ref()
                     .map(|m| m.version.as_str())
@@ -216,7 +224,62 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let mutagen_bin = mutagen_env.bin_path();
                 let projects = discover_projects(&base_path)?;
 
-                run_staged_sync(&mutagen_bin, &base_path, projects, init).await?;
+                // Handle --terminate: terminate all project sessions and exit
+                if terminate {
+                    if projects.is_empty() {
+                        println!("No mutagen sync projects found.");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+
+                    let session_names: Vec<String> = projects.iter()
+                        .map(|p| p.session_name())
+                        .collect();
+
+                    println!("Terminating {} session(s)...", session_names.len());
+                    for name in &session_names {
+                        let output = tokio::process::Command::new(&mutagen_bin)
+                            .args(["sync", "terminate", name])
+                            .output()
+                            .await;
+
+                        match output {
+                            Ok(o) if o.status.success() => println!("  Terminated: {}", name),
+                            _ => println!("  Not found or already terminated: {}", name),
+                        }
+                    }
+                    println!("Done.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+
+                // Default behavior: --sync only (just final stage)
+                let (run_init, run_sync) = match (init, sync) {
+                    (false, false) => (false, true),  // Default: only sync
+                    (true, false) => (true, false),   // --init only
+                    (false, true) => (false, true),   // --sync only
+                    (true, true) => (true, true),     // --init --sync: both
+                };
+
+                // Terminate all sessions if --init flag is set
+                if run_init {
+                    println!("Terminating all mutagen sessions...");
+                    let _ = tokio::process::Command::new(&mutagen_bin)
+                        .args(["sync", "terminate", "--all"])
+                        .output()
+                        .await;
+                }
+
+                let options = ebdev_mutagen_runner::SyncOptions {
+                    run_init_stages: run_init,
+                    run_final_stage: run_sync,
+                    keep_open,
+                };
+
+                ebdev_mutagen_runner::run_staged_sync_with_options(
+                    &mutagen_bin,
+                    &base_path,
+                    projects,
+                    options,
+                ).await?;
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {

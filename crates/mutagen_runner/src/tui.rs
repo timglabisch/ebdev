@@ -169,9 +169,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let footer_text = if let Some(msg) = &app.message {
         msg.clone()
     } else if app.is_final_stage {
-        "Press 'q' to quit".to_string()
+        "Press 'q' or ESC to quit".to_string()
     } else {
-        "Syncing... Press 'q' to abort".to_string()
+        "Syncing... Press 'q' or ESC to abort".to_string()
     };
 
     let footer = Paragraph::new(footer_text)
@@ -205,10 +205,15 @@ pub async fn poll_status(mutagen_bin: &Path) -> Vec<MutagenSession> {
 }
 
 pub fn handle_events() -> io::Result<bool> {
-    if event::poll(Duration::from_millis(100))? {
+    if event::poll(Duration::from_millis(10))? {
         if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                return Ok(true);
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
             }
         }
     }

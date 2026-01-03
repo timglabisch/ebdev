@@ -33,6 +33,17 @@ pub enum MutagenRunnerError {
     Config(#[from] ebdev_mutagen_config::MutagenConfigError),
 }
 
+/// Options for controlling which stages to run
+#[derive(Debug, Clone, Default)]
+pub struct SyncOptions {
+    /// Run init stages (0..N-1)
+    pub run_init_stages: bool,
+    /// Run the final sync stage
+    pub run_final_stage: bool,
+    /// Stay in watch mode after sync completes (only with run_final_stage)
+    pub keep_open: bool,
+}
+
 // ============================================================================
 // MutagenBackend Trait - abstrahiert Mutagen-Interaktion für Tests
 // ============================================================================
@@ -184,10 +195,20 @@ struct SyncPlan<'a> {
     stages_to_run: Vec<i32>,
     last_stage: i32,
     projects_by_stage: BTreeMap<i32, Vec<&'a DiscoveredProject>>,
+    keep_open: bool,
 }
 
 impl<'a> SyncPlan<'a> {
     fn new(projects: &'a [DiscoveredProject], init_only: bool) -> Option<Self> {
+        let options = if init_only {
+            SyncOptions { run_init_stages: true, run_final_stage: false, keep_open: false }
+        } else {
+            SyncOptions { run_init_stages: true, run_final_stage: true, keep_open: true }
+        };
+        Self::from_options(projects, &options)
+    }
+
+    fn from_options(projects: &'a [DiscoveredProject], options: &SyncOptions) -> Option<Self> {
         if projects.is_empty() {
             return None;
         }
@@ -196,10 +217,11 @@ impl<'a> SyncPlan<'a> {
         let stage_keys: Vec<i32> = projects_by_stage.keys().copied().collect();
         let last_stage = *stage_keys.last()?;
 
-        let stages_to_run: Vec<i32> = if init_only {
-            stage_keys.into_iter().filter(|&s| s != last_stage).collect()
-        } else {
-            stage_keys
+        let stages_to_run: Vec<i32> = match (options.run_init_stages, options.run_final_stage) {
+            (true, true) => stage_keys,                                              // All stages
+            (true, false) => stage_keys.into_iter().filter(|&s| s != last_stage).collect(), // Init only
+            (false, true) => vec![last_stage],                                       // Final only
+            (false, false) => return None,                                           // Nothing to do
         };
 
         if stages_to_run.is_empty() {
@@ -210,6 +232,7 @@ impl<'a> SyncPlan<'a> {
             stages_to_run,
             last_stage,
             projects_by_stage,
+            keep_open: options.keep_open,
         })
     }
 
@@ -217,8 +240,17 @@ impl<'a> SyncPlan<'a> {
         self.stages_to_run.len()
     }
 
-    fn is_final_stage(&self, stage: i32, init_only: bool) -> bool {
-        !init_only && stage == self.last_stage
+    fn is_final_stage(&self, stage: i32) -> bool {
+        stage == self.last_stage
+    }
+
+    fn should_keep_open(&self, stage: i32) -> bool {
+        self.keep_open && self.is_final_stage(stage)
+    }
+
+    /// Returns true if only init stages are run (final stage is not included)
+    fn is_init_only(&self) -> bool {
+        !self.stages_to_run.contains(&self.last_stage)
     }
 }
 
@@ -245,7 +277,7 @@ pub trait SyncUI {
     fn on_waiting(&mut self, stage: i32);
 
     /// Wird aufgerufen wenn eine Stage abgeschlossen ist
-    fn on_stage_complete(&mut self, stage: i32);
+    fn on_stage_complete(&mut self, stage: i32, is_final: bool);
 
     /// Wird aufgerufen wenn Watch-Mode beginnt
     fn on_watch_mode(&mut self);
@@ -314,12 +346,16 @@ impl SyncUI for HeadlessUI {
         println!("  Waiting for sync to complete...");
     }
 
-    fn on_stage_complete(&mut self, _stage: i32) {
-        println!("  Sync complete, terminating stage sessions...");
+    fn on_stage_complete(&mut self, _stage: i32, is_final: bool) {
+        if is_final {
+            println!("  Sync complete.");
+        } else {
+            println!("  Sync complete, terminating stage sessions...");
+        }
     }
 
     fn on_watch_mode(&mut self) {
-        println!("\nWatching for changes. Press Ctrl+C to stop.");
+        println!("\nWatching for changes. Press Ctrl+C to stop (or 'q'/ESC in TUI mode).");
     }
 
     fn on_error(&mut self, msg: &str) {
@@ -327,7 +363,7 @@ impl SyncUI for HeadlessUI {
     }
 
     fn on_complete(&mut self) {
-        println!("\nAll init stages completed successfully.");
+        // Nothing to print - "Sync completed successfully." is printed in the caller
     }
 
     fn check_quit(&mut self) -> Result<bool, MutagenRunnerError> {
@@ -407,12 +443,16 @@ impl SyncUI for TuiUI {
         self.app.set_message(format!("Waiting for stage {} to complete...", stage));
     }
 
-    fn on_stage_complete(&mut self, stage: i32) {
-        self.app.set_message(format!("Stage {} complete, terminating...", stage));
+    fn on_stage_complete(&mut self, stage: i32, is_final: bool) {
+        if is_final {
+            self.app.set_message(format!("Stage {} complete.", stage));
+        } else {
+            self.app.set_message(format!("Stage {} complete, terminating...", stage));
+        }
     }
 
     fn on_watch_mode(&mut self) {
-        self.app.set_message("Watching for changes. Press 'q' to quit.".to_string());
+        self.app.set_message("Watching for changes. Press 'q' or ESC to quit.".to_string());
     }
 
     fn on_error(&mut self, msg: &str) {
@@ -479,6 +519,17 @@ pub async fn run_staged_sync(
     run_staged_sync_with_backend(backend, projects, init_only).await
 }
 
+/// Runs staged mutagen sync with options for fine-grained control.
+pub async fn run_staged_sync_with_options(
+    mutagen_bin: &Path,
+    _base_path: &Path,
+    projects: Vec<DiscoveredProject>,
+    options: SyncOptions,
+) -> Result<(), MutagenRunnerError> {
+    let backend = Arc::new(RealMutagen::new(mutagen_bin.to_path_buf()));
+    run_staged_sync_with_backend_and_options(backend, projects, options).await
+}
+
 /// Runs staged mutagen sync mit einem beliebigen MutagenBackend.
 /// Ermöglicht Mocking für Tests.
 pub async fn run_staged_sync_with_backend<M: MutagenBackend + 'static>(
@@ -496,16 +547,44 @@ pub async fn run_staged_sync_with_backend<M: MutagenBackend + 'static>(
 
     if std::io::stdout().is_terminal() {
         let mut ui = TuiUI::new(backend.as_ref(), plan.stage_count())?;
-        let result = run_staged_sync_impl(backend, &projects, init_only, &plan, &mut ui).await;
+        let result = run_staged_sync_impl(backend, &projects, &plan, &mut ui).await;
         ui.cleanup()?;
-        if result.is_ok() && init_only {
-            println!("All init stages completed successfully.");
+        if result.is_ok() && !plan.keep_open {
+            println!("Sync completed successfully.");
         }
         return result;
     }
 
     let mut ui = HeadlessUI;
-    run_staged_sync_impl(backend, &projects, init_only, &plan, &mut ui).await
+    run_staged_sync_impl(backend, &projects, &plan, &mut ui).await
+}
+
+/// Runs staged mutagen sync with backend and options.
+pub async fn run_staged_sync_with_backend_and_options<M: MutagenBackend + 'static>(
+    backend: Arc<M>,
+    projects: Vec<DiscoveredProject>,
+    options: SyncOptions,
+) -> Result<(), MutagenRunnerError> {
+    let plan = match SyncPlan::from_options(&projects, &options) {
+        Some(plan) => plan,
+        None => {
+            println!("No mutagen sync projects found or nothing to do.");
+            return Ok(());
+        }
+    };
+
+    if std::io::stdout().is_terminal() {
+        let mut ui = TuiUI::new(backend.as_ref(), plan.stage_count())?;
+        let result = run_staged_sync_impl(backend, &projects, &plan, &mut ui).await;
+        ui.cleanup()?;
+        if result.is_ok() && !plan.keep_open {
+            println!("Sync completed successfully.");
+        }
+        return result;
+    }
+
+    let mut ui = HeadlessUI;
+    run_staged_sync_impl(backend, &projects, &plan, &mut ui).await
 }
 
 /// Runs staged mutagen sync with a custom UI implementation.
@@ -523,7 +602,7 @@ pub async fn run_staged_sync_with_ui<M: MutagenBackend, U: SyncUI>(
         }
     };
 
-    run_staged_sync_impl(backend, &projects, init_only, &plan, ui).await
+    run_staged_sync_impl(backend, &projects, &plan, ui).await
 }
 
 // ============================================================================
@@ -533,11 +612,10 @@ pub async fn run_staged_sync_with_ui<M: MutagenBackend, U: SyncUI>(
 async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
     backend: Arc<M>,
     projects: &[DiscoveredProject],
-    init_only: bool,
     plan: &SyncPlan<'_>,
     ui: &mut U,
 ) -> Result<(), MutagenRunnerError> {
-    ui.on_start(plan.stage_count(), init_only);
+    ui.on_start(plan.stage_count(), plan.is_init_only());
 
     // Cleanup sessions für gelöschte Projekte
     let removed = cleanup_removed_projects(backend.as_ref(), projects).await?;
@@ -546,7 +624,8 @@ async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
     // Verarbeite jede Stage
     for (stage_idx, stage) in plan.stages_to_run.iter().enumerate() {
         let stage_projects: Vec<_> = plan.projects_by_stage.get(stage).unwrap().iter().cloned().collect();
-        let is_final = plan.is_final_stage(*stage, init_only);
+        let is_final = plan.is_final_stage(*stage);
+        let keep_open = plan.should_keep_open(*stage);
 
         ui.on_stage_start(*stage, &stage_projects, is_final);
         ui.set_stage_sessions(stage_idx, &stage_projects, is_final);
@@ -557,6 +636,7 @@ async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
         }
 
         // Sync Sessions für diese Stage
+        // Final stage sessions should watch, non-final should not
         let no_watch = !is_final;
         let session_names: Vec<String> = stage_projects.iter()
             .map(|p| p.session_name())
@@ -566,8 +646,8 @@ async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
         ui.mark_sessions_created(&session_names);
         ui.on_sync_result(term, kept, created);
 
-        if is_final {
-            // Final stage: Watch-Mode (einfache Loop bis Quit)
+        if keep_open {
+            // Final stage with --keep-open: Stay in watch mode until quit
             ui.on_watch_mode();
 
             loop {
@@ -580,44 +660,47 @@ async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
                 sleep(Duration::from_millis(50)).await;
             }
         } else {
-            // Non-final stage: Warte auf Completion, dann terminiere
+            // Wait for completion (both final and non-final stages)
             ui.on_waiting(*stage);
 
             loop {
                 ui.tick()?;
 
                 if ui.check_quit()? {
-                    terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
+                    if !is_final {
+                        terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
+                    }
                     return Err(MutagenRunnerError::UserAborted);
                 }
 
-                if ui.all_sessions_complete() {
-                    // Für Headless: polling-basierte Completion-Check
-                    let sessions = backend.list_sessions().await;
-                    let all_complete = session_names.iter().all(|name| {
-                        sessions.iter()
-                            .find(|s| &s.name == name)
-                            .map(|s| s.is_complete())
-                            .unwrap_or(true)
-                    });
+                // Check if all sessions are complete
+                let sessions = backend.list_sessions().await;
+                let all_complete = session_names.iter().all(|name| {
+                    sessions.iter()
+                        .find(|s| &s.name == name)
+                        .map(|s| s.is_complete())
+                        .unwrap_or(true)
+                });
 
-                    if all_complete {
-                        break;
-                    }
+                if all_complete || ui.all_sessions_complete() {
+                    break;
                 }
 
                 sleep(Duration::from_millis(50)).await;
             }
 
-            ui.on_stage_complete(*stage);
+            ui.on_stage_complete(*stage, is_final);
             ui.tick()?;
-            terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
 
-            sleep(Duration::from_millis(500)).await;
+            // Only terminate non-final stages (init stages)
+            if !is_final {
+                terminate_sessions_by_name(backend.as_ref(), &session_names).await?;
+                sleep(Duration::from_millis(500)).await;
+            }
         }
     }
 
-    if init_only {
+    if !plan.keep_open {
         ui.on_complete();
     }
 
@@ -808,8 +891,8 @@ pub mod test_utils {
         fn on_waiting(&mut self, stage: i32) {
             self.events.push(format!("waiting:{}", stage));
         }
-        fn on_stage_complete(&mut self, stage: i32) {
-            self.events.push(format!("stage_complete:{}", stage));
+        fn on_stage_complete(&mut self, stage: i32, is_final: bool) {
+            self.events.push(format!("stage_complete:{}:{}", stage, is_final));
         }
         fn on_watch_mode(&mut self) {
             self.events.push("watch_mode".to_string());
@@ -843,11 +926,20 @@ pub mod test_utils {
         sessions: Mutex<Vec<MutagenSession>>,
         create_calls: Mutex<Vec<(String, bool)>>,
         terminate_calls: Mutex<Vec<String>>,
+        create_pending_sessions: bool,
     }
 
     impl MockMutagen {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Erstellt einen MockMutagen der pending (nicht-complete) Sessions erstellt
+        pub fn with_pending_sessions() -> Self {
+            Self {
+                create_pending_sessions: true,
+                ..Self::default()
+            }
         }
 
         /// Fügt eine Session zum Mock hinzu
@@ -941,7 +1033,10 @@ pub mod test_utils {
             self.create_calls.lock().unwrap().push((session_name.clone(), no_watch));
 
             // Füge die Session auch zur Liste hinzu
-            let session = mock_session(&session_name);
+            let mut session = mock_session(&session_name);
+            if self.create_pending_sessions {
+                session.status = "connecting".to_string();
+            }
             self.sessions.lock().unwrap().push(session);
 
             Ok(session_name)
@@ -952,6 +1047,152 @@ pub mod test_utils {
             // Entferne die Session aus der Liste
             self.sessions.lock().unwrap().retain(|s| s.identifier != session_id);
             Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Generische Test-Szenarien - können mit Mock oder Real Backend verwendet werden
+    // ========================================================================
+
+    /// Ergebnis eines Test-Szenarios
+    #[derive(Debug)]
+    pub struct ScenarioResult {
+        pub terminated: usize,
+        pub kept: usize,
+        pub created: usize,
+    }
+
+    /// Szenario: Neue Session wird erstellt wenn keine existiert
+    pub async fn scenario_creates_new_session<B: MutagenBackend>(
+        backend: &B,
+        project: &DiscoveredProject,
+    ) -> Result<ScenarioResult, MutagenRunnerError> {
+        let projects = vec![project];
+        let (terminated, kept, created) = sync_stage_sessions(backend, &projects, true).await?;
+        Ok(ScenarioResult { terminated, kept, created })
+    }
+
+    /// Szenario: Bestehende Session wird behalten (stateless)
+    pub async fn scenario_keeps_existing_session<B: MutagenBackend>(
+        backend: &B,
+        project: &DiscoveredProject,
+    ) -> Result<ScenarioResult, MutagenRunnerError> {
+        let projects = vec![project];
+
+        // Erste Sync - erstellt Session
+        sync_stage_sessions(backend, &projects, true).await?;
+
+        // Zweite Sync - sollte Session behalten
+        let (terminated, kept, created) = sync_stage_sessions(backend, &projects, true).await?;
+        Ok(ScenarioResult { terminated, kept, created })
+    }
+
+    /// Szenario: Session wird ersetzt wenn Config sich ändert
+    pub async fn scenario_replaces_on_config_change<B: MutagenBackend>(
+        backend: &B,
+        old_project: &DiscoveredProject,
+        new_project: &DiscoveredProject,
+    ) -> Result<ScenarioResult, MutagenRunnerError> {
+        // Erstelle Session mit alter Config
+        let old_projects = vec![old_project];
+        sync_stage_sessions(backend, &old_projects, true).await?;
+
+        // Sync mit neuer Config - sollte ersetzen
+        let new_projects = vec![new_project];
+        let (terminated, kept, created) = sync_stage_sessions(backend, &new_projects, true).await?;
+        Ok(ScenarioResult { terminated, kept, created })
+    }
+
+    /// Szenario: Session für gelöschtes Projekt wird entfernt
+    pub async fn scenario_cleanup_deleted_project<B: MutagenBackend>(
+        backend: &B,
+        kept_project: &DiscoveredProject,
+        deleted_project: &DiscoveredProject,
+    ) -> Result<usize, MutagenRunnerError> {
+        // Erstelle beide Sessions
+        let all_projects = vec![kept_project, deleted_project];
+        sync_stage_sessions(backend, &all_projects, true).await?;
+
+        // Cleanup mit nur einem Projekt
+        let remaining = vec![kept_project.clone()];
+        let removed = cleanup_removed_projects(backend, &remaining).await?;
+        Ok(removed)
+    }
+
+    /// Szenario: Mehrere Sessions in einer Stage
+    pub async fn scenario_multiple_sessions_same_stage<B: MutagenBackend>(
+        backend: &B,
+        projects: &[&DiscoveredProject],
+    ) -> Result<ScenarioResult, MutagenRunnerError> {
+        let (terminated, kept, created) = sync_stage_sessions(backend, projects, true).await?;
+        Ok(ScenarioResult { terminated, kept, created })
+    }
+
+    /// Szenario: Stateless über mehrere Syncs
+    pub async fn scenario_stateless_multiple_syncs<B: MutagenBackend>(
+        backend: &B,
+        project: &DiscoveredProject,
+    ) -> Result<(ScenarioResult, ScenarioResult, ScenarioResult), MutagenRunnerError> {
+        let projects = vec![project];
+
+        // Erster Sync
+        let (t1, k1, c1) = sync_stage_sessions(backend, &projects, true).await?;
+        let r1 = ScenarioResult { terminated: t1, kept: k1, created: c1 };
+
+        // Zweiter Sync
+        let (t2, k2, c2) = sync_stage_sessions(backend, &projects, true).await?;
+        let r2 = ScenarioResult { terminated: t2, kept: k2, created: c2 };
+
+        // Dritter Sync
+        let (t3, k3, c3) = sync_stage_sessions(backend, &projects, true).await?;
+        let r3 = ScenarioResult { terminated: t3, kept: k3, created: c3 };
+
+        Ok((r1, r2, r3))
+    }
+
+    /// Hilfsfunktion: Terminiert alle Sessions die mit einem Präfix beginnen
+    pub async fn cleanup_sessions_with_prefix<B: MutagenBackend>(
+        backend: &B,
+        prefix: &str,
+    ) -> Result<usize, MutagenRunnerError> {
+        let sessions = backend.list_sessions().await;
+        let mut terminated = 0;
+
+        for session in sessions {
+            if session.name.starts_with(prefix) {
+                backend.terminate_session(&session.identifier).await?;
+                terminated += 1;
+            }
+        }
+
+        Ok(terminated)
+    }
+
+    /// Hilfsfunktion: Wartet bis eine Session "watching" oder "waiting-for-rescan" Status hat
+    pub async fn wait_for_session_complete<B: MutagenBackend>(
+        backend: &B,
+        session_name: &str,
+        timeout_ms: u64,
+    ) -> Result<bool, MutagenRunnerError> {
+        use std::time::{Duration, Instant};
+        use tokio::time::sleep;
+
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+
+        loop {
+            let sessions = backend.list_sessions().await;
+            if let Some(session) = sessions.iter().find(|s| s.name == session_name) {
+                if session.is_complete() {
+                    return Ok(true);
+                }
+            }
+
+            if start.elapsed() > timeout {
+                return Ok(false);
+            }
+
+            sleep(Duration::from_millis(500)).await;
         }
     }
 }
@@ -1494,8 +1735,8 @@ mod tests {
 
         assert!(result.is_ok());
 
-        // Stage 0 sollte complete event haben (non-final)
-        assert!(ui.events.contains(&"stage_complete:0".to_string()));
+        // Stage 0 sollte complete event haben (non-final = false)
+        assert!(ui.events.contains(&"stage_complete:0:false".to_string()));
 
         // Stage 0 Session sollte terminiert worden sein
         let terminated = backend.terminated_sessions();
@@ -1518,8 +1759,8 @@ mod tests {
         // Final stage sollte watch_mode event haben
         assert!(ui.events.contains(&"watch_mode".to_string()));
 
-        // Aber kein stage_complete für Stage 1 (final stage)
-        assert!(!ui.events.contains(&"stage_complete:1".to_string()));
+        // Aber kein stage_complete für Stage 1 (final stage goes to watch mode)
+        assert!(!ui.events.iter().any(|e| e.starts_with("stage_complete:1")));
     }
 
     #[tokio::test]
@@ -1773,13 +2014,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_abort_during_non_final_stage_terminates_sessions() {
-        let backend = Arc::new(MockMutagen::new());
+        // Verwende pending sessions damit die Waiting-Loop nicht sofort beendet wird
+        let backend = Arc::new(MockMutagen::with_pending_sessions());
         let p0 = make_project("shared", "docker://app", 0, "/root");
         let p1 = make_project("app", "docker://app", 1, "/root");
         let projects = vec![p0.clone(), p1];
 
         // Quit während Stage 0 waiting
-        let mut ui = MockUI::new().quit_after(3); // Nach stage_start, sync_result, waiting
+        let mut ui = MockUI::new().quit_after(3);
         let result = run_staged_sync_with_ui(backend.clone(), projects, false, &mut ui).await;
 
         assert!(matches!(result, Err(MutagenRunnerError::UserAborted)));
@@ -1842,8 +2084,8 @@ mod tests {
         assert_eq!(plan.stage_count(), 3);
         assert_eq!(plan.stages_to_run, vec![0, 1, 2]);
         assert_eq!(plan.last_stage, 2);
-        assert!(plan.is_final_stage(2, false));
-        assert!(!plan.is_final_stage(1, false));
+        assert!(plan.is_final_stage(2));
+        assert!(!plan.is_final_stage(1));
     }
 
     #[test]
@@ -1857,6 +2099,6 @@ mod tests {
         assert_eq!(plan.stage_count(), 1);
         assert_eq!(plan.stages_to_run, vec![0]);
         // Mit init_only ist keine Stage final
-        assert!(!plan.is_final_stage(0, true));
+        assert!(!plan.is_final_stage(0));
     }
 }
