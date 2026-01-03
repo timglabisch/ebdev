@@ -10,6 +10,10 @@ sync-example-init: docker-up
 	@sleep 2
 	cd example && cargo run --release --package ebdev -- mutagen sync --init --sync
 
+# Terminate all project sessions
+sync-example-terminate:
+	cd example && cargo run --release --package ebdev -- mutagen sync --terminate
+
 docker-up:
 	cd example && docker compose up -d --build
 

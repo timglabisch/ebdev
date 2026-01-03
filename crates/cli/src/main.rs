@@ -222,34 +222,16 @@ async fn run() -> anyhow::Result<ExitCode> {
                 };
 
                 let mutagen_bin = mutagen_env.bin_path();
-                let projects = discover_projects(&base_path)?;
 
-                // Handle --terminate: terminate all project sessions and exit
+                // Handle --terminate: terminate all mutagen sessions and exit
                 if terminate {
-                    if projects.is_empty() {
-                        println!("No mutagen sync projects found.");
-                        return Ok(ExitCode::SUCCESS);
-                    }
-
-                    let session_names: Vec<String> = projects.iter()
-                        .map(|p| p.session_name())
-                        .collect();
-
-                    println!("Terminating {} session(s)...", session_names.len());
-                    for name in &session_names {
-                        let output = tokio::process::Command::new(&mutagen_bin)
-                            .args(["sync", "terminate", name])
-                            .output()
-                            .await;
-
-                        match output {
-                            Ok(o) if o.status.success() => println!("  Terminated: {}", name),
-                            _ => println!("  Not found or already terminated: {}", name),
-                        }
-                    }
+                    println!("Terminating all mutagen sessions...");
+                    ebdev_mutagen_runner::terminate_all_sessions(&mutagen_bin).await?;
                     println!("Done.");
                     return Ok(ExitCode::SUCCESS);
                 }
+
+                let projects = discover_projects(&base_path)?;
 
                 // Default behavior: --sync only (just final stage)
                 let (run_init, run_sync) = match (init, sync) {
@@ -262,10 +244,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 // Terminate all sessions if --init flag is set
                 if run_init {
                     println!("Terminating all mutagen sessions...");
-                    let _ = tokio::process::Command::new(&mutagen_bin)
-                        .args(["sync", "terminate", "--all"])
-                        .output()
-                        .await;
+                    ebdev_mutagen_runner::terminate_all_sessions(&mutagen_bin).await?;
                 }
 
                 let options = ebdev_mutagen_runner::SyncOptions {

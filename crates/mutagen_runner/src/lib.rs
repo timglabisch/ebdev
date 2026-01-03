@@ -65,6 +65,9 @@ pub trait MutagenBackend: Send + Sync {
     /// Terminiert eine Session anhand ihrer ID
     async fn terminate_session(&self, session_id: &str) -> Result<(), MutagenRunnerError>;
 
+    /// Terminiert alle Sessions
+    async fn terminate_all(&self) -> Result<(), MutagenRunnerError>;
+
     /// Spawnt einen Status-Poller für die TUI (optional)
     /// Gibt None zurück wenn nicht unterstützt (z.B. bei Mocks)
     fn spawn_status_poller(&self, tx: mpsc::Sender<TuiMessage>) -> Option<tokio::task::JoinHandle<()>> {
@@ -174,6 +177,26 @@ impl MutagenBackend for RealMutagen {
                 return Err(MutagenRunnerError::CommandFailed(format!(
                     "Failed to terminate session {}: {}",
                     session_id, stderr
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn terminate_all(&self) -> Result<(), MutagenRunnerError> {
+        let output = Command::new(&self.bin_path)
+            .args(["sync", "terminate", "--all"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("no sessions") {
+                return Err(MutagenRunnerError::CommandFailed(format!(
+                    "Failed to terminate all sessions: {}", stderr
                 )));
             }
         }
@@ -528,6 +551,12 @@ pub async fn run_staged_sync_with_options(
 ) -> Result<(), MutagenRunnerError> {
     let backend = Arc::new(RealMutagen::new(mutagen_bin.to_path_buf()));
     run_staged_sync_with_backend_and_options(backend, projects, options).await
+}
+
+/// Terminates all mutagen sessions.
+pub async fn terminate_all_sessions(mutagen_bin: &Path) -> Result<(), MutagenRunnerError> {
+    let backend = RealMutagen::new(mutagen_bin.to_path_buf());
+    backend.terminate_all().await
 }
 
 /// Runs staged mutagen sync mit einem beliebigen MutagenBackend.
@@ -1046,6 +1075,11 @@ pub mod test_utils {
             self.terminate_calls.lock().unwrap().push(session_id.to_string());
             // Entferne die Session aus der Liste
             self.sessions.lock().unwrap().retain(|s| s.identifier != session_id);
+            Ok(())
+        }
+
+        async fn terminate_all(&self) -> Result<(), MutagenRunnerError> {
+            self.sessions.lock().unwrap().clear();
             Ok(())
         }
     }
