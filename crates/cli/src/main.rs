@@ -44,6 +44,13 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a task defined in .ebdev.ts
+    Task {
+        /// Task name to run
+        name: String,
+    },
+    /// List all available tasks from .ebdev.ts
+    Tasks,
 }
 
 #[derive(Subcommand)]
@@ -137,7 +144,7 @@ async fn ensure_toolchain(
     Ok((node_env, mutagen_env))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     match run().await {
         Ok(code) => code,
@@ -289,6 +296,48 @@ async fn run() -> anyhow::Result<ExitCode> {
             let status = node_env.run(&command, &args_ref, &path).await?;
 
             return Ok(ExitCode::from(status.code().unwrap_or(1) as u8));
+        }
+        Commands::Tasks => {
+            let config_path = base_path.join(".ebdev.ts");
+            if !config_path.exists() {
+                eprintln!("No .ebdev.ts found in current directory");
+                return Ok(ExitCode::FAILURE);
+            }
+
+            let tasks = ebdev_toolchain_deno::list_tasks(&config_path).await?;
+
+            if tasks.is_empty() {
+                println!("No tasks found in .ebdev.ts");
+                println!();
+                println!("Define tasks as exported async functions:");
+                println!();
+                println!("  export async function build() {{");
+                println!("    await exec([\"npm\", \"run\", \"build\"]);");
+                println!("  }}");
+            } else {
+                println!("Available tasks:\n");
+                for task in tasks {
+                    println!("  {}", task);
+                }
+                println!();
+                println!("Run a task with: ebdev task <name>");
+            }
+        }
+        Commands::Task { name } => {
+            let config_path = base_path.join(".ebdev.ts");
+            if !config_path.exists() {
+                eprintln!("No .ebdev.ts found in current directory");
+                return Ok(ExitCode::FAILURE);
+            }
+
+            println!("Running task: {}\n", name);
+
+            if let Err(e) = ebdev_toolchain_deno::run_task(&config_path, &name, None).await {
+                eprintln!("Task failed: {}", e);
+                return Ok(ExitCode::FAILURE);
+            }
+
+            println!("\nTask '{}' completed successfully.", name);
         }
     }
 

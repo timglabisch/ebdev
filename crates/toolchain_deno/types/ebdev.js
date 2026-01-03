@@ -56,3 +56,130 @@ globalThis.defineConfig = defineConfig;
 globalThis.presets = presets;
 globalThis.mergeIgnore = mergeIgnore;
 globalThis.gitignore = gitignore;
+
+// =============================================================================
+// Task Runner API
+// =============================================================================
+
+/**
+ * Execute a local command
+ * @param {string[]} cmd - Command and arguments as array
+ * @param {Object} [options] - Options
+ * @param {string} [options.cwd] - Working directory
+ * @param {Record<string, string>} [options.env] - Environment variables
+ * @param {string} [options.name] - Display name for TUI
+ * @returns {Promise<{exitCode: number, stdout: string, stderr: string}>}
+ */
+export async function exec(cmd, options = {}) {
+  if (!Array.isArray(cmd) || cmd.length === 0) {
+    throw new Error("exec: cmd must be a non-empty array");
+  }
+  return await Deno.core.ops.op_exec({
+    cmd,
+    cwd: options.cwd,
+    env: options.env,
+    name: options.name,
+  });
+}
+
+/**
+ * Execute a shell script (supports pipes, redirects, etc.)
+ * @param {string} script - Shell script to execute
+ * @param {Object} [options] - Options
+ * @param {string} [options.cwd] - Working directory
+ * @param {Record<string, string>} [options.env] - Environment variables
+ * @param {string} [options.name] - Display name for TUI
+ * @returns {Promise<{exitCode: number, stdout: string, stderr: string}>}
+ */
+export async function shell(script, options = {}) {
+  if (typeof script !== "string") {
+    throw new Error("shell: script must be a string");
+  }
+  return await Deno.core.ops.op_shell({
+    script,
+    cwd: options.cwd,
+    env: options.env,
+    name: options.name,
+  });
+}
+
+/**
+ * Execute commands in parallel
+ * @param {...(() => Promise<any>)} fns - Functions to execute in parallel
+ * @returns {Promise<any[]>}
+ */
+export async function parallel(...fns) {
+  if (fns.length === 0) {
+    return [];
+  }
+
+  await Deno.core.ops.op_parallel_begin(fns.length);
+
+  try {
+    const results = await Promise.all(fns.map(fn => fn()));
+    return results;
+  } finally {
+    await Deno.core.ops.op_parallel_end();
+  }
+}
+
+/**
+ * Docker operations
+ */
+export const docker = {
+  /**
+   * Execute a command in a running container
+   * @param {string} container - Container name or ID
+   * @param {string[]} cmd - Command and arguments as array
+   * @param {Object} [options] - Options
+   * @param {string} [options.user] - User to run as
+   * @param {Record<string, string>} [options.env] - Environment variables
+   * @param {string} [options.name] - Display name for TUI
+   * @returns {Promise<{exitCode: number, stdout: string, stderr: string}>}
+   */
+  async exec(container, cmd, options = {}) {
+    if (typeof container !== "string") {
+      throw new Error("docker.exec: container must be a string");
+    }
+    if (!Array.isArray(cmd) || cmd.length === 0) {
+      throw new Error("docker.exec: cmd must be a non-empty array");
+    }
+    return await Deno.core.ops.op_docker_exec({
+      container,
+      cmd,
+      user: options.user,
+      env: options.env,
+      name: options.name,
+    });
+  },
+
+  /**
+   * Run a command in a new container
+   * @param {string} image - Docker image
+   * @param {string[]} cmd - Command and arguments as array
+   * @param {Object} [options] - Options
+   * @param {string[]} [options.volumes] - Volume mounts
+   * @param {string} [options.workdir] - Working directory in container
+   * @param {string} [options.network] - Network mode
+   * @param {Record<string, string>} [options.env] - Environment variables
+   * @param {string} [options.name] - Display name for TUI
+   * @returns {Promise<{exitCode: number, stdout: string, stderr: string}>}
+   */
+  async run(image, cmd, options = {}) {
+    if (typeof image !== "string") {
+      throw new Error("docker.run: image must be a string");
+    }
+    if (!Array.isArray(cmd) || cmd.length === 0) {
+      throw new Error("docker.run: cmd must be a non-empty array");
+    }
+    return await Deno.core.ops.op_docker_run({
+      image,
+      cmd,
+      volumes: options.volumes,
+      workdir: options.workdir,
+      network: options.network,
+      env: options.env,
+      name: options.name,
+    });
+  },
+};

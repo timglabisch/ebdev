@@ -988,6 +988,7 @@ dependencies = [
  "ebdev-mutagen-config",
  "ebdev-mutagen-runner",
  "ebdev-toolchain",
+ "ebdev-toolchain-deno",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
  "predicates",

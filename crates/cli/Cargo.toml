@@ -11,6 +11,7 @@ path = "src/main.rs"
 ebdev-toolchain = { path = "../toolchain" }
 ebdev-toolchain-node = { path = "../toolchain_node" }
 ebdev-toolchain-mutagen = { path = "../toolchain_mutagen" }
+ebdev-toolchain-deno = { path = "../toolchain_deno" }
 ebdev-config = { path = "../ebdev_config" }
 ebdev-mutagen-config = { path = "../mutagen_config" }
 ebdev-mutagen-runner = { path = "../mutagen_runner" }
