@@ -29,7 +29,7 @@ pub enum SyncMode {
 }
 
 /// Polling configuration for mutagen sync
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PollingConfig {
     /// Enable polling instead of filesystem watching
     #[serde(default)]

@@ -15,6 +15,11 @@ use ebdev_mutagen_config::{DiscoveredProject, SyncMode};
 pub mod status;
 pub mod tui;
 
+// Operator Pattern Module
+pub mod state;
+pub mod reconcile;
+pub mod controller;
+
 use status::MutagenSession;
 use tui::{App, SessionState, TuiMessage};
 
@@ -59,6 +64,13 @@ pub trait MutagenBackend: Send + Sync {
     async fn create_session(
         &self,
         project: &DiscoveredProject,
+        no_watch: bool,
+    ) -> Result<String, MutagenRunnerError>;
+
+    /// Erstellt eine neue Sync-Session aus einer DesiredSession
+    async fn create_session_from_desired(
+        &self,
+        session: &state::DesiredSession,
         no_watch: bool,
     ) -> Result<String, MutagenRunnerError>;
 
@@ -161,6 +173,57 @@ impl MutagenBackend for RealMutagen {
         }
 
         Ok(session_name)
+    }
+
+    async fn create_session_from_desired(
+        &self,
+        session: &state::DesiredSession,
+        no_watch: bool,
+    ) -> Result<String, MutagenRunnerError> {
+        let alpha = session.alpha.to_string_lossy().to_string();
+
+        let mut args = vec![
+            "sync".to_string(),
+            "create".to_string(),
+            alpha,
+            session.beta.clone(),
+            format!("--name={}", session.name),
+        ];
+
+        let mode_str = match session.mode {
+            SyncMode::TwoWay => "two-way-safe",
+            SyncMode::OneWayCreate => "one-way-safe",
+            SyncMode::OneWayReplica => "one-way-replica",
+        };
+        args.push(format!("--sync-mode={}", mode_str));
+
+        for pattern in &session.ignore {
+            args.push(format!("--ignore={}", pattern));
+        }
+
+        if no_watch {
+            args.push("--watch-mode=no-watch".to_string());
+        } else if session.polling.enabled {
+            args.push("--watch-mode=force-poll".to_string());
+            args.push(format!("--watch-polling-interval={}", session.polling.interval));
+        }
+
+        let output = Command::new(&self.bin_path)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(MutagenRunnerError::CommandFailed(format!(
+                "Failed to create sync '{}': {}",
+                session.name, stderr
+            )));
+        }
+
+        Ok(session.name.clone())
     }
 
     async fn terminate_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
@@ -328,6 +391,23 @@ pub trait SyncUI {
 
     /// Markiert Sessions als erstellt (nur für TUI relevant)
     fn mark_sessions_created(&mut self, _session_names: &[String]) {}
+
+    // =========================================================================
+    // V2 Methods for Operator Pattern Controller
+    // =========================================================================
+
+    /// Wird aufgerufen wenn eine Stage beginnt (V2 - mit DesiredSession)
+    fn on_stage_start_v2(&mut self, stage: i32, session_count: usize, is_final: bool) {
+        // Default: Rufe alte Methode auf mit leerem Slice
+        let empty: Vec<&DiscoveredProject> = vec![];
+        self.on_stage_start(stage, &empty, is_final);
+        let _ = session_count; // Für Implementierungen die die Anzahl brauchen
+    }
+
+    /// Setzt Sessions für eine Stage (V2 - mit DesiredSession)
+    fn set_stage_sessions_v2(&mut self, _stage_idx: usize, _sessions: &[&state::DesiredSession], _is_final: bool) {
+        // Default: Nichts tun (TUI override diese Methode)
+    }
 }
 
 // ============================================================================
@@ -355,6 +435,14 @@ impl SyncUI for HeadlessUI {
         println!("\n=== Stage {} ({} project(s)){} ===",
             stage,
             projects.len(),
+            if is_final { " [WATCH MODE]" } else { "" }
+        );
+    }
+
+    fn on_stage_start_v2(&mut self, stage: i32, session_count: usize, is_final: bool) {
+        println!("\n=== Stage {} ({} session(s)){} ===",
+            stage,
+            session_count,
             if is_final { " [WATCH MODE]" } else { "" }
         );
     }
@@ -635,7 +723,59 @@ pub async fn run_staged_sync_with_ui<M: MutagenBackend, U: SyncUI>(
 }
 
 // ============================================================================
-// Core Sync Logic - einzige Implementierung
+// V2 API - Uses Operator Pattern Controller
+// ============================================================================
+
+/// Runs staged mutagen sync using the new Operator Pattern Controller.
+///
+/// This is the new recommended API that uses the reconciliation-based controller.
+///
+/// # Arguments
+/// * `backend` - The Mutagen backend (real or mock)
+/// * `projects` - List of discovered projects
+/// * `options` - Sync options (init_stages, final_stage, keep_open)
+///
+/// # Example
+/// ```ignore
+/// let backend = Arc::new(RealMutagen::new(mutagen_bin));
+/// let projects = discover_projects(&base_path)?;
+/// let options = SyncOptions::default();
+///
+/// run_sync_v2(backend, projects, options, HeadlessUI).await?;
+/// ```
+pub async fn run_sync_v2<B: MutagenBackend + 'static, U: SyncUI>(
+    backend: Arc<B>,
+    projects: Vec<DiscoveredProject>,
+    options: SyncOptions,
+    mut ui: U,
+) -> Result<(), MutagenRunnerError> {
+    // Create DesiredState from projects
+    let desired = state::DesiredState::from_projects(&projects);
+
+    if desired.sessions.is_empty() {
+        return Ok(());
+    }
+
+    // Init UI
+    let init_only = options.run_init_stages && !options.run_final_stage;
+    ui.on_start(desired.stages.len(), init_only);
+
+    // Run controller
+    let controller = controller::SyncController::new(backend, desired, options, ui);
+    controller.run().await
+}
+
+/// Convenience function: runs sync with HeadlessUI
+pub async fn run_sync_headless<B: MutagenBackend + 'static>(
+    backend: Arc<B>,
+    projects: Vec<DiscoveredProject>,
+    options: SyncOptions,
+) -> Result<(), MutagenRunnerError> {
+    run_sync_v2(backend, projects, options, HeadlessUI).await
+}
+
+// ============================================================================
+// Core Sync Logic - einzige Implementierung (Legacy)
 // ============================================================================
 
 async fn run_staged_sync_impl<M: MutagenBackend, U: SyncUI>(
@@ -1059,6 +1199,24 @@ pub mod test_utils {
             no_watch: bool,
         ) -> Result<String, MutagenRunnerError> {
             let session_name = project.session_name();
+            self.create_calls.lock().unwrap().push((session_name.clone(), no_watch));
+
+            // Füge die Session auch zur Liste hinzu
+            let mut session = mock_session(&session_name);
+            if self.create_pending_sessions {
+                session.status = "connecting".to_string();
+            }
+            self.sessions.lock().unwrap().push(session);
+
+            Ok(session_name)
+        }
+
+        async fn create_session_from_desired(
+            &self,
+            desired: &state::DesiredSession,
+            no_watch: bool,
+        ) -> Result<String, MutagenRunnerError> {
+            let session_name = desired.name.clone();
             self.create_calls.lock().unwrap().push((session_name.clone(), no_watch));
 
             // Füge die Session auch zur Liste hinzu

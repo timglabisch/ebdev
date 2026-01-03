@@ -253,12 +253,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                     keep_open,
                 };
 
-                ebdev_mutagen_runner::run_staged_sync_with_options(
-                    &mutagen_bin,
-                    &base_path,
-                    projects,
-                    options,
-                ).await?;
+                // Use new V2 API with Operator Pattern Controller
+                let backend = std::sync::Arc::new(
+                    ebdev_mutagen_runner::RealMutagen::new(mutagen_bin.to_path_buf())
+                );
+                ebdev_mutagen_runner::run_sync_headless(backend, projects, options).await?;
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {
