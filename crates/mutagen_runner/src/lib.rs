@@ -61,13 +61,13 @@ pub async fn run_staged_sync(
 }
 
 // ============================================================================
-// Core Logic - zentrale Session-Verwaltung
+// Core Logic - zentrale Session-Verwaltung (stateless)
 // ============================================================================
 
-/// Cleanup sessions: terminate ALL sessions belonging to this root.
-/// This ensures a clean slate at startup before creating new sessions.
+/// Cleanup sessions for projects that no longer exist in config.
+/// Only terminates sessions whose project name doesn't match any current project.
 /// Returns number of terminated sessions.
-async fn cleanup_sessions(
+async fn cleanup_removed_projects(
     mutagen_bin: &Path,
     projects: &[DiscoveredProject],
 ) -> Result<usize, MutagenRunnerError> {
@@ -78,16 +78,25 @@ async fn cleanup_sessions(
     let root_crc32 = projects[0].root_crc32();
     let root_suffix = format!("{:08x}", root_crc32);
 
-    // Get current sessions
     let current_sessions = poll_status(mutagen_bin).await;
 
-    // Terminate ALL sessions that belong to this root
+    // Collect all valid project name prefixes
+    let valid_prefixes: HashSet<String> = projects.iter()
+        .map(|p| format!("{}-", p.project.name))
+        .collect();
+
     let mut terminated = 0;
     for session in &current_sessions {
         if let Some(suffix) = DiscoveredProject::extract_root_crc32_suffix(&session.name) {
             if suffix == root_suffix {
-                let _ = terminate_session_by_id(mutagen_bin, &session.identifier).await;
-                terminated += 1;
+                // Session belongs to this root - check if project still exists
+                let project_still_exists = valid_prefixes.iter()
+                    .any(|prefix| session.name.starts_with(prefix));
+
+                if !project_still_exists {
+                    let _ = terminate_session_by_id(mutagen_bin, &session.identifier).await;
+                    terminated += 1;
+                }
             }
         }
     }
@@ -95,10 +104,65 @@ async fn cleanup_sessions(
     Ok(terminated)
 }
 
-/// Synchronize sessions to match desired state (for hot-reload).
-/// - Terminates sessions that no longer exist in projects (by root_crc32)
-/// - Keeps sessions that match exactly (same session_name)
-/// - Creates sessions that are missing
+/// Sync sessions for a specific stage (stateless).
+/// For each project in the stage:
+/// - If a session with exact name exists: keep it
+/// - If a session with same project name but different CRC exists: terminate it
+/// - If no session exists: create it
+/// Returns (terminated, kept, created) counts
+async fn sync_stage_sessions(
+    mutagen_bin: &Path,
+    stage_projects: &[&DiscoveredProject],
+    no_watch: bool,
+) -> Result<(usize, usize, usize), MutagenRunnerError> {
+    if stage_projects.is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    let root_crc32 = stage_projects[0].root_crc32();
+    let root_suffix = format!("{:08x}", root_crc32);
+
+    let current_sessions = poll_status(mutagen_bin).await;
+
+    let mut terminated = 0;
+    let mut kept = 0;
+    let mut created = 0;
+
+    for project in stage_projects {
+        let expected_name = project.session_name();
+        let project_prefix = format!("{}-", project.project.name);
+
+        // Find existing sessions for this project
+        let mut found_matching = false;
+        for session in &current_sessions {
+            if session.name.starts_with(&project_prefix) {
+                if let Some(suffix) = DiscoveredProject::extract_root_crc32_suffix(&session.name) {
+                    if suffix == root_suffix {
+                        if session.name == expected_name {
+                            // Exact match - keep
+                            found_matching = true;
+                            kept += 1;
+                        } else {
+                            // Same project, same root, but different config CRC - terminate
+                            let _ = terminate_session_by_id(mutagen_bin, &session.identifier).await;
+                            terminated += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create if no matching session found
+        if !found_matching {
+            create_sync_session(mutagen_bin, project, no_watch).await?;
+            created += 1;
+        }
+    }
+
+    Ok((terminated, kept, created))
+}
+
+/// Synchronize ALL sessions to match desired state (for hot-reload).
 /// Returns (terminated, kept, created) counts
 async fn sync_sessions(
     mutagen_bin: &Path,
@@ -109,46 +173,14 @@ async fn sync_sessions(
         return Ok((0, 0, 0));
     }
 
-    let root_crc32 = projects[0].root_crc32();
-    let root_suffix = format!("{:08x}", root_crc32);
+    // First cleanup removed projects
+    let removed = cleanup_removed_projects(mutagen_bin, projects).await?;
 
-    // Get current sessions
-    let current_sessions = poll_status(mutagen_bin).await;
+    // Then sync all projects
+    let project_refs: Vec<&DiscoveredProject> = projects.iter().collect();
+    let (term, kept, created) = sync_stage_sessions(mutagen_bin, &project_refs, no_watch).await?;
 
-    // Build set of expected session names
-    let expected_names: HashSet<String> = projects.iter()
-        .map(|p| p.session_name())
-        .collect();
-
-    // Find sessions to terminate (belong to this root but not in expected)
-    let mut terminated = 0;
-    let mut kept_names: HashSet<String> = HashSet::new();
-
-    for session in &current_sessions {
-        if let Some(suffix) = DiscoveredProject::extract_root_crc32_suffix(&session.name) {
-            if suffix == root_suffix {
-                if expected_names.contains(&session.name) {
-                    kept_names.insert(session.name.clone());
-                } else {
-                    // Session no longer needed - terminate by ID
-                    let _ = terminate_session_by_id(mutagen_bin, &session.identifier).await;
-                    terminated += 1;
-                }
-            }
-        }
-    }
-
-    // Create sessions that don't exist yet
-    let mut created = 0;
-    for project in projects {
-        let session_name = project.session_name();
-        if !kept_names.contains(&session_name) {
-            create_sync_session(mutagen_bin, project, no_watch).await?;
-            created += 1;
-        }
-    }
-
-    Ok((terminated, kept_names.len(), created))
+    Ok((removed + term, kept, created))
 }
 
 /// Wait for all sessions in the list to complete their initial sync
@@ -222,10 +254,10 @@ async fn run_staged_sync_headless(
         if init_only { " (init mode)" } else { "" }
     );
 
-    // Cleanup sessions that no longer exist in config
-    let terminated = cleanup_sessions(mutagen_bin, &projects).await?;
-    if terminated > 0 {
-        println!("Cleaned up {} outdated session(s)", terminated);
+    // Cleanup sessions for projects that no longer exist in config
+    let removed = cleanup_removed_projects(mutagen_bin, &projects).await?;
+    if removed > 0 {
+        println!("Removed {} session(s) for deleted projects", removed);
     }
 
     // Process each stage
@@ -239,15 +271,15 @@ async fn run_staged_sync_headless(
             if is_final { " [WATCH MODE]" } else { "" }
         );
 
-        // Create sessions for this stage
+        // Sync sessions for this stage (stateless: keeps matching, terminates outdated, creates new)
         let no_watch = !is_final;
         let session_names: Vec<String> = stage_projects.iter()
             .map(|p| p.session_name())
             .collect();
 
-        for project in &stage_projects {
-            create_sync_session(mutagen_bin, project, no_watch).await?;
-            println!("  Created: {}", project.session_name());
+        let (term, kept, created) = sync_stage_sessions(mutagen_bin, &stage_projects, no_watch).await?;
+        if term > 0 || kept > 0 || created > 0 {
+            println!("  Synced: -{} ={} +{}", term, kept, created);
         }
 
         if is_final {
@@ -273,7 +305,7 @@ async fn run_staged_sync_headless(
                                 &new_projects,
                                 false,
                             ).await?;
-                            println!("  Terminated: {}, Kept: {}, Created: {}", term, kept, created);
+                            println!("  Synced: -{} ={} +{}", term, kept, created);
                         }
                         Err(e) => eprintln!("  Failed to reload: {}", e),
                     }
@@ -333,10 +365,10 @@ async fn run_staged_sync_tui(
     let (tx, mut rx) = mpsc::channel::<TuiMessage>(100);
     let poller_handle = tui::spawn_status_poller(mutagen_bin.to_path_buf(), tx.clone());
 
-    // Cleanup sessions that no longer exist in config
-    let terminated = cleanup_sessions(mutagen_bin, &projects).await?;
-    if terminated > 0 {
-        app.set_message(format!("Cleaned up {} outdated session(s)", terminated));
+    // Cleanup sessions for projects that no longer exist in config
+    let removed = cleanup_removed_projects(mutagen_bin, &projects).await?;
+    if removed > 0 {
+        app.set_message(format!("Removed {} session(s) for deleted projects", removed));
     }
 
     let result = run_stages_tui_loop(
@@ -391,24 +423,27 @@ async fn run_stages_tui_loop(
             .collect();
         app.set_stage(stage_idx as i32, sessions, is_final);
 
-        // Create sessions for this stage
+        // Sync sessions for this stage (stateless)
         let no_watch = !is_final;
-        let mut session_names = Vec::new();
+        let session_names: Vec<String> = stage_projects.iter()
+            .map(|p| p.session_name())
+            .collect();
 
-        for project in &stage_projects {
-            // Check for quit
-            terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
-            if tui::handle_events().map_err(MutagenRunnerError::Execution)? {
-                terminate_sessions_by_name(mutagen_bin, &session_names).await?;
-                return Err(MutagenRunnerError::UserAborted);
-            }
+        // Check for quit before syncing
+        terminal.draw(|f| tui::draw(f, app)).map_err(MutagenRunnerError::Execution)?;
+        if tui::handle_events().map_err(MutagenRunnerError::Execution)? {
+            return Err(MutagenRunnerError::UserAborted);
+        }
 
-            create_sync_session(mutagen_bin, project, no_watch).await?;
-            let name = project.session_name();
-            app.mark_session_created(&name);
-            session_names.push(name);
+        let (term, kept, created) = sync_stage_sessions(mutagen_bin, &stage_projects, no_watch).await?;
 
-            sleep(Duration::from_millis(200)).await;
+        // Mark all sessions as created in TUI
+        for name in &session_names {
+            app.mark_session_created(name);
+        }
+
+        if term > 0 || kept > 0 || created > 0 {
+            app.set_message(format!("Synced: -{} ={} +{}", term, kept, created));
         }
 
         if is_final {
