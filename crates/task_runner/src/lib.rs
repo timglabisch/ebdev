@@ -72,6 +72,13 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
+    /// Begin a new stage (collapses previous tasks, shows stage header)
+    pub fn stage_begin(&self, name: &str) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::StageBegin { name: name.to_string() })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
     /// Shutdown the executor
     pub fn shutdown(&self) -> Result<(), TaskRunnerError> {
         self.tx
@@ -157,6 +164,8 @@ mod tests {
             cwd: None,
             env: None,
             name: None,
+            timeout: None,
+            ignore_error: false,
         }).await;
 
         assert!(result.is_ok());
@@ -178,6 +187,8 @@ mod tests {
             cwd: None,
             env: None,
             name: Some("Task 1".into()),
+            timeout: None,
+            ignore_error: false,
         });
 
         let r2 = handle.execute(Command::Exec {
@@ -185,6 +196,8 @@ mod tests {
             cwd: None,
             env: None,
             name: Some("Task 2".into()),
+            timeout: None,
+            ignore_error: false,
         });
 
         let (result1, result2) = tokio::join!(r1, r2);

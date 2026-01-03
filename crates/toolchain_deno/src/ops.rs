@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// State stored in Deno runtime for task runner ops
 #[derive(Default)]
@@ -21,6 +22,10 @@ pub struct ExecArgs {
     cwd: Option<String>,
     env: Option<HashMap<String, String>>,
     name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>, // in seconds
+    #[serde(default)]
+    ignore_error: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +34,10 @@ pub struct ShellArgs {
     cwd: Option<String>,
     env: Option<HashMap<String, String>>,
     name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +47,10 @@ pub struct DockerExecArgs {
     user: Option<String>,
     env: Option<HashMap<String, String>>,
     name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,14 +62,19 @@ pub struct DockerRunArgs {
     network: Option<String>,
     env: Option<HashMap<String, String>>,
     name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ExecResult {
     #[serde(rename = "exitCode")]
     exit_code: i32,
-    stdout: String,
-    stderr: String,
+    success: bool,
+    #[serde(rename = "timedOut")]
+    timed_out: bool,
 }
 
 #[op2(async)]
@@ -72,13 +90,15 @@ pub async fn op_exec(
     };
 
     let command = Command::Exec {
-        cmd: args.cmd,
+        cmd: args.cmd.clone(),
         cwd: args.cwd.or(state_cwd),
         env: args.env,
-        name: args.name,
+        name: args.name.clone(),
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command).await
+    execute_command(handle, command, args.ignore_error, args.name.unwrap_or_else(|| args.cmd.join(" "))).await
 }
 
 #[op2(async)]
@@ -93,14 +113,24 @@ pub async fn op_shell(
         (runner_state.handle.clone(), runner_state.cwd.clone())
     };
 
+    let display_name = args.name.clone().unwrap_or_else(|| {
+        if args.script.len() > 40 {
+            format!("{}...", &args.script[..37])
+        } else {
+            args.script.clone()
+        }
+    });
+
     let command = Command::Shell {
         script: args.script,
         cwd: args.cwd.or(state_cwd),
         env: args.env,
         name: args.name,
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command).await
+    execute_command(handle, command, args.ignore_error, display_name).await
 }
 
 #[op2(async)]
@@ -115,15 +145,21 @@ pub async fn op_docker_exec(
         runner_state.handle.clone()
     };
 
+    let display_name = args.name.clone().unwrap_or_else(|| {
+        format!("docker exec {} {}", args.container, args.cmd.join(" "))
+    });
+
     let command = Command::DockerExec {
         container: args.container,
         cmd: args.cmd,
         user: args.user,
         env: args.env,
         name: args.name,
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command).await
+    execute_command(handle, command, args.ignore_error, display_name).await
 }
 
 #[op2(async)]
@@ -138,6 +174,10 @@ pub async fn op_docker_run(
         runner_state.handle.clone()
     };
 
+    let display_name = args.name.clone().unwrap_or_else(|| {
+        format!("docker run {} {}", args.image, args.cmd.join(" "))
+    });
+
     let command = Command::DockerRun {
         image: args.image,
         cmd: args.cmd,
@@ -146,9 +186,11 @@ pub async fn op_docker_run(
         network: args.network,
         env: args.env,
         name: args.name,
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command).await
+    execute_command(handle, command, args.ignore_error, display_name).await
 }
 
 #[op2(async)]
@@ -184,9 +226,28 @@ pub async fn op_parallel_end(
     Ok(())
 }
 
+#[op2(async)]
+pub async fn op_stage(
+    state: Rc<RefCell<OpState>>,
+    #[string] name: String,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.stage_begin(&name)
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
 async fn execute_command(
     handle: Option<TaskRunnerHandle>,
     command: Command,
+    ignore_error: bool,
+    display_name: String,
 ) -> Result<ExecResult, JsErrorBox> {
     let h = handle.ok_or_else(|| {
         JsErrorBox::generic("No task runner handle. Tasks must be run via 'ebdev task'.")
@@ -195,10 +256,27 @@ async fn execute_command(
     let result = h.execute(command).await
         .map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
+    // Check for failure
+    if !ignore_error {
+        if result.timed_out {
+            return Err(JsErrorBox::generic(format!(
+                "Command '{}' timed out",
+                display_name
+            )));
+        }
+        if !result.success {
+            return Err(JsErrorBox::generic(format!(
+                "Command '{}' failed with exit code {}",
+                display_name,
+                result.exit_code
+            )));
+        }
+    }
+
     Ok(ExecResult {
         exit_code: result.exit_code,
-        stdout: String::new(), // Output goes to UI
-        stderr: String::new(),
+        success: result.success,
+        timed_out: result.timed_out,
     })
 }
 
@@ -220,5 +298,6 @@ deno_core::extension!(
         op_docker_run,
         op_parallel_begin,
         op_parallel_end,
+        op_stage,
     ],
 );

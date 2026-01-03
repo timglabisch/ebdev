@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// Unique ID for commands
 pub type CommandId = u64;
+
+/// Default timeout for commands (5 minutes)
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A command to be executed
 #[derive(Debug, Clone)]
@@ -13,6 +17,8 @@ pub enum Command {
         cwd: Option<String>,
         env: Option<HashMap<String, String>>,
         name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
     },
     /// Execute a shell script
     Shell {
@@ -20,6 +26,8 @@ pub enum Command {
         cwd: Option<String>,
         env: Option<HashMap<String, String>>,
         name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
     },
     /// Execute in a docker container
     DockerExec {
@@ -28,6 +36,8 @@ pub enum Command {
         user: Option<String>,
         env: Option<HashMap<String, String>>,
         name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
     },
     /// Run a new docker container
     DockerRun {
@@ -38,6 +48,8 @@ pub enum Command {
         network: Option<String>,
         env: Option<HashMap<String, String>>,
         name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
     },
 }
 
@@ -145,6 +157,26 @@ impl Command {
             Command::DockerRun { .. } => None,  // Handled in to_cmd_args
         }
     }
+
+    /// Get the timeout for this command
+    pub fn timeout(&self) -> Duration {
+        match self {
+            Command::Exec { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+            Command::Shell { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+            Command::DockerExec { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+            Command::DockerRun { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+        }
+    }
+
+    /// Check if errors should be ignored for this command
+    pub fn ignore_error(&self) -> bool {
+        match self {
+            Command::Exec { ignore_error, .. } => *ignore_error,
+            Command::Shell { ignore_error, .. } => *ignore_error,
+            Command::DockerExec { ignore_error, .. } => *ignore_error,
+            Command::DockerRun { ignore_error, .. } => *ignore_error,
+        }
+    }
 }
 
 /// Result of command execution
@@ -152,6 +184,7 @@ impl Command {
 pub struct CommandResult {
     pub exit_code: i32,
     pub success: bool,
+    pub timed_out: bool,
 }
 
 /// A request to execute a command, with a channel to send the result back
@@ -169,6 +202,8 @@ pub enum ExecutorMessage {
     ParallelBegin { count: usize },
     /// End a parallel group
     ParallelEnd,
+    /// Begin a new stage (collapses previous stage, shows new header)
+    StageBegin { name: String },
     /// Shutdown the executor
     Shutdown,
 }

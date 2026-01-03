@@ -183,4 +183,151 @@ declare module "ebdev" {
    * @returns Combined array of unique ignore patterns
    */
   export function mergeIgnore(...lists: (string[] | undefined)[]): string[];
+
+  // =============================================================================
+  // Task Runner API
+  // =============================================================================
+
+  /**
+   * Result of command execution
+   */
+  export interface ExecResult {
+    /** Exit code of the command */
+    exitCode: number;
+    /** Whether the command succeeded (exit code 0) */
+    success: boolean;
+    /** Whether the command timed out */
+    timedOut: boolean;
+  }
+
+  /**
+   * Options for exec and shell commands
+   */
+  export interface ExecOptions {
+    /** Working directory */
+    cwd?: string;
+    /** Environment variables */
+    env?: Record<string, string>;
+    /** Display name for TUI */
+    name?: string;
+    /** Timeout in seconds (default: 300) */
+    timeout?: number;
+  }
+
+  /**
+   * Options for docker.exec command
+   */
+  export interface DockerExecOptions {
+    /** User to run as */
+    user?: string;
+    /** Environment variables */
+    env?: Record<string, string>;
+    /** Display name for TUI */
+    name?: string;
+    /** Timeout in seconds (default: 300) */
+    timeout?: number;
+  }
+
+  /**
+   * Options for docker.run command
+   */
+  export interface DockerRunOptions {
+    /** Volume mounts */
+    volumes?: string[];
+    /** Working directory in container */
+    workdir?: string;
+    /** Network mode */
+    network?: string;
+    /** Environment variables */
+    env?: Record<string, string>;
+    /** Display name for TUI */
+    name?: string;
+    /** Timeout in seconds (default: 300) */
+    timeout?: number;
+  }
+
+  /**
+   * Execute a local command
+   * @param cmd - Command and arguments as array
+   * @param options - Options
+   * @throws Error if command fails or times out
+   */
+  export function exec(cmd: string[], options?: ExecOptions): Promise<ExecResult>;
+
+  /**
+   * Execute a local command, ignoring errors (returns result instead of throwing)
+   * @param cmd - Command and arguments as array
+   * @param options - Options
+   */
+  export function tryExec(cmd: string[], options?: ExecOptions): Promise<ExecResult>;
+
+  /**
+   * Execute a shell script (supports pipes, redirects, etc.)
+   * @param script - Shell script to execute
+   * @param options - Options
+   * @throws Error if command fails or times out
+   */
+  export function shell(script: string, options?: ExecOptions): Promise<ExecResult>;
+
+  /**
+   * Execute a shell script, ignoring errors (returns result instead of throwing)
+   * @param script - Shell script to execute
+   * @param options - Options
+   */
+  export function tryShell(script: string, options?: ExecOptions): Promise<ExecResult>;
+
+  /**
+   * Execute commands in parallel
+   * @param fns - Functions to execute in parallel
+   * @returns Array of results from each function
+   */
+  export function parallel<T extends (() => Promise<any>)[]>(
+    ...fns: T
+  ): Promise<{ [K in keyof T]: Awaited<ReturnType<T[K]>> }>;
+
+  /**
+   * Begin a new stage in the task runner
+   * Collapses previous tasks and displays a stage divider with the given name
+   * @param name - The name of the stage to display
+   */
+  export function stage(name: string): Promise<void>;
+
+  /**
+   * Docker operations
+   */
+  export const docker: {
+    /**
+     * Execute a command in a running container
+     * @param container - Container name or ID
+     * @param cmd - Command and arguments as array
+     * @param options - Options
+     * @throws Error if command fails or times out
+     */
+    exec(container: string, cmd: string[], options?: DockerExecOptions): Promise<ExecResult>;
+
+    /**
+     * Execute a command in a running container, ignoring errors
+     * @param container - Container name or ID
+     * @param cmd - Command and arguments as array
+     * @param options - Options
+     */
+    tryExec(container: string, cmd: string[], options?: DockerExecOptions): Promise<ExecResult>;
+
+    /**
+     * Run a command in a new container
+     * @param image - Docker image
+     * @param cmd - Command and arguments as array
+     * @param options - Options
+     * @throws Error if command fails or times out
+     */
+    run(image: string, cmd: string[], options?: DockerRunOptions): Promise<ExecResult>;
+
+    /**
+     * Run a command in a new container, ignoring errors
+     * @param image - Docker image
+     * @param cmd - Command and arguments as array
+     * @param options - Options
+     */
+    tryRun(image: string, cmd: string[], options?: DockerRunOptions): Promise<ExecResult>;
+  };
 }

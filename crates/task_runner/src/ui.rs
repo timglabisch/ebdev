@@ -22,6 +22,10 @@ pub trait TaskRunnerUI {
     /// Wird aufgerufen wenn eine Parallel-Gruppe endet
     fn on_parallel_end(&mut self);
 
+    /// Wird aufgerufen wenn eine neue Stage beginnt
+    /// Kollabiert die vorherige Stage und zeigt den neuen Stage-Header
+    fn on_stage_begin(&mut self, name: &str);
+
     /// Prüft ob der Benutzer abbrechen möchte
     fn check_quit(&mut self) -> io::Result<bool>;
 
@@ -42,6 +46,7 @@ pub trait TaskRunnerUI {
 /// Headless UI - leitet Output direkt an stdout weiter
 pub struct HeadlessUI {
     current_task: Option<(CommandId, String)>,
+    current_stage: Option<String>,
     in_parallel: bool,
 }
 
@@ -49,6 +54,7 @@ impl HeadlessUI {
     pub fn new() -> Self {
         Self {
             current_task: None,
+            current_stage: None,
             in_parallel: false,
         }
     }
@@ -103,6 +109,19 @@ impl TaskRunnerUI for HeadlessUI {
         self.in_parallel = false;
     }
 
+    fn on_stage_begin(&mut self, name: &str) {
+        // Print stage divider
+        if self.current_stage.is_some() {
+            println!();
+        }
+        println!();
+        println!("═══════════════════════════════════════════════════════════════════════════════");
+        println!("  {}", name);
+        println!("═══════════════════════════════════════════════════════════════════════════════");
+        println!();
+        self.current_stage = Some(name.to_string());
+    }
+
     fn check_quit(&mut self) -> io::Result<bool> {
         // Headless mode: kein interaktives Abbrechen
         Ok(false)
@@ -137,6 +156,16 @@ pub enum TaskState {
     Running,
     Completed { exit_code: i32, duration: Duration },
     Failed { error: String, duration: Duration },
+}
+
+/// Collapsed stage info for TUI
+#[derive(Debug, Clone)]
+pub struct CollapsedStage {
+    pub name: String,
+    pub task_count: usize,
+    pub total_duration: Duration,
+    pub success: bool,
+    pub failed_count: usize,
 }
 
 /// Task info for TUI
@@ -198,6 +227,10 @@ pub struct TuiUI {
     should_quit: bool,
     rows: u16,
     cols: u16,
+    /// Collapsed stages from previous stage transitions
+    collapsed_stages: Vec<CollapsedStage>,
+    /// Current stage name (None = default stage)
+    current_stage: Option<String>,
 }
 
 impl TuiUI {
@@ -220,6 +253,8 @@ impl TuiUI {
             should_quit: false,
             rows,
             cols,
+            collapsed_stages: Vec::new(),
+            current_stage: None,
         })
     }
 
@@ -229,6 +264,8 @@ impl TuiUI {
         let task_name = &self.task_name;
         let focused_task = self.focused_task;
         let scroll_offset = self.scroll_offset;
+        let collapsed_stages = &self.collapsed_stages;
+        let current_stage = &self.current_stage;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -244,16 +281,16 @@ impl TuiUI {
                 .split(area);
 
             // Header
-            Self::draw_header(frame, chunks[0], task_name, tasks);
+            Self::draw_header(frame, chunks[0], task_name, tasks, collapsed_stages);
 
             // Tasks area
-            if tasks.is_empty() {
+            if tasks.is_empty() && collapsed_stages.is_empty() {
                 let waiting = Paragraph::new("Waiting for tasks...")
                     .style(Style::default().fg(Color::DarkGray))
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
                 frame.render_widget(waiting, chunks[1]);
             } else {
-                Self::draw_tasks(frame, chunks[1], tasks, focused_task, scroll_offset);
+                Self::draw_tasks(frame, chunks[1], tasks, collapsed_stages, current_stage.as_deref(), focused_task, scroll_offset);
             }
 
             // Help line
@@ -263,20 +300,29 @@ impl TuiUI {
         Ok(())
     }
 
-    fn draw_header(frame: &mut Frame, area: Rect, task_name: &str, tasks: &[TaskInfo]) {
+    fn draw_header(frame: &mut Frame, area: Rect, task_name: &str, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage]) {
+        // Count from current tasks
         let completed = tasks.iter().filter(|t| matches!(t.state, TaskState::Completed { .. })).count();
         let failed = tasks.iter().filter(|t| matches!(t.state, TaskState::Failed { .. })).count();
         let running = tasks.iter().filter(|t| t.state == TaskState::Running).count();
-        let total = tasks.len();
 
-        let status = if failed > 0 {
-            format!(" Task: {} | {}/{} completed, {} failed, {} running ", task_name, completed, total, failed, running)
+        // Add counts from collapsed stages
+        let collapsed_completed: usize = collapsed_stages.iter().map(|s| s.task_count - s.failed_count).sum();
+        let collapsed_failed: usize = collapsed_stages.iter().map(|s| s.failed_count).sum();
+
+        let total_completed = completed + collapsed_completed;
+        let total_failed = failed + collapsed_failed;
+        let total = tasks.len() + collapsed_stages.iter().map(|s| s.task_count).sum::<usize>();
+
+        let status = if total_failed > 0 {
+            format!(" Task: {} | {}/{} completed, {} failed, {} running ", task_name, total_completed, total, total_failed, running)
         } else {
-            format!(" Task: {} | {}/{} completed, {} running ", task_name, completed, total, running)
+            format!(" Task: {} | {}/{} completed, {} running ", task_name, total_completed, total, running)
         };
 
         let all_done = tasks.iter().all(|t| !matches!(t.state, TaskState::Running));
-        let header_style = if failed > 0 {
+        let any_failed = total_failed > 0;
+        let header_style = if any_failed {
             Style::default().fg(Color::Red)
         } else if all_done && !tasks.is_empty() {
             Style::default().fg(Color::Green)
@@ -290,7 +336,7 @@ impl TuiUI {
         frame.render_widget(header, area);
     }
 
-    fn draw_tasks(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], focused_task: usize, scroll_offset: u16) {
+    fn draw_tasks(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage], current_stage: Option<&str>, focused_task: usize, scroll_offset: u16) {
         // Split area: task list on left, output on right
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -300,8 +346,8 @@ impl TuiUI {
             ])
             .split(area);
 
-        // Task list
-        Self::draw_task_list(frame, chunks[0], tasks, focused_task);
+        // Task list with collapsed stages
+        Self::draw_task_list(frame, chunks[0], tasks, collapsed_stages, current_stage, focused_task);
 
         // Output of focused task
         if focused_task < tasks.len() {
@@ -309,9 +355,50 @@ impl TuiUI {
         }
     }
 
-    fn draw_task_list(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], focused_task: usize) {
+    fn draw_task_list(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage], current_stage: Option<&str>, focused_task: usize) {
         let mut lines: Vec<Line> = Vec::new();
 
+        // Draw collapsed stages first
+        for stage in collapsed_stages {
+            let (icon, style) = if stage.success {
+                ("✓", Style::default().fg(Color::Green))
+            } else {
+                ("✗", Style::default().fg(Color::Red))
+            };
+
+            let stage_name = if stage.name.len() > 20 {
+                format!("{}...", &stage.name[..17])
+            } else {
+                stage.name.clone()
+            };
+
+            let task_info = if stage.failed_count > 0 {
+                format!(" ({} tasks, {} failed, {:.1}s)", stage.task_count, stage.failed_count, stage.total_duration.as_secs_f32())
+            } else {
+                format!(" ({} tasks, {:.1}s)", stage.task_count, stage.total_duration.as_secs_f32())
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", icon), style),
+                Span::styled(stage_name, style.add_modifier(Modifier::BOLD)),
+                Span::styled(task_info, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        // Draw current stage header if present
+        if let Some(stage_name) = current_stage {
+            if !collapsed_stages.is_empty() {
+                lines.push(Line::from(""));  // Empty line separator
+            }
+            let header = format!("═══ {} ═══", stage_name);
+            lines.push(Line::from(Span::styled(
+                header,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));  // Empty line after header
+        }
+
+        // Draw current tasks
         for (i, task) in tasks.iter().enumerate() {
             let is_focused = i == focused_task;
 
@@ -497,6 +584,41 @@ impl TaskRunnerUI for TuiUI {
 
     fn on_parallel_end(&mut self) {
         // TUI zeigt aktuell keinen speziellen Parallel-Status an
+    }
+
+    fn on_stage_begin(&mut self, name: &str) {
+        // Collapse current tasks into a stage summary if there are any
+        if !self.tasks.is_empty() {
+            let stage_name = self.current_stage.clone().unwrap_or_else(|| "Default".to_string());
+            let task_count = self.tasks.len();
+            let failed_count = self.tasks.iter()
+                .filter(|t| matches!(t.state, TaskState::Failed { .. }) ||
+                           matches!(t.state, TaskState::Completed { exit_code, .. } if exit_code != 0))
+                .count();
+            let success = failed_count == 0;
+            let total_duration: Duration = self.tasks.iter()
+                .map(|t| match &t.state {
+                    TaskState::Completed { duration, .. } | TaskState::Failed { duration, .. } => *duration,
+                    TaskState::Running => t.started_at.elapsed(),
+                })
+                .sum();
+
+            self.collapsed_stages.push(CollapsedStage {
+                name: stage_name,
+                task_count,
+                total_duration,
+                success,
+                failed_count,
+            });
+
+            // Clear current tasks
+            self.tasks.clear();
+            self.task_map.clear();
+            self.focused_task = 0;
+        }
+
+        // Set new stage name
+        self.current_stage = Some(name.to_string());
     }
 
     fn check_quit(&mut self) -> io::Result<bool> {
