@@ -6,7 +6,7 @@ use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
 use ebdev_mutagen_config::{discover_projects, SyncMode};
-use ebdev_mutagen_runner::{run_staged_sync, run_staged_sync_init};
+use ebdev_mutagen_runner::run_staged_sync;
 
 #[derive(Parser)]
 #[command(name = "ebdev", version, about = "easybill development toolchain")]
@@ -216,11 +216,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let mutagen_bin = mutagen_env.bin_path();
                 let projects = discover_projects(&base_path)?;
 
-                if init {
-                    run_staged_sync_init(&mutagen_bin, projects).await?;
-                } else {
-                    run_staged_sync(&mutagen_bin, &base_path, projects).await?;
-                }
+                run_staged_sync(&mutagen_bin, &base_path, projects, init).await?;
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {

@@ -132,10 +132,11 @@ impl DiscoveredProject {
     }
 
     /// Generate the session name with CRC32 suffixes
-    /// Format: {project_name}_{config_crc32:08x}_{root_crc32:08x}
+    /// Format: {project_name}-{config_crc32:08x}-{root_crc32:08x}
+    /// Note: Mutagen doesn't allow underscores in session names, so we use hyphens
     pub fn session_name(&self) -> String {
         format!(
-            "{}_{:08x}_{:08x}",
+            "{}-{:08x}-{:08x}",
             self.project.name,
             self.config_crc32(),
             self.root_crc32()
@@ -144,13 +145,13 @@ impl DiscoveredProject {
 
     /// Extract root_crc32 suffix from a session name (last 8 hex chars)
     pub fn extract_root_crc32_suffix(session_name: &str) -> Option<&str> {
-        // Format: name_configcrc_rootcrc
+        // Format: name-configcrc-rootcrc
         // We need the last 8 characters (root_crc32)
         if session_name.len() < 18 {
-            // minimum: a_xxxxxxxx_xxxxxxxx
+            // minimum: a-xxxxxxxx-xxxxxxxx
             return None;
         }
-        let parts: Vec<&str> = session_name.rsplitn(2, '_').collect();
+        let parts: Vec<&str> = session_name.rsplitn(2, '-').collect();
         if parts.len() == 2 && parts[0].len() == 8 {
             Some(parts[0])
         } else {
