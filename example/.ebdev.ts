@@ -39,11 +39,13 @@ export async function info() {
 
 export async function test_parallel() {
     console.log("Running commands in parallel...");
+    await exec(["sleep", "2"]);
     await parallel(
         () => exec(["echo", "Task 1"]),
         () => exec(["echo", "Task 2"]),
-        () => exec(["echo", "Task 3"]),
+        () => exec(["sleep", "1"]),
     );
+    await exec(["sleep", "2"]);
     console.log("All parallel tasks completed!");
 }
 
