@@ -150,12 +150,40 @@ use std::time::{Duration, Instant};
 
 pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
+// Display constants
+const MAX_STAGE_NAME_LEN: usize = 20;
+const MAX_TASK_NAME_LEN: usize = 25;
+
 /// Task state for TUI visualization
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskState {
     Running,
     Completed { exit_code: i32, duration: Duration },
     Failed { error: String, duration: Duration },
+}
+
+impl TaskState {
+    /// Returns true if the task failed (non-zero exit code or error)
+    pub fn is_failed(&self) -> bool {
+        match self {
+            TaskState::Failed { .. } => true,
+            TaskState::Completed { exit_code, .. } => *exit_code != 0,
+            TaskState::Running => false,
+        }
+    }
+
+    /// Returns true if the task completed successfully
+    pub fn is_success(&self) -> bool {
+        matches!(self, TaskState::Completed { exit_code, .. } if *exit_code == 0)
+    }
+
+    /// Returns the duration if the task has finished
+    pub fn duration(&self) -> Option<Duration> {
+        match self {
+            TaskState::Completed { duration, .. } | TaskState::Failed { duration, .. } => Some(*duration),
+            TaskState::Running => None,
+        }
+    }
 }
 
 /// Collapsed stage info for TUI
@@ -166,6 +194,35 @@ pub struct CollapsedStage {
     pub total_duration: Duration,
     pub success: bool,
     pub failed_count: usize,
+}
+
+impl CollapsedStage {
+    /// Create a collapsed stage summary from a list of tasks
+    pub fn from_tasks(name: String, tasks: &[TaskInfo]) -> Self {
+        let task_count = tasks.len();
+        let failed_count = tasks.iter().filter(|t| t.state.is_failed()).count();
+        let success = failed_count == 0;
+        let total_duration: Duration = tasks.iter()
+            .map(|t| t.state.duration().unwrap_or_else(|| t.started_at.elapsed()))
+            .sum();
+
+        Self {
+            name,
+            task_count,
+            total_duration,
+            success,
+            failed_count,
+        }
+    }
+}
+
+/// Truncate a string to max_len, adding "..." if truncated
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    } else {
+        s.to_string()
+    }
 }
 
 /// Task info for TUI
@@ -185,6 +242,26 @@ impl TaskInfo {
             state: TaskState::Running,
             parser: Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 500))),
             started_at: Instant::now(),
+        }
+    }
+
+    /// Get the current duration (elapsed for running, stored for completed)
+    pub fn duration(&self) -> Duration {
+        self.state.duration().unwrap_or_else(|| self.started_at.elapsed())
+    }
+
+    /// Get icon and style for this task's state
+    pub fn icon_and_style(&self) -> (&'static str, Style) {
+        match &self.state {
+            TaskState::Running => ("●", Style::default().fg(Color::Yellow)),
+            TaskState::Completed { exit_code, .. } => {
+                if *exit_code == 0 {
+                    ("✓", Style::default().fg(Color::Green))
+                } else {
+                    ("✗", Style::default().fg(Color::Red))
+                }
+            }
+            TaskState::Failed { .. } => ("✗", Style::default().fg(Color::Red)),
         }
     }
 
@@ -302,9 +379,9 @@ impl TuiUI {
 
     fn draw_header(frame: &mut Frame, area: Rect, task_name: &str, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage]) {
         // Count from current tasks
-        let completed = tasks.iter().filter(|t| matches!(t.state, TaskState::Completed { .. })).count();
-        let failed = tasks.iter().filter(|t| matches!(t.state, TaskState::Failed { .. })).count();
-        let running = tasks.iter().filter(|t| t.state == TaskState::Running).count();
+        let completed = tasks.iter().filter(|t| t.state.is_success()).count();
+        let failed = tasks.iter().filter(|t| t.state.is_failed()).count();
+        let running = tasks.iter().filter(|t| matches!(t.state, TaskState::Running)).count();
 
         // Add counts from collapsed stages
         let collapsed_completed: usize = collapsed_stages.iter().map(|s| s.task_count - s.failed_count).sum();
@@ -320,7 +397,7 @@ impl TuiUI {
             format!(" Task: {} | {}/{} completed, {} running ", task_name, total_completed, total, running)
         };
 
-        let all_done = tasks.iter().all(|t| !matches!(t.state, TaskState::Running));
+        let all_done = running == 0;
         let any_failed = total_failed > 0;
         let header_style = if any_failed {
             Style::default().fg(Color::Red)
@@ -366,12 +443,7 @@ impl TuiUI {
                 ("✗", Style::default().fg(Color::Red))
             };
 
-            let stage_name = if stage.name.len() > 20 {
-                format!("{}...", &stage.name[..17])
-            } else {
-                stage.name.clone()
-            };
-
+            let stage_name = truncate_string(&stage.name, MAX_STAGE_NAME_LEN);
             let task_info = if stage.failed_count > 0 {
                 format!(" ({} tasks, {} failed, {:.1}s)", stage.task_count, stage.failed_count, stage.total_duration.as_secs_f32())
             } else {
@@ -401,34 +473,10 @@ impl TuiUI {
         // Draw current tasks
         for (i, task) in tasks.iter().enumerate() {
             let is_focused = i == focused_task;
-
-            let (icon, style) = match &task.state {
-                TaskState::Running => ("●", Style::default().fg(Color::Yellow)),
-                TaskState::Completed { exit_code, .. } => {
-                    if *exit_code == 0 {
-                        ("✓", Style::default().fg(Color::Green))
-                    } else {
-                        ("✗", Style::default().fg(Color::Red))
-                    }
-                }
-                TaskState::Failed { .. } => ("✗", Style::default().fg(Color::Red)),
-            };
-
-            let duration_str = match &task.state {
-                TaskState::Completed { duration, .. } | TaskState::Failed { duration, .. } => {
-                    format!(" ({:.1}s)", duration.as_secs_f32())
-                }
-                TaskState::Running => {
-                    format!(" ({:.1}s)", task.started_at.elapsed().as_secs_f32())
-                }
-            };
-
+            let (icon, style) = task.icon_and_style();
+            let duration_str = format!(" ({:.1}s)", task.duration().as_secs_f32());
             let prefix = if is_focused { "> " } else { "  " };
-            let name = if task.name.len() > 25 {
-                format!("{}...", &task.name[..22])
-            } else {
-                task.name.clone()
-            };
+            let name = truncate_string(&task.name, MAX_TASK_NAME_LEN);
 
             let line_style = if is_focused {
                 style.add_modifier(Modifier::BOLD)
@@ -590,26 +638,7 @@ impl TaskRunnerUI for TuiUI {
         // Collapse current tasks into a stage summary if there are any
         if !self.tasks.is_empty() {
             let stage_name = self.current_stage.clone().unwrap_or_else(|| "Default".to_string());
-            let task_count = self.tasks.len();
-            let failed_count = self.tasks.iter()
-                .filter(|t| matches!(t.state, TaskState::Failed { .. }) ||
-                           matches!(t.state, TaskState::Completed { exit_code, .. } if exit_code != 0))
-                .count();
-            let success = failed_count == 0;
-            let total_duration: Duration = self.tasks.iter()
-                .map(|t| match &t.state {
-                    TaskState::Completed { duration, .. } | TaskState::Failed { duration, .. } => *duration,
-                    TaskState::Running => t.started_at.elapsed(),
-                })
-                .sum();
-
-            self.collapsed_stages.push(CollapsedStage {
-                name: stage_name,
-                task_count,
-                total_duration,
-                success,
-                failed_count,
-            });
+            self.collapsed_stages.push(CollapsedStage::from_tasks(stage_name, &self.tasks));
 
             // Clear current tasks
             self.tasks.clear();
