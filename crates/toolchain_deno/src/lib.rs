@@ -1,4 +1,4 @@
 mod module_loader;
 mod runtime;
 
-pub use runtime::{load_ts_config, TsRuntimeError};
+pub use runtime::{load_ts_config, Error};

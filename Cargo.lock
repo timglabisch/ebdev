@@ -1057,14 +1057,12 @@ dependencies = [
 name = "ebdev-toolchain-deno"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "deno_ast",
  "deno_core",
  "deno_error",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.17",
  "tokio",
 ]
 
