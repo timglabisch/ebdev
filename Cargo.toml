@@ -9,6 +9,7 @@ members = [
     "crates/mutagen_config",
     "crates/mutagen_runner",
     "crates/parallel_runner",
+    "crates/task_runner",
     "crates/cli",
 ]
 

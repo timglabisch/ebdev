@@ -1,9 +1,10 @@
 use deno_core::{JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions};
+use ::ebdev_task_runner::TaskRunnerHandle;
 use std::path::Path;
 use std::rc::Rc;
 
 use crate::module_loader::TsModuleLoader;
-use crate::ops::{ebdev_task_runner, init_task_runner_state, TaskEventSender};
+use crate::ops::{ebdev_deno_ops, init_task_runner_state};
 use crate::runtime::Error;
 
 /// List all exported async functions (tasks) from a .ebdev.ts file
@@ -13,7 +14,7 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<String>, Error> {
 
     let mut rt = JsRuntime::new(RuntimeOptions {
         module_loader: Some(Rc::new(TsModuleLoader(dir.to_path_buf()))),
-        extensions: vec![ebdev_task_runner::init()],
+        extensions: vec![ebdev_deno_ops::init()],
         ..Default::default()
     });
 
@@ -58,14 +59,14 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<String>, Error> {
 pub async fn run_task(
     path: &Path,
     task_name: &str,
-    event_sender: Option<TaskEventSender>,
+    handle: Option<TaskRunnerHandle>,
 ) -> Result<(), Error> {
     let path = path.canonicalize()?;
     let dir = path.parent().unwrap_or(Path::new("."));
 
     let mut rt = JsRuntime::new(RuntimeOptions {
         module_loader: Some(Rc::new(TsModuleLoader(dir.to_path_buf()))),
-        extensions: vec![ebdev_task_runner::init()],
+        extensions: vec![ebdev_deno_ops::init()],
         ..Default::default()
     });
 
@@ -73,7 +74,7 @@ pub async fn run_task(
     {
         let op_state = rt.op_state();
         let mut state = op_state.borrow_mut();
-        init_task_runner_state(&mut state, event_sender, Some(dir.to_string_lossy().to_string()));
+        init_task_runner_state(&mut state, handle, Some(dir.to_string_lossy().to_string()));
     }
 
     let module = ModuleSpecifier::from_file_path(&path).map_err(|_| Error("Invalid path".into()))?;
@@ -181,8 +182,13 @@ export async function build() {{
 }}
 "#)).unwrap();
 
-        // Run without event sender (no TUI)
-        let result = run_task(&config_path, "build", None).await;
+        // Run with headless task runner
+        let (handle, _thread) = ebdev_task_runner::run_headless(None);
+        let handle_for_shutdown = handle.clone();
+
+        let result = run_task(&config_path, "build", Some(handle)).await;
+
+        let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "Task should succeed: {:?}", result);
     }
 
@@ -199,7 +205,13 @@ export default defineConfig({});
 export async function build() {}
 "#).unwrap();
 
-        let result = run_task(&config_path, "nonexistent", None).await;
+        // Run with headless task runner
+        let (handle, _thread) = ebdev_task_runner::run_headless(None);
+        let handle_for_shutdown = handle.clone();
+
+        let result = run_task(&config_path, "nonexistent", Some(handle)).await;
+
+        let _ = handle_for_shutdown.shutdown();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

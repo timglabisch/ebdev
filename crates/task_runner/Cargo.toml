@@ -1,0 +1,12 @@
+[package]
+name = "ebdev-task-runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+portable-pty = "0.8"
+vt100 = "0.15"

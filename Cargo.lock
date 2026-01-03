@@ -987,6 +987,7 @@ dependencies = [
  "ebdev-config",
  "ebdev-mutagen-config",
  "ebdev-mutagen-runner",
+ "ebdev-task-runner",
  "ebdev-toolchain",
  "ebdev-toolchain-deno",
  "ebdev-toolchain-mutagen",
@@ -1049,6 +1050,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ebdev-task-runner"
+version = "0.1.0"
+dependencies = [
+ "crossterm 0.28.1",
+ "portable-pty",
+ "ratatui",
+ "thiserror 2.0.17",
+ "tokio",
+ "vt100",
+]
+
+[[package]]
 name = "ebdev-toolchain"
 version = "0.1.0"
 dependencies = [
@@ -1063,6 +1076,7 @@ dependencies = [
  "deno_ast",
  "deno_core",
  "deno_error",
+ "ebdev-task-runner",
  "serde",
  "serde_json",
  "tempfile",
