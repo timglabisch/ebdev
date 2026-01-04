@@ -378,16 +378,18 @@ async function startTriggerLoop() {
  * @param {string} name - Task name (used as identifier)
  * @param {string | (() => Promise<void>)} descOrFn - Description or task function
  * @param {(() => Promise<void>)} [maybeFn] - Task function (if description provided)
- * @returns {void}
+ * @returns {Promise<void>}
  *
  * @example
  * // Simple form
- * task("fixtures", loadFixtures);
+ * await task("fixtures", loadFixtures);
  *
  * // With description
- * task("fixtures", "Load test fixtures", loadFixtures);
+ * await task("fixtures", "Load test fixtures", async () => {
+ *   await exec(["./load-fixtures.sh"]);
+ * });
  */
-export function task(name, descOrFn, maybeFn) {
+export async function task(name, descOrFn, maybeFn) {
   if (typeof name !== "string" || name.length === 0) {
     throw new Error("task: name must be a non-empty string");
   }
@@ -411,7 +413,7 @@ export function task(name, descOrFn, maybeFn) {
   taskRegistry.set(name, { description, fn });
 
   // Register with the TUI
-  Deno.core.ops.op_task_register(name, description);
+  await Deno.core.ops.op_task_register(name, description);
 
   // Start the trigger loop if not already running
   startTriggerLoop();
@@ -420,13 +422,80 @@ export function task(name, descOrFn, maybeFn) {
 /**
  * Unregister a task from the Command Palette
  * @param {string} name - Task name to unregister
- * @returns {void}
+ * @returns {Promise<void>}
  */
-export function untask(name) {
+export async function untask(name) {
   if (typeof name !== "string" || name.length === 0) {
     throw new Error("untask: name must be a non-empty string");
   }
 
   taskRegistry.delete(name);
-  Deno.core.ops.op_task_unregister(name);
+  await Deno.core.ops.op_task_unregister(name);
 }
+
+/**
+ * Log a message to the task runner UI.
+ * Works correctly in both headless and TUI mode.
+ * Use this instead of console.log() to ensure output is displayed properly.
+ * @param {string} message - Message to log
+ * @returns {Promise<void>}
+ */
+export async function log(message) {
+  await Deno.core.ops.op_log(String(message));
+}
+
+// =============================================================================
+// Override console.log to use the task runner's log function
+// =============================================================================
+
+const originalConsoleLog = console.log;
+const originalConsoleInfo = console.info;
+const originalConsoleWarn = console.warn;
+const originalConsoleError = console.error;
+
+/**
+ * Format console arguments similar to how console.log does it
+ */
+function formatConsoleArgs(...args) {
+  return args.map(arg => {
+    if (typeof arg === 'string') return arg;
+    if (arg === null) return 'null';
+    if (arg === undefined) return 'undefined';
+    try {
+      return JSON.stringify(arg, null, 2);
+    } catch {
+      return String(arg);
+    }
+  }).join(' ');
+}
+
+// Override console.log - fire and forget (don't await)
+console.log = (...args) => {
+  const message = formatConsoleArgs(...args);
+  // Fire and forget - we don't want console.log to be async
+  Deno.core.ops.op_log(message).catch(() => {
+    // Fallback to original if op fails
+    originalConsoleLog.apply(console, args);
+  });
+};
+
+console.info = (...args) => {
+  const message = formatConsoleArgs(...args);
+  Deno.core.ops.op_log(`[INFO] ${message}`).catch(() => {
+    originalConsoleInfo.apply(console, args);
+  });
+};
+
+console.warn = (...args) => {
+  const message = formatConsoleArgs(...args);
+  Deno.core.ops.op_log(`[WARN] ${message}`).catch(() => {
+    originalConsoleWarn.apply(console, args);
+  });
+};
+
+console.error = (...args) => {
+  const message = formatConsoleArgs(...args);
+  Deno.core.ops.op_log(`[ERROR] ${message}`).catch(() => {
+    originalConsoleError.apply(console, args);
+  });
+};

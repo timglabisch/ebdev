@@ -100,6 +100,13 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
+    /// Log a message (works correctly in both headless and TUI mode)
+    pub fn log(&self, message: &str) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::Log { message: message.to_string() })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
     /// Poll for a task trigger event from the TUI (non-blocking)
     pub async fn poll_task_trigger(&self) -> Option<String> {
         let mut rx = self.tui_event_rx.lock().await;

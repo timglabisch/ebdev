@@ -215,6 +215,8 @@ pub enum ExecutorMessage {
     TaskRegister { name: String, description: String },
     /// Unregister a task
     TaskUnregister { name: String },
+    /// Log a message (works correctly in both headless and TUI mode)
+    Log { message: String },
     /// Shutdown the executor
     Shutdown,
 }

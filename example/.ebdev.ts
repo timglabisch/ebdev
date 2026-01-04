@@ -40,6 +40,9 @@ export async function info() {
 export async function test_parallel() {
     console.log("Running commands in parallel...");
     await stage("yay");
+    await task("foo", "start some foo", async () => {
+        await exec(["sleep", "2"]);
+    });
     await exec(["sleep", "2"]);
     await stage("parallel");
 
@@ -109,19 +112,19 @@ export async function test_tasks() {
     console.log("Press '/' to open the Command Palette and run a task!");
 
     // Register some tasks that can be triggered from the TUI
-    task("fixtures", "Load test fixtures into database", async () => {
+    await task("fixtures", "Load test fixtures into database", async () => {
         await exec(["echo", "Loading fixtures..."]);
         await exec(["sleep", "1"]);
         await exec(["echo", "Fixtures loaded!"]);
     });
 
-    task("clear-cache", "Clear all caches", async () => {
+    await task("clear-cache", "Clear all caches", async () => {
         await exec(["echo", "Clearing caches..."]);
         await exec(["sleep", "0.5"]);
         await exec(["echo", "Caches cleared!"]);
     });
 
-    task("restart", "Restart services", async () => {
+    await task("restart", "Restart services", async () => {
         await exec(["echo", "Restarting services..."]);
         await exec(["sleep", "1"]);
         await exec(["echo", "Services restarted!"]);
@@ -135,9 +138,9 @@ export async function test_tasks() {
     await exec(["sleep", "30"], { name: "Long running process" });
 
     // Cleanup
-    untask("fixtures");
-    untask("clear-cache");
-    untask("restart");
+    await untask("fixtures");
+    await untask("clear-cache");
+    await untask("restart");
 
     console.log("Done!");
 }

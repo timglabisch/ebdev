@@ -103,9 +103,17 @@ impl Executor {
                         self.registered_tasks.retain(|t| t.name != name);
                         ui.on_task_unregistered(&name);
                     }
+                    ExecutorMessage::Log { message } => {
+                        ui.on_log(&message);
+                    }
                     ExecutorMessage::Shutdown => {
-                        ui.cleanup()?;
-                        return Ok(());
+                        // If auto-quit is enabled, exit immediately
+                        // Otherwise, keep the UI open until user manually quits
+                        if ui.should_auto_quit() {
+                            ui.cleanup()?;
+                            return Ok(());
+                        }
+                        // Continue running - user will quit manually with q/Esc
                     }
                 }
             }

@@ -300,6 +300,23 @@ pub async fn op_poll_task_trigger(
     }
 }
 
+#[op2(async)]
+pub async fn op_log(
+    state: Rc<RefCell<OpState>>,
+    #[string] message: String,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.log(&message)
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
 async fn execute_command(
     handle: Option<TaskRunnerHandle>,
     command: Command,
@@ -359,5 +376,6 @@ deno_core::extension!(
         op_task_register,
         op_task_unregister,
         op_poll_task_trigger,
+        op_log,
     ],
 );

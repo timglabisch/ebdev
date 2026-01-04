@@ -349,12 +349,12 @@ declare module "ebdev" {
    *
    * @example
    * ```typescript
-   * task("fixtures", async () => {
+   * await task("fixtures", async () => {
    *   await exec(["./load-fixtures.sh"]);
    * });
    * ```
    */
-  export function task(name: string, fn: TaskFn): void;
+  export function task(name: string, fn: TaskFn): Promise<void>;
 
   /**
    * Register a task that can be triggered from the TUI Command Palette.
@@ -366,12 +366,12 @@ declare module "ebdev" {
    *
    * @example
    * ```typescript
-   * task("fixtures", "Load test fixtures into database", async () => {
+   * await task("fixtures", "Load test fixtures into database", async () => {
    *   await docker.exec("app", ["php", "artisan", "db:seed"]);
    * });
    * ```
    */
-  export function task(name: string, description: string, fn: TaskFn): void;
+  export function task(name: string, description: string, fn: TaskFn): Promise<void>;
 
   /**
    * Unregister a task from the Command Palette.
@@ -381,11 +381,30 @@ declare module "ebdev" {
    * @example
    * ```typescript
    * // Register a task
-   * task("fixtures", loadFixtures);
+   * await task("fixtures", loadFixtures);
    *
    * // Later, remove it
-   * untask("fixtures");
+   * await untask("fixtures");
    * ```
    */
-  export function untask(name: string): void;
+  export function untask(name: string): Promise<void>;
+
+  /**
+   * Log a message to the task runner UI.
+   * Works correctly in both headless and TUI mode.
+   * Use this instead of console.log() to ensure output is displayed properly.
+   *
+   * @param message - Message to log
+   *
+   * @example
+   * ```typescript
+   * await log("Running commands in parallel...");
+   * await parallel(
+   *   () => exec(["echo", "Task 1"]),
+   *   () => exec(["echo", "Task 2"]),
+   * );
+   * await log("All tasks completed!");
+   * ```
+   */
+  export function log(message: string): Promise<void>;
 }

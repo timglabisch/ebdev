@@ -36,6 +36,13 @@ pub trait TaskRunnerUI {
     /// Gibt den Namen des zu triggernden Tasks zurück, falls vorhanden
     fn poll_triggered_task(&mut self) -> Option<String> { None }
 
+    /// Log a message (works correctly in both headless and TUI mode)
+    fn on_log(&mut self, message: &str);
+
+    /// Returns whether the UI should auto-quit when tasks complete
+    /// Default is true (auto-quit enabled)
+    fn should_auto_quit(&self) -> bool { true }
+
     /// Prüft ob der Benutzer abbrechen möchte
     fn check_quit(&mut self) -> io::Result<bool>;
 
@@ -130,6 +137,10 @@ impl TaskRunnerUI for HeadlessUI {
         println!("═══════════════════════════════════════════════════════════════════════════════");
         println!();
         self.current_stage = Some(name.to_string());
+    }
+
+    fn on_log(&mut self, message: &str) {
+        println!("{}", message);
     }
 
     fn check_quit(&mut self) -> io::Result<bool> {
@@ -333,6 +344,8 @@ pub struct TuiUI {
     command_palette_selected: usize,
     /// Task that was triggered and needs to be returned via poll_triggered_task
     triggered_task: Option<String>,
+    /// Auto-quit when tasks complete (disabled when user interacts with Command Palette)
+    auto_quit: bool,
 }
 
 impl TuiUI {
@@ -362,6 +375,7 @@ impl TuiUI {
             command_palette_input: String::new(),
             command_palette_selected: 0,
             triggered_task: None,
+            auto_quit: true,
         })
     }
 
@@ -391,6 +405,7 @@ impl TuiUI {
             .cloned()
             .collect();
         let has_registered_tasks = !self.registered_tasks.is_empty();
+        let auto_quit = self.auto_quit;
 
         let terminal = self.terminal.as_mut().unwrap();
         let tasks = &self.tasks;
@@ -427,7 +442,7 @@ impl TuiUI {
             }
 
             // Help line
-            Self::draw_help(frame, chunks[2], has_registered_tasks);
+            Self::draw_help(frame, chunks[2], has_registered_tasks, auto_quit);
 
             // Command Palette overlay
             if command_palette_open {
@@ -670,14 +685,28 @@ impl TuiUI {
         }
     }
 
-    fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool) {
+    fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto_quit: bool) {
+        // Build help line with auto-exit indicator
+        let mut spans = Vec::new();
+
+        // Auto-exit indicator (red background when active)
+        if auto_quit {
+            spans.push(Span::styled(
+                " AUTO-EXIT ",
+                Style::default().fg(Color::White).bg(Color::Red),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        // Help text
         let help_text = if has_registered_tasks {
-            " Up/Down/Tab: select | PageUp/Down: scroll | /: run task | q/Esc: quit "
+            "Up/Down: select | /: run task | q: quit"
         } else {
-            " Up/Down/Tab: select task | PageUp/Down: scroll | q/Esc: quit "
+            "Up/Down: select | q: quit"
         };
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray));
+        spans.push(Span::styled(help_text, Style::default().fg(Color::DarkGray)));
+
+        let help = Paragraph::new(Line::from(spans));
         frame.render_widget(help, area);
     }
 
@@ -701,6 +730,8 @@ impl TuiUI {
                                 self.command_palette_open = true;
                                 self.command_palette_input.clear();
                                 self.command_palette_selected = 0;
+                                // Disable auto-quit when user interacts with Command Palette
+                                self.auto_quit = false;
                             }
                         }
                         KeyCode::Tab | KeyCode::Down => {
@@ -860,6 +891,22 @@ impl TaskRunnerUI for TuiUI {
 
     fn poll_triggered_task(&mut self) -> Option<String> {
         self.triggered_task.take()
+    }
+
+    fn on_log(&mut self, message: &str) {
+        // Append log message to the currently focused task's output
+        // If no task exists, we store it for later or ignore it
+        if let Some(task) = self.tasks.get(self.focused_task) {
+            if let Ok(mut parser) = task.parser.lock() {
+                // Format as a log line and process through the PTY parser
+                let formatted = format!("{}\r\n", message);
+                parser.process(formatted.as_bytes());
+            }
+        }
+    }
+
+    fn should_auto_quit(&self) -> bool {
+        self.auto_quit
     }
 
     fn check_quit(&mut self) -> io::Result<bool> {
