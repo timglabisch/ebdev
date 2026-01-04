@@ -432,6 +432,113 @@ pub async fn run_sync_headless<B: MutagenBackend + 'static>(
     run_sync(backend, projects, options, HeadlessUI).await
 }
 
+// ============================================================================
+// TuiUI - Ratatui-based TUI implementation of SyncUI
+// ============================================================================
+
+/// TUI implementation using Ratatui
+pub struct TuiUI {
+    terminal: tui::Tui,
+    app: tui::App,
+}
+
+impl TuiUI {
+    pub fn new(total_stages: i32) -> Result<Self, MutagenRunnerError> {
+        let terminal = tui::init().map_err(MutagenRunnerError::Execution)?;
+        Ok(Self {
+            terminal,
+            app: tui::App::new(total_stages),
+        })
+    }
+}
+
+impl Drop for TuiUI {
+    fn drop(&mut self) {
+        let _ = tui::restore();
+    }
+}
+
+impl SyncUI for TuiUI {
+    fn on_start(&mut self, _stage_count: usize, _init_only: bool) {
+        // App already initialized with total_stages
+    }
+
+    fn on_cleanup(&mut self, _removed: usize) {
+        // Could show a message, but not critical
+    }
+
+    fn on_stage_start(&mut self, stage: i32, _session_count: usize, is_final: bool) {
+        self.app.current_stage = stage;
+        self.app.is_final_stage = is_final;
+    }
+
+    fn on_sync_result(&mut self, _terminated: usize, _kept: usize, _created: usize) {
+        // Status is shown in the table
+    }
+
+    fn on_waiting(&mut self, _stage: i32) {
+        // Status is shown in the table
+    }
+
+    fn on_stage_complete(&mut self, _stage: i32, is_final: bool) {
+        if is_final {
+            self.app.set_message("Sync complete.".to_string());
+        }
+    }
+
+    fn on_watch_mode(&mut self) {
+        self.app.set_message("Watching for changes. Press 'q' or ESC to quit.".to_string());
+    }
+
+    fn on_error(&mut self, msg: &str) {
+        self.app.set_message(format!("Error: {}", msg));
+    }
+
+    fn on_complete(&mut self) {
+        self.app.set_message("Complete.".to_string());
+    }
+
+    fn check_quit(&mut self) -> Result<bool, MutagenRunnerError> {
+        tui::handle_events().map_err(MutagenRunnerError::Execution)
+    }
+
+    fn tick(&mut self) -> Result<(), MutagenRunnerError> {
+        self.terminal.draw(|frame| tui::draw(frame, &self.app))
+            .map_err(MutagenRunnerError::Execution)?;
+        Ok(())
+    }
+
+    fn set_stage_sessions(&mut self, _stage_idx: usize, sessions: &[&state::DesiredSession], is_final: bool) {
+        let session_states: Vec<tui::SessionState> = sessions.iter().map(|s| {
+            tui::SessionState {
+                name: s.name.clone(),
+                alpha: s.alpha.to_string_lossy().to_string(),
+                beta: s.beta.clone(),
+                status: None,
+                created: false,
+            }
+        }).collect();
+        self.app.set_stage(self.app.current_stage, session_states, is_final);
+    }
+
+    fn mark_sessions_created(&mut self, session_names: &[String]) {
+        for name in session_names {
+            self.app.mark_session_created(name);
+        }
+    }
+}
+
+/// Convenience function: runs sync with TuiUI
+pub async fn run_sync_tui<B: MutagenBackend + 'static>(
+    backend: Arc<B>,
+    projects: Vec<DiscoveredProject>,
+    options: SyncOptions,
+) -> Result<(), MutagenRunnerError> {
+    let stage_count = state::DesiredState::from_projects(&projects).stages.len() as i32;
+    let ui = TuiUI::new(stage_count)?;
+    run_sync(backend, projects, options, ui).await
+}
+
 
 
 // ============================================================================

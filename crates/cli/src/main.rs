@@ -85,6 +85,9 @@ enum MutagenCommands {
         /// Terminate all sessions for this project and exit
         #[arg(long)]
         terminate: bool,
+        /// Run with TUI visualization
+        #[arg(long)]
+        tui: bool,
     },
 }
 
@@ -232,7 +235,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     println!();
                 }
             }
-            MutagenCommands::Sync { init, sync, keep_open, terminate } => {
+            MutagenCommands::Sync { init, sync, keep_open, terminate, tui } => {
                 let mutagen_version = config.toolchain.mutagen
                     .as_ref()
                     .map(|m| m.version.as_str())
@@ -284,7 +287,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let backend = std::sync::Arc::new(
                     ebdev_mutagen_runner::RealMutagen::new(mutagen_bin.to_path_buf())
                 );
-                ebdev_mutagen_runner::run_sync_headless(backend, projects, options).await?;
+                if tui {
+                    ebdev_mutagen_runner::run_sync_tui(backend, projects, options).await?;
+                } else {
+                    ebdev_mutagen_runner::run_sync_headless(backend, projects, options).await?;
+                }
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {

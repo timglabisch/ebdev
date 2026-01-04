@@ -247,7 +247,12 @@ fn normalize_path(path: &Path) -> PathBuf {
             c => components.push(c),
         }
     }
-    components.iter().collect()
+    let result: PathBuf = components.iter().collect();
+    if result.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        result
+    }
 }
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
