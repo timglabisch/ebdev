@@ -372,6 +372,8 @@ pub struct TuiUI {
     triggered_task: Option<String>,
     /// Auto-quit when tasks complete (disabled when user interacts with Command Palette)
     auto_quit: bool,
+    /// Auto-scroll to bottom when new output arrives
+    auto_scroll: bool,
 }
 
 impl TuiUI {
@@ -402,6 +404,7 @@ impl TuiUI {
             command_palette_selected: 0,
             triggered_task: None,
             auto_quit: true,
+            auto_scroll: true,
         })
     }
 
@@ -433,7 +436,31 @@ impl TuiUI {
         let has_registered_tasks = !self.registered_tasks.is_empty();
         let auto_quit = self.auto_quit;
 
+        // Calculate scroll offset with auto-scroll support
         let terminal = self.terminal.as_mut().unwrap();
+        let visible_height = terminal.size()?.height.saturating_sub(10) as usize;
+
+        // Get content height for focused task
+        let content_height = if self.focused_task < self.tasks.len() {
+            self.tasks[self.focused_task].screen_text().lines.len()
+        } else {
+            0
+        };
+        let max_scroll = content_height.saturating_sub(visible_height);
+
+        // Apply auto-scroll: jump to bottom
+        if self.auto_scroll {
+            self.scroll_offset = max_scroll as u16;
+        }
+
+        // Clamp scroll_offset to valid range
+        self.scroll_offset = (self.scroll_offset as usize).min(max_scroll) as u16;
+
+        // Re-enable auto_scroll if we're at the bottom
+        if self.scroll_offset as usize >= max_scroll && max_scroll > 0 {
+            self.auto_scroll = true;
+        }
+
         let tasks = &self.tasks;
         let task_name = &self.task_name;
         let focused_task = self.focused_task;
@@ -725,9 +752,9 @@ impl TuiUI {
 
         // Help text
         let help_text = if has_registered_tasks {
-            "Up/Down: select | /: run task | q: quit"
+            "↑↓: scroll | Tab: switch task | /: run task | q: quit"
         } else {
-            "Up/Down: select | q: quit"
+            "↑↓: scroll | Tab: switch task | q: quit"
         };
         spans.push(Span::styled(help_text, Style::default().fg(Color::DarkGray)));
 
@@ -759,23 +786,49 @@ impl TuiUI {
                                 self.auto_quit = false;
                             }
                         }
-                        KeyCode::Tab | KeyCode::Down => {
+                        // Tab/Shift+Tab: switch between tasks
+                        KeyCode::Tab => {
                             if !self.tasks.is_empty() {
                                 self.focused_task = (self.focused_task + 1) % self.tasks.len();
                                 self.scroll_offset = 0;
+                                self.auto_scroll = true;
                             }
                         }
-                        KeyCode::BackTab | KeyCode::Up => {
+                        KeyCode::BackTab => {
                             if !self.tasks.is_empty() {
                                 self.focused_task = (self.focused_task + self.tasks.len() - 1) % self.tasks.len();
                                 self.scroll_offset = 0;
+                                self.auto_scroll = true;
                             }
                         }
+                        // Up/Down: scroll output
+                        KeyCode::Up => {
+                            if self.scroll_offset > 0 {
+                                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                                self.auto_scroll = false;
+                            }
+                        }
+                        KeyCode::Down => {
+                            self.scroll_offset = self.scroll_offset.saturating_add(1);
+                            // auto_scroll will be re-enabled in draw if we're at bottom
+                        }
                         KeyCode::PageUp => {
-                            self.scroll_offset = self.scroll_offset.saturating_add(5);
+                            self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                            self.auto_scroll = false;
                         }
                         KeyCode::PageDown => {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                            self.scroll_offset = self.scroll_offset.saturating_add(10);
+                            // auto_scroll will be re-enabled in draw if we're at bottom
+                        }
+                        // End: jump to bottom and enable auto-scroll
+                        KeyCode::End => {
+                            self.scroll_offset = u16::MAX;
+                            self.auto_scroll = true;
+                        }
+                        // Home: jump to top
+                        KeyCode::Home => {
+                            self.scroll_offset = 0;
+                            self.auto_scroll = false;
                         }
                         _ => {}
                     }
