@@ -163,6 +163,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::collections::HashMap;
@@ -260,6 +261,8 @@ pub struct TaskInfo {
     pub state: TaskState,
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub started_at: Instant,
+    /// Raw output buffer for ANSI color rendering
+    pub raw_output: Arc<Mutex<Vec<u8>>>,
 }
 
 impl TaskInfo {
@@ -270,6 +273,16 @@ impl TaskInfo {
             state: TaskState::Running,
             parser: Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 500))),
             started_at: Instant::now(),
+            raw_output: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn append_output(&self, data: &[u8]) {
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.process(data);
+        }
+        if let Ok(mut raw) = self.raw_output.lock() {
+            raw.extend_from_slice(data);
         }
     }
 
@@ -318,6 +331,19 @@ impl TaskInfo {
         }
 
         lines
+    }
+
+    /// Get screen content as ratatui Text with ANSI colors preserved
+    pub fn screen_text(&self) -> Text<'static> {
+        let raw = match self.raw_output.lock() {
+            Ok(r) => r.clone(),
+            Err(_) => return Text::default(),
+        };
+
+        match raw.into_text() {
+            Ok(text) => text,
+            Err(_) => Text::default(),
+        }
     }
 }
 
@@ -644,18 +670,17 @@ impl TuiUI {
     }
 
     fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_offset: u16) {
-        let content = task.screen_content();
-        let content_height = content.len();
+        let text = task.screen_text();
+        let content_height = text.lines.len();
         let visible_height = area.height.saturating_sub(2) as usize;
 
         let max_scroll = content_height.saturating_sub(visible_height);
         let scroll = (scroll_offset as usize).min(max_scroll);
 
-        let visible_content: Vec<Line> = content
+        let visible_lines: Vec<Line> = text.lines
             .into_iter()
             .skip(scroll)
             .take(visible_height)
-            .map(Line::from)
             .collect();
 
         let title = format!(" Output: {} ", task.name);
@@ -665,7 +690,7 @@ impl TuiUI {
             TaskState::Completed { .. } | TaskState::Failed { .. } => Style::default().fg(Color::Red),
         };
 
-        let output = Paragraph::new(visible_content).block(
+        let output = Paragraph::new(visible_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
@@ -821,9 +846,7 @@ impl TaskRunnerUI for TuiUI {
     fn on_task_output(&mut self, id: CommandId, output: &[u8]) {
         if let Some(&idx) = self.task_map.get(&id) {
             if let Some(task) = self.tasks.get(idx) {
-                if let Ok(mut parser) = task.parser.lock() {
-                    parser.process(output);
-                }
+                task.append_output(output);
             }
         }
     }

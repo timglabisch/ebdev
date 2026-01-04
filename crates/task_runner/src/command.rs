@@ -3,6 +3,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+/// Escape a string for safe use in a shell command (single-quote escaping).
+/// This wraps the string in single quotes and escapes any embedded single quotes.
+/// In single quotes, all characters are literal except single quote itself.
+/// To include a single quote: end quote, escaped quote, start quote: '\''
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace("'", "'\\''"))
+}
+
 /// Unique ID for commands
 pub type CommandId = u64;
 
@@ -95,46 +103,54 @@ impl Command {
                 (shell.to_string(), vec![arg.to_string(), script.clone()])
             }
             Command::DockerExec { container, cmd, user, env, .. } => {
-                let mut args = vec!["exec".to_string()];
+                // Build docker exec command string with proper shell escaping
+                // -t allocates a pseudo-TTY so programs output colored text
+                let mut docker_cmd = String::from("docker exec -t");
                 if let Some(u) = user {
-                    args.push("-u".to_string());
-                    args.push(u.clone());
+                    docker_cmd.push_str(&format!(" -u {}", shell_escape(u)));
                 }
                 if let Some(e) = env {
                     for (k, v) in e {
-                        args.push("-e".to_string());
-                        args.push(format!("{}={}", k, v));
+                        docker_cmd.push_str(&format!(" -e {}={}", shell_escape(k), shell_escape(v)));
                     }
                 }
-                args.push(container.clone());
-                args.extend(cmd.clone());
-                ("docker".to_string(), args)
+                docker_cmd.push_str(&format!(" {}", shell_escape(container)));
+                for arg in cmd {
+                    docker_cmd.push_str(&format!(" {}", shell_escape(arg)));
+                }
+                // Wrap in shell like shell() does - this fixes PTY handling
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let arg = if cfg!(windows) { "/C" } else { "-c" };
+                (shell.to_string(), vec![arg.to_string(), docker_cmd])
             }
             Command::DockerRun { image, cmd, volumes, workdir, network, env, .. } => {
-                let mut args = vec!["run".to_string(), "--rm".to_string()];
+                // Build docker run command string with proper shell escaping
+                // -t allocates a pseudo-TTY so programs output colored text
+                let mut docker_cmd = String::from("docker run --rm -t");
                 if let Some(vols) = volumes {
                     for v in vols {
-                        args.push("-v".to_string());
-                        args.push(v.clone());
+                        docker_cmd.push_str(&format!(" -v {}", shell_escape(v)));
                     }
                 }
                 if let Some(w) = workdir {
-                    args.push("-w".to_string());
-                    args.push(w.clone());
+                    docker_cmd.push_str(&format!(" -w {}", shell_escape(w)));
                 }
                 if let Some(n) = network {
-                    args.push("--network".to_string());
-                    args.push(n.clone());
+                    docker_cmd.push_str(&format!(" --network {}", shell_escape(n)));
                 }
                 if let Some(e) = env {
                     for (k, v) in e {
-                        args.push("-e".to_string());
-                        args.push(format!("{}={}", k, v));
+                        docker_cmd.push_str(&format!(" -e {}={}", shell_escape(k), shell_escape(v)));
                     }
                 }
-                args.push(image.clone());
-                args.extend(cmd.clone());
-                ("docker".to_string(), args)
+                docker_cmd.push_str(&format!(" {}", shell_escape(image)));
+                for arg in cmd {
+                    docker_cmd.push_str(&format!(" {}", shell_escape(arg)));
+                }
+                // Wrap in shell like shell() does - this fixes PTY handling
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let arg = if cfg!(windows) { "/C" } else { "-c" };
+                (shell.to_string(), vec![arg.to_string(), docker_cmd])
             }
         }
     }

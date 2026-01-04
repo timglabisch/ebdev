@@ -12,3 +12,4 @@ serde.workspace = true
 serde_json.workspace = true
 portable-pty = "0.8"
 vt100 = "0.15"
+ansi-to-tui = "8"
