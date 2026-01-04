@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PollingConfig, SyncMode};
+use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PermissionsConfig, PollingConfig, SyncMode};
 use ebdev_mutagen_runner::test_utils::*;
 use ebdev_mutagen_runner::RealMutagen;
 
@@ -78,6 +78,7 @@ impl RealTestContext {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: shared_dir,
             config_path: workspace_root().join("example/.ebdev.ts"),
@@ -102,6 +103,7 @@ impl RealTestContext {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: shared_dir,
             config_path: workspace_root().join("example/.ebdev.ts"),

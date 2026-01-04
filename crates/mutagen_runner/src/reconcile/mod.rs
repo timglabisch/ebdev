@@ -301,7 +301,7 @@ mod tests {
     use super::*;
     use crate::state::{ActualSession, SessionStatus};
     use crate::SyncOptions;
-    use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PollingConfig, SyncMode};
+    use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PermissionsConfig, PollingConfig, SyncMode};
     use std::path::PathBuf;
 
     fn make_project(name: &str, target: &str, stage: i32, root: &str) -> DiscoveredProject {
@@ -314,6 +314,7 @@ mod tests {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
             config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),

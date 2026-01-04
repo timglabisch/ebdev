@@ -158,7 +158,7 @@ impl<B: MutagenBackend, U: SyncUI> SyncController<B, U> {
 mod tests {
     use super::*;
     use crate::test_utils::{MockMutagen, MockUI};
-    use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PollingConfig, SyncMode};
+    use ebdev_mutagen_config::{DiscoveredProject, MutagenSyncProject, PermissionsConfig, PollingConfig, SyncMode};
     use std::path::PathBuf;
 
     fn make_project(name: &str, target: &str, stage: i32, root: &str) -> DiscoveredProject {
@@ -171,6 +171,7 @@ mod tests {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
             config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
@@ -297,5 +298,84 @@ mod tests {
         assert!(result.is_ok());
         // Only stage 0 session should be created
         assert_eq!(backend.created_sessions().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_controller_sync_only_preserves_init_stage_sessions() {
+        // Scenario: --sync (without --init) should NOT terminate stage 0 sessions
+        // This simulates: existing stage 0 sessions + running only final stage
+        let backend = Arc::new(MockMutagen::new());
+
+        // Create projects for both stages
+        let p0 = make_project("allother0", "docker://webserver/www", 0, "/root");
+        let p1 = make_project("allother", "docker://webserver/www", 1, "/root");
+
+        // Add existing stage 0 session (simulates session from previous --init)
+        let stage0_session = crate::test_utils::mock_session_for_project(&p0);
+        backend.add_session(stage0_session);
+
+        let desired = DesiredState::from_projects(&[p0.clone(), p1.clone()]);
+        let options = SyncOptions {
+            run_init_stages: false,  // --sync only (no --init)
+            run_final_stage: true,
+            keep_open: false,
+        };
+        let ui = MockUI::new().with_sessions_complete();
+
+        let controller = SyncController::new(backend.clone(), desired, options, ui);
+        let result = controller.run().await;
+
+        assert!(result.is_ok());
+
+        // Stage 1 session should be created
+        assert_eq!(backend.created_sessions().len(), 1);
+        let created = backend.created_sessions();
+        assert!(created[0].0.starts_with("allother-"), "Should create stage 1 session");
+
+        // Stage 0 session should NOT be terminated!
+        let terminated = backend.terminated_sessions();
+        assert!(
+            terminated.is_empty(),
+            "Stage 0 session should NOT be terminated when running --sync only. Terminated: {:?}",
+            terminated
+        );
+
+        // Both sessions should exist at the end
+        let final_sessions = backend.list_sessions().await;
+        assert_eq!(final_sessions.len(), 2, "Both stage 0 and stage 1 sessions should exist");
+    }
+
+    #[tokio::test]
+    async fn test_controller_final_stage_not_terminated_after_completion() {
+        // Scenario: Final stage sessions should NOT be terminated after sync completes
+        let backend = Arc::new(MockMutagen::new());
+        let project = make_project("frontend", "docker://app", 0, "/root");
+        let desired = DesiredState::from_projects(&[project.clone()]);
+        let options = SyncOptions {
+            run_init_stages: true,
+            run_final_stage: true,
+            keep_open: false,
+        };
+        let ui = MockUI::new().with_sessions_complete();
+
+        let controller = SyncController::new(backend.clone(), desired, options, ui);
+        let result = controller.run().await;
+
+        assert!(result.is_ok());
+
+        // Session should be created
+        assert_eq!(backend.created_sessions().len(), 1);
+
+        // Session should NOT be terminated (it's the final stage)
+        let terminated = backend.terminated_sessions();
+        assert!(
+            terminated.is_empty(),
+            "Final stage session should NOT be terminated. Terminated: {:?}",
+            terminated
+        );
+
+        // Session should still exist
+        let final_sessions = backend.list_sessions().await;
+        assert_eq!(final_sessions.len(), 1, "Final stage session should still exist");
     }
 }

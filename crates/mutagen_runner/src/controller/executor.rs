@@ -188,7 +188,7 @@ mod tests {
     use crate::state::{DesiredSession, StagePhase};
     use crate::test_utils::{MockMutagen, MockUI};
     use crate::SyncOptions;
-    use ebdev_mutagen_config::{PollingConfig, SyncMode};
+    use ebdev_mutagen_config::{PermissionsConfig, PollingConfig, SyncMode};
     use std::path::PathBuf;
 
     fn make_desired_session(name: &str) -> DesiredSession {
@@ -201,6 +201,7 @@ mod tests {
             stage: 0,
             ignore: vec![],
             polling: PollingConfig::default(),
+            permissions: PermissionsConfig::default(),
             config_hash: 12345,
         }
     }

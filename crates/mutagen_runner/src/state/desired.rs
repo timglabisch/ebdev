@@ -7,7 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-use ebdev_mutagen_config::{DiscoveredProject, PollingConfig, SyncMode};
+use ebdev_mutagen_config::{DiscoveredProject, PermissionsConfig, PollingConfig, SyncMode};
 
 /// Der gewünschte Zustand aller Mutagen-Sessions.
 ///
@@ -95,6 +95,8 @@ pub struct DesiredSession {
     pub ignore: Vec<String>,
     /// Polling-Konfiguration
     pub polling: PollingConfig,
+    /// Permissions-Konfiguration
+    pub permissions: PermissionsConfig,
     /// Hash der relevanten Config-Felder (für Change Detection)
     pub config_hash: u64,
 }
@@ -111,6 +113,7 @@ impl DesiredSession {
             stage: project.project.stage,
             ignore: project.project.ignore.clone(),
             polling: project.project.polling.clone(),
+            permissions: project.project.permissions.clone(),
             config_hash: Self::compute_config_hash(project),
         }
     }
@@ -128,6 +131,8 @@ impl DesiredSession {
         project.project.ignore.hash(&mut hasher);
         project.project.polling.enabled.hash(&mut hasher);
         project.project.polling.interval.hash(&mut hasher);
+        project.project.permissions.default_file_mode.hash(&mut hasher);
+        project.project.permissions.default_directory_mode.hash(&mut hasher);
 
         hasher.finish()
     }
@@ -153,6 +158,7 @@ mod tests {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
             config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),

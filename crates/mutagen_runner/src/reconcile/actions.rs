@@ -165,7 +165,7 @@ impl IntoIterator for ActionList {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use ebdev_mutagen_config::{PollingConfig, SyncMode};
+    use ebdev_mutagen_config::{PermissionsConfig, PollingConfig, SyncMode};
 
     fn make_desired_session(name: &str) -> DesiredSession {
         DesiredSession {
@@ -177,6 +177,7 @@ mod tests {
             stage: 0,
             ignore: vec![],
             polling: PollingConfig::default(),
+            permissions: PermissionsConfig::default(),
             config_hash: 12345,
         }
     }

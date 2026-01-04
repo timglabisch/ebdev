@@ -52,6 +52,34 @@ impl Default for PollingConfig {
     }
 }
 
+/// Permissions configuration for mutagen sync
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsConfig {
+    /// Default file mode (e.g., 666 for rw-rw-rw-)
+    #[serde(default = "default_file_mode", rename = "defaultFileMode")]
+    pub default_file_mode: u32,
+    /// Default directory mode (e.g., 777 for rwxrwxrwx)
+    #[serde(default = "default_directory_mode", rename = "defaultDirectoryMode")]
+    pub default_directory_mode: u32,
+}
+
+fn default_file_mode() -> u32 {
+    0o666
+}
+
+fn default_directory_mode() -> u32 {
+    0o777
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            default_file_mode: default_file_mode(),
+            default_directory_mode: default_directory_mode(),
+        }
+    }
+}
+
 /// A mutagen sync project definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutagenSyncProject {
@@ -74,6 +102,9 @@ pub struct MutagenSyncProject {
     /// Stage for ordering sync projects (lower runs first)
     #[serde(default)]
     pub stage: i32,
+    /// Permissions configuration
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
 }
 
 /// Mutagen section in .ebdev.ts

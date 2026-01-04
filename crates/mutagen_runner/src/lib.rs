@@ -205,6 +205,10 @@ impl MutagenBackend for RealMutagen {
             args.push(format!("--watch-polling-interval={}", session.polling.interval));
         }
 
+        // Add permissions configuration
+        args.push(format!("--default-file-mode={:o}", session.permissions.default_file_mode));
+        args.push(format!("--default-directory-mode={:o}", session.permissions.default_directory_mode));
+
         let output = Command::new(&self.bin_path)
             .args(&args)
             .stdout(Stdio::piped())
@@ -417,7 +421,15 @@ pub async fn run_sync<B: MutagenBackend + 'static, U: SyncUI>(
     }
 
     let init_only = options.run_init_stages && !options.run_final_stage;
-    ui.on_start(desired.stages.len(), init_only);
+
+    // Calculate actual stages to run based on options
+    let stages_to_run_count = match (options.run_init_stages, options.run_final_stage) {
+        (true, true) => desired.stages.len(),
+        (true, false) => desired.stages.len().saturating_sub(1),
+        (false, true) => 1.min(desired.stages.len()),
+        (false, false) => 0,
+    };
+    ui.on_start(stages_to_run_count, init_only);
 
     let controller = controller::SyncController::new(backend, desired, options, ui);
     controller.run().await
@@ -805,7 +817,7 @@ pub mod test_utils {
 
     /// Erstellt ein Test-Projekt
     pub fn make_project(name: &str, target: &str, stage: i32, root: &str) -> DiscoveredProject {
-        use ebdev_mutagen_config::{MutagenSyncProject, PollingConfig};
+        use ebdev_mutagen_config::{MutagenSyncProject, PermissionsConfig, PollingConfig};
 
         DiscoveredProject {
             project: MutagenSyncProject {
@@ -816,6 +828,7 @@ pub mod test_utils {
                 stage,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from(format!("{}/{}", root, name)),
             config_path: PathBuf::from(format!("{}/.ebdev.ts", root)),
@@ -1286,7 +1299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_mode_one_way_create() {
-        use ebdev_mutagen_config::{MutagenSyncProject, PollingConfig};
+        use ebdev_mutagen_config::{MutagenSyncProject, PermissionsConfig, PollingConfig};
 
         let backend = MockMutagen::new();
         let project = DiscoveredProject {
@@ -1298,6 +1311,7 @@ mod tests {
                 stage: 0,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
             config_path: PathBuf::from("/root/.ebdev.ts"),
@@ -1313,7 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_mode_one_way_replica() {
-        use ebdev_mutagen_config::{MutagenSyncProject, PollingConfig};
+        use ebdev_mutagen_config::{MutagenSyncProject, PermissionsConfig, PollingConfig};
 
         let backend = MockMutagen::new();
         let project = DiscoveredProject {
@@ -1325,6 +1339,7 @@ mod tests {
                 stage: 0,
                 ignore: vec![],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
             config_path: PathBuf::from("/root/.ebdev.ts"),
@@ -1343,7 +1358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_polling_config_enabled() {
-        use ebdev_mutagen_config::{MutagenSyncProject, PollingConfig};
+        use ebdev_mutagen_config::{MutagenSyncProject, PermissionsConfig, PollingConfig};
 
         let backend = MockMutagen::new();
         let project = DiscoveredProject {
@@ -1358,6 +1373,7 @@ mod tests {
                     enabled: true,
                     interval: 5,
                 },
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
             config_path: PathBuf::from("/root/.ebdev.ts"),
@@ -1377,7 +1393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ignore_patterns_passed_to_session() {
-        use ebdev_mutagen_config::{MutagenSyncProject, PollingConfig};
+        use ebdev_mutagen_config::{MutagenSyncProject, PermissionsConfig, PollingConfig};
 
         let backend = MockMutagen::new();
         let project = DiscoveredProject {
@@ -1389,6 +1405,7 @@ mod tests {
                 stage: 0,
                 ignore: vec![".git".to_string(), "node_modules".to_string(), "*.log".to_string()],
                 polling: PollingConfig::default(),
+                permissions: PermissionsConfig::default(),
             },
             resolved_directory: PathBuf::from("/root/test"),
             config_path: PathBuf::from("/root/.ebdev.ts"),
