@@ -51,6 +51,9 @@ enum Commands {
         /// Run with TUI visualization
         #[arg(long)]
         tui: bool,
+        /// Log all executor communication to file (JSON format)
+        #[arg(long)]
+        debug_log: Option<std::path::PathBuf>,
     },
     /// List all available tasks from .ebdev.ts
     Tasks,
@@ -326,7 +329,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 println!("Run a task with: ebdev task <name>");
             }
         }
-        Commands::Task { name, tui } => {
+        Commands::Task { name, tui, debug_log } => {
             let config_path = base_path.join(".ebdev.ts");
             if !config_path.exists() {
                 eprintln!("No .ebdev.ts found in current directory");
@@ -335,10 +338,10 @@ async fn run() -> anyhow::Result<ExitCode> {
 
             if tui {
                 // Run with TUI visualization
-                return run_task_with_tui(&config_path, &name, &base_path).await;
+                return run_task_with_tui(&config_path, &name, &base_path, debug_log).await;
             } else {
                 // Run in headless mode with PTY support
-                return run_task_headless(&config_path, &name, &base_path).await;
+                return run_task_headless(&config_path, &name, &base_path, debug_log).await;
             }
         }
     }
@@ -351,11 +354,13 @@ async fn run_task_with_tui(
     config_path: &std::path::Path,
     task_name: &str,
     base_path: &PathBuf,
+    debug_log: Option<std::path::PathBuf>,
 ) -> anyhow::Result<ExitCode> {
     // Start TUI task runner in separate thread
     let (handle, tui_thread) = match ebdev_task_runner::run_with_tui(
         task_name.to_string(),
         Some(base_path.to_string_lossy().to_string()),
+        debug_log,
     ) {
         Ok(r) => r,
         Err(ebdev_task_runner::TaskRunnerError::NotATty) => {
@@ -377,7 +382,9 @@ async fn run_task_with_tui(
     let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle)).await;
 
     // Signal shutdown to TUI
-    let _ = handle_for_shutdown.shutdown();
+    if let Err(e) = handle_for_shutdown.shutdown() {
+        eprintln!("Warning: Failed to send shutdown signal: {}", e);
+    }
 
     // Wait for TUI thread
     let tui_result = tui_thread.join();
@@ -401,10 +408,12 @@ async fn run_task_headless(
     config_path: &std::path::Path,
     task_name: &str,
     base_path: &PathBuf,
+    debug_log: Option<std::path::PathBuf>,
 ) -> anyhow::Result<ExitCode> {
     // Start headless task runner in separate thread
     let (handle, runner_thread) = ebdev_task_runner::run_headless(
         Some(base_path.to_string_lossy().to_string()),
+        debug_log,
     );
 
     let handle_for_shutdown = handle.clone();

@@ -4,6 +4,7 @@ pub mod ui;
 
 use command::{CommandId, CommandRequest, ExecutorMessage};
 use executor::Executor;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -145,6 +146,7 @@ fn create_task_runner() -> (
 pub fn run_with_tui(
     task_name: String,
     default_cwd: Option<String>,
+    debug_log: Option<PathBuf>,
 ) -> Result<(TaskRunnerHandle, std::thread::JoinHandle<std::io::Result<()>>), TaskRunnerError> {
     use std::io::IsTerminal;
 
@@ -160,6 +162,9 @@ pub fn run_with_tui(
 
     let thread_handle = std::thread::spawn(move || {
         let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
+        if let Some(log_path) = debug_log {
+            executor = executor.with_debug_log(log_path);
+        }
         match TuiUI::new(task_name) {
             Ok(mut ui) => {
                 // Signal that we're ready
@@ -185,11 +190,15 @@ pub fn run_with_tui(
 /// This spawns the executor in a separate thread and returns the handle
 pub fn run_headless(
     default_cwd: Option<String>,
+    debug_log: Option<PathBuf>,
 ) -> (TaskRunnerHandle, std::thread::JoinHandle<std::io::Result<()>>) {
     let (handle, rx, tui_event_tx) = create_task_runner();
 
     let thread_handle = std::thread::spawn(move || {
         let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
+        if let Some(log_path) = debug_log {
+            executor = executor.with_debug_log(log_path);
+        }
         let mut ui = HeadlessUI::new();
         executor.run(&mut ui)
     });
@@ -203,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_headless_echo() {
-        let (handle, _thread) = run_headless(None);
+        let (handle, _thread) = run_headless(None, None);
 
         let result = handle.execute(Command::Exec {
             cmd: vec!["echo".into(), "hello".into()],
@@ -224,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_headless_parallel() {
-        let (handle, _thread) = run_headless(None);
+        let (handle, _thread) = run_headless(None, None);
 
         handle.parallel_begin(2).unwrap();
 

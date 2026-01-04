@@ -1,11 +1,13 @@
-use crate::command::{CommandId, CommandRequest, CommandResult, ExecutorMessage, RegisteredTask, TuiEvent};
+use crate::command::{CommandId, CommandRequest, CommandResult, DebugMessage, ExecutorMessage, RegisteredTask, TuiEvent};
 use crate::ui::TaskRunnerUI;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Event vom PTY-Thread zurück zum Executor
@@ -13,6 +15,42 @@ pub enum PtyEvent {
     Output { id: CommandId, data: Vec<u8> },
     Completed { id: CommandId, result: CommandResult },
     Error { id: CommandId, error: String },
+}
+
+/// Debug logger for recording all executor communication
+pub struct DebugLogger {
+    file: File,
+    start_time: Instant,
+}
+
+impl DebugLogger {
+    pub fn new(path: &PathBuf) -> std::io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(Self {
+            file,
+            start_time: Instant::now(),
+        })
+    }
+
+    pub fn log(&mut self, msg: &DebugMessage) {
+        let elapsed = self.start_time.elapsed();
+        let timestamp = format!("{:.3}s", elapsed.as_secs_f64());
+        if let Ok(json) = serde_json::to_string(msg) {
+            let _ = writeln!(self.file, "[{}] {}", timestamp, json);
+            let _ = self.file.flush();
+        }
+    }
+
+    pub fn log_raw(&mut self, msg: &str) {
+        let elapsed = self.start_time.elapsed();
+        let timestamp = format!("{:.3}s", elapsed.as_secs_f64());
+        let _ = writeln!(self.file, "[{}] {}", timestamp, msg);
+        let _ = self.file.flush();
+    }
 }
 
 /// Der Task-Executor - führt Commands aus und kommuniziert über das UI-Trait
@@ -33,6 +71,8 @@ pub struct Executor {
     tui_event_tx: mpsc::UnboundedSender<TuiEvent>,
     /// Registrierte Tasks die von der TUI getriggert werden können
     registered_tasks: Vec<RegisteredTask>,
+    /// Optional debug logger
+    debug_logger: Option<DebugLogger>,
 }
 
 impl Executor {
@@ -52,6 +92,27 @@ impl Executor {
             cols: 80,
             tui_event_tx,
             registered_tasks: Vec::new(),
+            debug_logger: None,
+        }
+    }
+
+    /// Enable debug logging to a file
+    pub fn with_debug_log(mut self, path: PathBuf) -> Self {
+        match DebugLogger::new(&path) {
+            Ok(logger) => {
+                self.debug_logger = Some(logger);
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not create debug log at {:?}: {}", path, e);
+            }
+        }
+        self
+    }
+
+    /// Log a debug message if debug logging is enabled
+    fn log_debug(&mut self, msg: DebugMessage) {
+        if let Some(ref mut logger) = self.debug_logger {
+            logger.log(&msg);
         }
     }
 
@@ -74,23 +135,38 @@ impl Executor {
 
     /// Hauptschleife - verarbeitet Messages und PTY-Events
     pub fn run<UI: TaskRunnerUI>(&mut self, ui: &mut UI) -> std::io::Result<()> {
+        if let Some(ref mut logger) = self.debug_logger {
+            logger.log_raw("=== Executor started ===");
+        }
+
         loop {
             // 1. Verarbeite ausstehende Executor-Messages (non-blocking)
             while let Ok(msg) = self.rx.try_recv() {
                 match msg {
                     ExecutorMessage::Execute(request) => {
+                        self.log_debug(DebugMessage::Execute {
+                            id: request.id,
+                            command: request.command.clone(),
+                        });
                         self.execute(request, ui);
                     }
                     ExecutorMessage::ParallelBegin { count } => {
+                        self.log_debug(DebugMessage::ParallelBegin { count });
                         ui.on_parallel_begin(count);
                     }
                     ExecutorMessage::ParallelEnd => {
+                        self.log_debug(DebugMessage::ParallelEnd);
                         ui.on_parallel_end();
                     }
                     ExecutorMessage::StageBegin { name } => {
+                        self.log_debug(DebugMessage::StageBegin { name: name.clone() });
                         ui.on_stage_begin(&name);
                     }
                     ExecutorMessage::TaskRegister { name, description } => {
+                        self.log_debug(DebugMessage::TaskRegister {
+                            name: name.clone(),
+                            description: description.clone(),
+                        });
                         // Remove existing task with same name if any
                         self.registered_tasks.retain(|t| t.name != name);
                         self.registered_tasks.push(RegisteredTask {
@@ -100,18 +176,30 @@ impl Executor {
                         ui.on_task_registered(&name, &description);
                     }
                     ExecutorMessage::TaskUnregister { name } => {
+                        self.log_debug(DebugMessage::TaskUnregister { name: name.clone() });
                         self.registered_tasks.retain(|t| t.name != name);
                         ui.on_task_unregistered(&name);
                     }
                     ExecutorMessage::Log { message } => {
+                        self.log_debug(DebugMessage::Log { message: message.clone() });
                         ui.on_log(&message);
                     }
                     ExecutorMessage::Shutdown => {
+                        self.log_debug(DebugMessage::Shutdown);
+                        if let Some(ref mut logger) = self.debug_logger {
+                            logger.log_raw(&format!("Shutdown received, auto_quit={}", ui.should_auto_quit()));
+                        }
                         // If auto-quit is enabled, exit immediately
                         // Otherwise, keep the UI open until user manually quits
                         if ui.should_auto_quit() {
+                            if let Some(ref mut logger) = self.debug_logger {
+                                logger.log_raw("Calling cleanup and returning");
+                            }
                             ui.cleanup()?;
                             return Ok(());
+                        }
+                        if let Some(ref mut logger) = self.debug_logger {
+                            logger.log_raw("Not auto-quitting, continuing loop");
                         }
                         // Continue running - user will quit manually with q/Esc
                     }
@@ -122,9 +210,18 @@ impl Executor {
             while let Ok(event) = self.pty_rx.try_recv() {
                 match event {
                     PtyEvent::Output { id, data } => {
+                        self.log_debug(DebugMessage::PtyOutput {
+                            id,
+                            data_utf8: String::from_utf8(data.clone()).ok(),
+                            data_len: data.len(),
+                        });
                         ui.on_task_output(id, &data);
                     }
                     PtyEvent::Completed { id, result } => {
+                        self.log_debug(DebugMessage::PtyCompleted {
+                            id,
+                            result: result.clone(),
+                        });
                         ui.on_task_complete(id, &result);
                         // Sende Result zurück an Deno
                         if let Some(tx) = self.pending_results.remove(&id) {
@@ -132,6 +229,10 @@ impl Executor {
                         }
                     }
                     PtyEvent::Error { id, error } => {
+                        self.log_debug(DebugMessage::PtyError {
+                            id,
+                            error: error.clone(),
+                        });
                         ui.on_task_error(id, &error);
                         // Sende Fehler-Result zurück an Deno
                         if let Some(tx) = self.pending_results.remove(&id) {
@@ -155,6 +256,9 @@ impl Executor {
 
             // 5. Check quit
             if ui.check_quit()? {
+                if let Some(ref mut logger) = self.debug_logger {
+                    logger.log_raw("User quit via check_quit()");
+                }
                 ui.cleanup()?;
                 return Ok(());
             }

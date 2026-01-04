@@ -1056,6 +1056,8 @@ dependencies = [
  "crossterm 0.28.1",
  "portable-pty",
  "ratatui",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
  "tokio",
  "vt100",

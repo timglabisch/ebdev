@@ -183,7 +183,7 @@ export async function build() {{
 "#)).unwrap();
 
         // Run with headless task runner
-        let (handle, _thread) = ebdev_task_runner::run_headless(None);
+        let (handle, _thread) = ebdev_task_runner::run_headless(None, None);
         let handle_for_shutdown = handle.clone();
 
         let result = run_task(&config_path, "build", Some(handle)).await;
@@ -206,7 +206,7 @@ export async function build() {}
 "#).unwrap();
 
         // Run with headless task runner
-        let (handle, _thread) = ebdev_task_runner::run_headless(None);
+        let (handle, _thread) = ebdev_task_runner::run_headless(None, None);
         let handle_for_shutdown = handle.clone();
 
         let result = run_task(&config_path, "nonexistent", Some(handle)).await;

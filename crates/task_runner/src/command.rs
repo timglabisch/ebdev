@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -9,7 +10,7 @@ pub type CommandId = u64;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A command to be executed
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Command {
     /// Execute a local command
     Exec {
@@ -180,7 +181,7 @@ impl Command {
 }
 
 /// Result of command execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommandResult {
     pub exit_code: i32,
     pub success: bool,
@@ -195,7 +196,7 @@ pub struct CommandRequest {
 }
 
 /// A registered task that can be triggered from the TUI
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RegisteredTask {
     pub name: String,
     pub description: String,
@@ -222,8 +223,53 @@ pub enum ExecutorMessage {
 }
 
 /// Events from TUI back to TypeScript
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum TuiEvent {
     /// A registered task was triggered by the user
     TaskTriggered { name: String },
+}
+
+/// Serializable version of ExecutorMessage for debug logging
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum DebugMessage {
+    Execute {
+        id: CommandId,
+        command: Command,
+    },
+    ParallelBegin {
+        count: usize,
+    },
+    ParallelEnd,
+    StageBegin {
+        name: String,
+    },
+    TaskRegister {
+        name: String,
+        description: String,
+    },
+    TaskUnregister {
+        name: String,
+    },
+    Log {
+        message: String,
+    },
+    Shutdown,
+    /// PTY output event
+    PtyOutput {
+        id: CommandId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data_utf8: Option<String>,
+        data_len: usize,
+    },
+    /// PTY completed event
+    PtyCompleted {
+        id: CommandId,
+        result: CommandResult,
+    },
+    /// PTY error event
+    PtyError {
+        id: CommandId,
+        error: String,
+    },
 }

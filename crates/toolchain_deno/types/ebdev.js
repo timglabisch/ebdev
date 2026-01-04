@@ -338,6 +338,13 @@ const taskRegistry = new Map();
 let triggerLoopRunning = false;
 
 /**
+ * Stop the trigger polling loop
+ */
+function stopTriggerLoop() {
+  triggerLoopRunning = false;
+}
+
+/**
  * Start the background loop that polls for task triggers from the TUI.
  * Note: This is started automatically when the first task is registered.
  * The polling is done by the TUI/Executor, this just checks for triggers.
@@ -431,6 +438,11 @@ export async function untask(name) {
 
   taskRegistry.delete(name);
   await Deno.core.ops.op_task_unregister(name);
+
+  // Stop the trigger loop when all tasks are removed
+  if (taskRegistry.size === 0) {
+    stopTriggerLoop();
+  }
 }
 
 /**
