@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 pub mod bridge;
 pub mod executor;
 pub mod local;
+pub mod remote;
 
 pub use bridge::run_bridge;
 pub use executor::{ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor, ExecutorError};
 pub use local::LocalExecutor;
+pub use remote::{find_linux_binary, RemoteExecutor};
 
 /// PTY-Konfiguration für interaktive Sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]

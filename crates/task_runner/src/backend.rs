@@ -4,7 +4,7 @@
 //! die intern die async Executoren aus ebdev_remote verwendet.
 
 use crate::command::{Command, CommandResult};
-use ebdev_remote::{ExecuteEvent, ExecuteOptions, Executor, LocalExecutor, PtyConfig};
+use ebdev_remote::{ExecuteEvent, ExecuteOptions, Executor, LocalExecutor, PtyConfig, RemoteExecutor};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -123,7 +123,7 @@ impl ExecutionBackend {
         self.run_executor(&mut executor, options, timeout, event_tx)
     }
 
-    /// Führt einen Befehl in einem Docker-Container aus
+    /// Führt einen Befehl in einem Docker-Container aus (über Bridge)
     fn execute_docker_exec(
         &mut self,
         container: &str,
@@ -135,34 +135,103 @@ impl ExecutionBackend {
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
     ) -> Result<(), String> {
-        // Baue docker exec Befehl
-        let mut docker_args = vec!["exec".to_string(), "-i".to_string(), "-t".to_string()];
-
-        if let Some(u) = user {
-            docker_args.push("-u".to_string());
-            docker_args.push(u.to_string());
+        if cmd.is_empty() {
+            let _ = event_tx.send(BackendEvent::Error("Empty command".to_string()));
+            return Err("Empty command".to_string());
         }
 
-        if let Some(ref e) = env {
-            for (k, v) in e {
-                docker_args.push("-e".to_string());
-                docker_args.push(format!("{}={}", k, v));
-            }
-        }
-
-        docker_args.push(container.to_string());
-        docker_args.extend(cmd.iter().cloned());
+        // Build the command - if user is specified, use su to switch
+        // Note: This requires the bridge to run as root (or a user that can su).
+        // The original docker exec -u approach is not possible here since the bridge
+        // is already running. We use su inside the container instead.
+        let (program, args) = if let Some(u) = user {
+            // Use su to run as different user: su user -c "command"
+            (
+                "su".to_string(),
+                vec![
+                    u.to_string(),
+                    "-c".to_string(),
+                    cmd.join(" "),
+                ],
+            )
+        } else {
+            (cmd[0].clone(), cmd[1..].to_vec())
+        };
 
         let options = ExecuteOptions {
-            program: "docker".to_string(),
-            args: docker_args,
+            program,
+            args,
             workdir: None,
-            env: vec![],
+            env: env
+                .map(|e| e.into_iter().collect())
+                .unwrap_or_default(),
             pty: Some(PtyConfig { cols, rows }),
         };
 
-        let mut executor = LocalExecutor::new();
-        self.run_executor(&mut executor, options, timeout, event_tx)
+        // Connect to container via bridge and execute
+        let container = container.to_string();
+        self.runtime.block_on(async {
+            let mut executor = match RemoteExecutor::connect(&container).await {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = event_tx.send(BackendEvent::Error(format!("Failed to connect to container: {}", e)));
+                    return Err(format!("Failed to connect to container: {}", e));
+                }
+            };
+
+            let (tx, mut rx) = mpsc::channel::<ExecuteEvent>(64);
+
+            // Start the process
+            let handle = match executor.execute(options, tx).await {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = event_tx.send(BackendEvent::Error(e.to_string()));
+                    return Err(e.to_string());
+                }
+            };
+
+            // Collect events with timeout
+            let timeout_at = tokio::time::Instant::now() + timeout;
+            let mut exit_code = None;
+            let mut timed_out = false;
+
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        match event {
+                            Some(ExecuteEvent::Output { stream: _, data }) => {
+                                let _ = event_tx.send(BackendEvent::Output(data));
+                            }
+                            Some(ExecuteEvent::Exit { code }) => {
+                                exit_code = code;
+                                break;
+                            }
+                            None => {
+                                // Channel closed
+                                break;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(timeout_at) => {
+                        timed_out = true;
+                        // Kill the process
+                        if let Some(kill_tx) = handle.kill_tx {
+                            let _ = kill_tx.send(());
+                        }
+                        break;
+                    }
+                }
+            }
+
+            let result = CommandResult {
+                exit_code: exit_code.unwrap_or(-1),
+                success: exit_code == Some(0),
+                timed_out,
+            };
+
+            let _ = event_tx.send(BackendEvent::Completed(result));
+            Ok(())
+        })
     }
 
     /// Führt docker run aus
