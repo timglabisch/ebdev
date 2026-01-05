@@ -1,4 +1,11 @@
-.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down
+.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux
+
+# Build Linux bridge binary via Docker (statisch gelinkt, ~1MB)
+build-linux:
+	@mkdir -p target/linux
+	docker build -f Dockerfile.build --target export --output type=local,dest=target/linux .
+	@echo "Binary: target/linux/ebdev-bridge"
+	@ls -lh target/linux/ebdev-bridge
 
 # Start Docker and run sync (final stage only)
 sync-example: docker-up

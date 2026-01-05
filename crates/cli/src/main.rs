@@ -57,6 +57,31 @@ enum Commands {
     },
     /// List all available tasks from .ebdev.ts
     Tasks,
+    /// Run commands in Docker containers via bridge
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommands,
+    },
+    /// Internal: Run as remote bridge inside a container (used by remote run)
+    #[command(hide = true)]
+    RemoteBridge,
+}
+
+#[derive(Subcommand)]
+enum RemoteCommands {
+    /// Run a command inside a Docker container
+    Run {
+        /// Docker container name or ID
+        container: String,
+        /// Command to run
+        command: String,
+        /// Arguments for the command
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Working directory inside the container
+        #[arg(long, short = 'w')]
+        workdir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -166,6 +191,20 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+
+    // RemoteBridge und Remote brauchen keine Config - direkt ausführen
+    if matches!(cli.command, Commands::RemoteBridge) {
+        if let Err(e) = ebdev_remote::run_bridge() {
+            eprintln!("Remote bridge error: {}", e);
+            return Ok(ExitCode::FAILURE);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Commands::Remote { command } = cli.command {
+        return handle_remote_command(command).await;
+    }
+
     let base_path = PathBuf::from(".");
     let config = Config::load_from_dir(&base_path).await?;
 
@@ -351,9 +390,177 @@ async fn run() -> anyhow::Result<ExitCode> {
                 return run_task_headless(&config_path, &name, &base_path, debug_log).await;
             }
         }
+        // Handled earlier before config load
+        Commands::RemoteBridge => unreachable!(),
+        Commands::Remote { .. } => unreachable!(),
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Handle remote commands (don't need config)
+async fn handle_remote_command(command: RemoteCommands) -> anyhow::Result<ExitCode> {
+    match command {
+        RemoteCommands::Run { container, command, args, workdir } => {
+            remote_run(&container, &command, &args, workdir.as_deref()).await
+        }
+    }
+}
+
+/// Run a command inside a Docker container via the bridge protocol
+async fn remote_run(
+    container: &str,
+    program: &str,
+    args: &[String],
+    workdir: Option<&str>,
+) -> anyhow::Result<ExitCode> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use ebdev_remote::{Request, Response, OutputStream, MAGIC, encode_message, decode_message};
+
+    // 1. Find the Linux binary path
+    let binary_path = find_linux_binary()?;
+
+    // 2. Copy binary to container
+    let container_binary_path = "/tmp/ebdev";
+    let cp_status = Command::new("docker")
+        .args(["cp", &binary_path.to_string_lossy(), &format!("{}:{}", container, container_binary_path)])
+        .status()
+        .await?;
+
+    if !cp_status.success() {
+        anyhow::bail!("Failed to copy binary to container");
+    }
+
+    // 3. Make it executable
+    let chmod_status = Command::new("docker")
+        .args(["exec", container, "chmod", "+x", container_binary_path])
+        .status()
+        .await?;
+
+    if !chmod_status.success() {
+        anyhow::bail!("Failed to make binary executable");
+    }
+
+    // 4. Start the bridge process in the container
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", container, container_binary_path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // 5. Wait for MAGIC + Ready
+    let mut magic_buf = [0u8; 4];
+    stdout.read_exact(&mut magic_buf).await?;
+    if &magic_buf != MAGIC {
+        anyhow::bail!("Invalid magic bytes from bridge");
+    }
+
+    let mut buffer = Vec::new();
+    let mut read_buf = [0u8; 4096];
+
+    // Read Ready response
+    loop {
+        let n = stdout.read(&mut read_buf).await?;
+        if n == 0 {
+            anyhow::bail!("Bridge closed unexpectedly");
+        }
+        buffer.extend_from_slice(&read_buf[..n]);
+
+        if let Some((response, consumed)) = decode_message::<Response>(&buffer)? {
+            buffer.drain(..consumed);
+            match response {
+                Response::Ready => break,
+                _ => anyhow::bail!("Expected Ready, got {:?}", response),
+            }
+        }
+    }
+
+    // 6. Send Execute request
+    let request = Request::Execute {
+        program: program.to_string(),
+        args: args.to_vec(),
+        working_dir: workdir.map(|s| s.to_string()),
+        env: vec![],
+    };
+    let msg = encode_message(&request)?;
+    stdin.write_all(&msg).await?;
+    stdin.flush().await?;
+
+    // 7. Read responses and stream output
+    let mut exit_code = None;
+
+    loop {
+        let n = stdout.read(&mut read_buf).await?;
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&read_buf[..n]);
+
+        while let Some((response, consumed)) = decode_message::<Response>(&buffer)? {
+            buffer.drain(..consumed);
+
+            match response {
+                Response::Output { stream, data } => {
+                    match stream {
+                        OutputStream::Stdout => {
+                            tokio::io::stdout().write_all(&data).await?;
+                        }
+                        OutputStream::Stderr => {
+                            tokio::io::stderr().write_all(&data).await?;
+                        }
+                    }
+                }
+                Response::Exit { code } => {
+                    exit_code = code;
+                }
+                Response::Error { message } => {
+                    eprintln!("Remote error: {}", message);
+                    return Ok(ExitCode::FAILURE);
+                }
+                Response::Ready => {}
+            }
+        }
+
+        if exit_code.is_some() {
+            break;
+        }
+    }
+
+    // 8. Send shutdown and wait
+    let shutdown = encode_message(&Request::Shutdown)?;
+    let _ = stdin.write_all(&shutdown).await;
+    let _ = child.wait().await;
+
+    Ok(ExitCode::from(exit_code.unwrap_or(1) as u8))
+}
+
+/// Find the Linux bridge binary (built via make build-linux)
+fn find_linux_binary() -> anyhow::Result<std::path::PathBuf> {
+    // Look in target/linux relative to current dir or executable
+    let candidates = [
+        std::path::PathBuf::from("target/linux/ebdev-bridge"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("../linux/ebdev-bridge")))
+            .unwrap_or_default(),
+    ];
+
+    for path in candidates {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    anyhow::bail!(
+        "Linux bridge binary not found. Run 'make build-linux' first.\n\
+         Expected at: target/linux/ebdev-bridge"
+    )
 }
 
 /// Run a task with TUI visualization

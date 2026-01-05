@@ -11,6 +11,7 @@ members = [
     "crates/parallel_runner",
     "crates/task_runner",
     "crates/cli",
+    "crates/ebdev_remote",
 ]
 
 [workspace.package]
@@ -38,3 +39,4 @@ crc32fast = "1.4"
 notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
 async-trait = "0.1"
 zip = "2"
+bincode = "1.3"

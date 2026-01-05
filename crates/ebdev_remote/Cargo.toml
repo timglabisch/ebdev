@@ -1,0 +1,19 @@
+[package]
+name = "ebdev_remote"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "ebdev_remote"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ebdev-bridge"
+path = "src/bin/bridge.rs"
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }

@@ -1005,6 +1005,7 @@ dependencies = [
  "ebdev-toolchain-deno",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
+ "ebdev_remote",
  "predicates",
  "tempfile",
  "tokio",
@@ -1124,6 +1125,15 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "xz2",
+]
+
+[[package]]
+name = "ebdev_remote"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
