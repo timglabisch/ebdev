@@ -19,3 +19,6 @@ bincode = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net"] }
 libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "process"] }

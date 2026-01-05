@@ -7,7 +7,12 @@
 use serde::{Deserialize, Serialize};
 
 pub mod bridge;
+pub mod executor;
+pub mod local;
+
 pub use bridge::run_bridge;
+pub use executor::{ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor, ExecutorError};
+pub use local::LocalExecutor;
 
 /// PTY-Konfiguration für interaktive Sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -418,28 +418,139 @@ async fn handle_remote_command(command: RemoteCommands) -> anyhow::Result<ExitCo
                 None
             };
 
-            let mut bridge = BridgeConnection::connect(&container).await?;
-            let session_id = bridge.execute(&command, &args, workdir.as_deref(), pty_config).await?;
-
-            if interactive {
-                bridge.run_interactive(session_id).await
-            } else {
-                bridge.run_simple(session_id).await
-            }
+            // Gemeinsame Ausführungslogik über Executor Trait
+            let mut executor = RemoteExecutor::connect(&container).await?;
+            run_with_executor(&mut executor, &command, &args, workdir.as_deref(), pty_config, interactive).await
         }
     }
 }
 
-/// Connection to the bridge process in a Docker container
-struct BridgeConnection {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: tokio::process::ChildStdout,
-    buffer: Vec<u8>,
+/// Führt einen Befehl mit einem beliebigen Executor aus
+async fn run_with_executor<E: ebdev_remote::Executor>(
+    executor: &mut E,
+    program: &str,
+    args: &[String],
+    workdir: Option<&str>,
+    pty: Option<ebdev_remote::PtyConfig>,
+    interactive: bool,
+) -> anyhow::Result<ExitCode> {
+    use ebdev_remote::ExecuteOptions;
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+
+    let options = ExecuteOptions {
+        program: program.to_string(),
+        args: args.to_vec(),
+        workdir: workdir.map(|s| s.to_string()),
+        env: vec![],
+        pty,
+    };
+
+    let handle = executor
+        .execute(options, event_tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if interactive {
+        run_interactive_loop(handle, &mut event_rx).await
+    } else {
+        run_simple_loop(&mut event_rx).await
+    }
 }
 
-impl BridgeConnection {
-    /// Connect to a container by copying and starting the bridge binary
+/// Einfache Ausführung: Output streamen bis Exit
+async fn run_simple_loop(
+    event_rx: &mut tokio::sync::mpsc::Receiver<ebdev_remote::ExecuteEvent>,
+) -> anyhow::Result<ExitCode> {
+    use ebdev_remote::{ExecuteEvent, OutputStream};
+    use tokio::io::AsyncWriteExt;
+
+    let mut exit_code = None;
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            ExecuteEvent::Output { stream, data } => {
+                match stream {
+                    OutputStream::Stdout => tokio::io::stdout().write_all(&data).await?,
+                    OutputStream::Stderr => tokio::io::stderr().write_all(&data).await?,
+                }
+            }
+            ExecuteEvent::Exit { code } => {
+                exit_code = code;
+                break;
+            }
+        }
+    }
+
+    Ok(ExitCode::from(exit_code.unwrap_or(1) as u8))
+}
+
+/// Interaktive Ausführung: stdin/stdout/resize multiplexen
+async fn run_interactive_loop(
+    handle: ebdev_remote::ExecuteHandle,
+    event_rx: &mut tokio::sync::mpsc::Receiver<ebdev_remote::ExecuteEvent>,
+) -> anyhow::Result<ExitCode> {
+    use ebdev_remote::ExecuteEvent;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let orig_termios = set_raw_mode()?;
+    let _guard = RawModeGuard { orig: orig_termios };
+
+    let mut host_stdin = tokio::io::stdin();
+    let mut host_stdout = tokio::io::stdout();
+    let mut stdin_buf = [0u8; 4096];
+    let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut exit_code = None;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = sigwinch.recv() => {
+                if let (Ok((cols, rows)), Some(ref resize_tx)) = (get_terminal_size(), &handle.resize_tx) {
+                    let _ = resize_tx.send((cols, rows)).await;
+                }
+            }
+
+            result = host_stdin.read(&mut stdin_buf) => {
+                match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let _ = handle.stdin_tx.send(stdin_buf[..n].to_vec()).await;
+                    }
+                }
+            }
+
+            event = event_rx.recv() => {
+                match event {
+                    Some(ExecuteEvent::Output { data, .. }) => {
+                        host_stdout.write_all(&data).await?;
+                        host_stdout.flush().await?;
+                    }
+                    Some(ExecuteEvent::Exit { code }) => {
+                        exit_code = code;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    Ok(ExitCode::from(exit_code.unwrap_or(0) as u8))
+}
+
+/// Remote Executor - führt Befehle über Docker Bridge aus
+struct RemoteExecutor {
+    #[allow(dead_code)]
+    child: tokio::process::Child,
+    stdin: Option<tokio::process::ChildStdin>,
+    stdout: Option<tokio::process::ChildStdout>,
+    buffer: Vec<u8>,
+    session_counter: u32,
+}
+
+impl RemoteExecutor {
     async fn connect(container: &str) -> anyhow::Result<Self> {
         use std::process::Stdio;
         use tokio::process::Command;
@@ -505,178 +616,150 @@ impl BridgeConnection {
             }
         }
 
-        Ok(Self { child, stdin, stdout, buffer })
+        Ok(Self { child, stdin: Some(stdin), stdout: Some(stdout), buffer, session_counter: 0 })
     }
+}
 
-    /// Execute a command and wait for Started confirmation
+/// Request-Typ für den Bridge-Writer
+enum BridgeRequest {
+    Stdin { session_id: u32, data: Vec<u8> },
+    Resize { session_id: u32, cols: u16, rows: u16 },
+}
+
+impl ebdev_remote::Executor for RemoteExecutor {
     async fn execute(
         &mut self,
-        program: &str,
-        args: &[String],
-        workdir: Option<&str>,
-        pty: Option<ebdev_remote::PtyConfig>,
-    ) -> anyhow::Result<u32> {
+        options: ebdev_remote::ExecuteOptions,
+        event_tx: tokio::sync::mpsc::Sender<ebdev_remote::ExecuteEvent>,
+    ) -> Result<ebdev_remote::ExecuteHandle, ebdev_remote::ExecutorError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use ebdev_remote::{Request, Response, encode_message, decode_message};
+        use ebdev_remote::{Request, Response, ExecuteEvent, ExecuteHandle, ExecutorError, encode_message, decode_message};
 
-        let session_id: u32 = 1;
+        self.session_counter += 1;
+        let session_id = self.session_counter;
 
+        // Send Execute request
         let request = Request::Execute {
             session_id,
-            program: program.to_string(),
-            args: args.to_vec(),
-            working_dir: workdir.map(|s| s.to_string()),
-            env: vec![],
-            pty,
+            program: options.program,
+            args: options.args,
+            working_dir: options.workdir,
+            env: options.env,
+            pty: options.pty,
         };
-        let msg = encode_message(&request)?;
-        self.stdin.write_all(&msg).await?;
-        self.stdin.flush().await?;
+        let msg = encode_message(&request).map_err(|e| ExecutorError::Protocol(e.to_string()))?;
+        let stdin = self.stdin.as_mut().ok_or_else(|| ExecutorError::Protocol("stdin already taken".into()))?;
+        stdin.write_all(&msg).await?;
+        stdin.flush().await?;
 
         // Wait for Started
+        let stdout = self.stdout.as_mut().ok_or_else(|| ExecutorError::Protocol("stdout already taken".into()))?;
         let mut read_buf = [0u8; 4096];
+
         loop {
-            let n = self.stdout.read(&mut read_buf).await?;
+            let n = stdout.read(&mut read_buf).await?;
             if n == 0 {
-                anyhow::bail!("Bridge closed unexpectedly");
+                return Err(ExecutorError::Protocol("Bridge closed unexpectedly".into()));
             }
             self.buffer.extend_from_slice(&read_buf[..n]);
 
-            if let Some((response, consumed)) = decode_message::<Response>(&self.buffer)? {
+            if let Some((response, consumed)) = decode_message::<Response>(&self.buffer)
+                .map_err(|e| ExecutorError::Protocol(e.to_string()))?
+            {
                 self.buffer.drain(..consumed);
                 match response {
-                    Response::Started { session_id: sid } if sid == session_id => return Ok(session_id),
-                    Response::Error { message, .. } => anyhow::bail!("Remote error: {}", message),
-                    _ => anyhow::bail!("Expected Started, got {:?}", response),
+                    Response::Started { session_id: sid } if sid == session_id => break,
+                    Response::Error { message, .. } => return Err(ExecutorError::Spawn(message)),
+                    _ => return Err(ExecutorError::Protocol(format!("Expected Started, got {:?}", response))),
                 }
             }
         }
-    }
 
-    /// Run non-interactive: stream output until exit
-    async fn run_simple(mut self, session_id: u32) -> anyhow::Result<ExitCode> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use ebdev_remote::{Response, OutputStream, decode_message};
+        // Channels for user-facing handle
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (resize_tx, mut resize_rx) = tokio::sync::mpsc::channel::<(u16, u16)>(4);
 
-        let mut read_buf = [0u8; 4096];
-        let mut exit_code = None;
+        // Internal channel for bridge requests
+        let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::channel::<BridgeRequest>(32);
 
-        loop {
-            let n = self.stdout.read(&mut read_buf).await?;
-            if n == 0 {
-                break;
-            }
-            self.buffer.extend_from_slice(&read_buf[..n]);
-
-            while let Some((response, consumed)) = decode_message::<Response>(&self.buffer)? {
-                self.buffer.drain(..consumed);
-
-                match response {
-                    Response::Output { session_id: sid, stream, data } if sid == session_id => {
-                        match stream {
-                            OutputStream::Stdout => tokio::io::stdout().write_all(&data).await?,
-                            OutputStream::Stderr => tokio::io::stderr().write_all(&data).await?,
-                        }
-                    }
-                    Response::Exit { session_id: sid, code } if sid == session_id => {
-                        exit_code = code;
-                    }
-                    Response::Error { message, .. } => anyhow::bail!("Remote error: {}", message),
-                    _ => {}
+        // Forward stdin to bridge channel
+        let bridge_tx_stdin = bridge_tx.clone();
+        tokio::spawn(async move {
+            while let Some(data) = stdin_rx.recv().await {
+                if bridge_tx_stdin.send(BridgeRequest::Stdin { session_id, data }).await.is_err() {
+                    break;
                 }
             }
+        });
 
-            if exit_code.is_some() {
-                break;
+        // Forward resize to bridge channel
+        let bridge_tx_resize = bridge_tx;
+        tokio::spawn(async move {
+            while let Some((cols, rows)) = resize_rx.recv().await {
+                if bridge_tx_resize.send(BridgeRequest::Resize { session_id, cols, rows }).await.is_err() {
+                    break;
+                }
             }
-        }
+        });
 
-        self.shutdown().await;
-        Ok(ExitCode::from(exit_code.unwrap_or(1) as u8))
-    }
+        // Take stdin and stdout for the I/O tasks
+        let mut stdin = self.stdin.take().ok_or_else(|| ExecutorError::Protocol("stdin already taken".into()))?;
+        let mut stdout = self.stdout.take().ok_or_else(|| ExecutorError::Protocol("stdout already taken".into()))?;
+        let mut buffer = std::mem::take(&mut self.buffer);
 
-    /// Run interactive: multiplex stdin/stdout/resize with raw terminal
-    async fn run_interactive(mut self, session_id: u32) -> anyhow::Result<ExitCode> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use ebdev_remote::{Request, Response, encode_message, decode_message};
-
-        let orig_termios = set_raw_mode()?;
-        let _guard = RawModeGuard { orig: orig_termios };
-
-        let mut host_stdin = tokio::io::stdin();
-        let mut host_stdout = tokio::io::stdout();
-        let mut stdin_buf = [0u8; 4096];
-        let mut stdout_buf = [0u8; 4096];
-        let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
-        let mut exit_code = None;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = sigwinch.recv() => {
-                    if let Ok((cols, rows)) = get_terminal_size() {
-                        let msg = encode_message(&Request::Resize { session_id, cols, rows })?;
-                        self.stdin.write_all(&msg).await?;
-                        self.stdin.flush().await?;
-                    }
+        // Single writer task for all bridge requests
+        tokio::spawn(async move {
+            while let Some(req) = bridge_rx.recv().await {
+                let request = match req {
+                    BridgeRequest::Stdin { session_id, data } => Request::Stdin { session_id, data },
+                    BridgeRequest::Resize { session_id, cols, rows } => Request::Resize { session_id, cols, rows },
+                };
+                if let Ok(msg) = encode_message(&request) {
+                    if stdin.write_all(&msg).await.is_err() { break; }
+                    if stdin.flush().await.is_err() { break; }
                 }
+            }
+        });
 
-                result = host_stdin.read(&mut stdin_buf) => {
-                    match result {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let msg = encode_message(&Request::Stdin { session_id, data: stdin_buf[..n].to_vec() })?;
-                            self.stdin.write_all(&msg).await?;
-                            self.stdin.flush().await?;
-                        }
-                    }
-                }
+        // Response reader task
+        tokio::spawn(async move {
+            let mut read_buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut read_buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&read_buf[..n]);
 
-                result = self.stdout.read(&mut stdout_buf) => {
-                    match result {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            self.buffer.extend_from_slice(&stdout_buf[..n]);
+                        while let Ok(Some((response, consumed))) = decode_message::<Response>(&buffer) {
+                            buffer.drain(..consumed);
 
-                            while let Some((response, consumed)) = decode_message::<Response>(&self.buffer)? {
-                                self.buffer.drain(..consumed);
-
-                                match response {
-                                    Response::Output { session_id: sid, data, .. } if sid == session_id => {
-                                        host_stdout.write_all(&data).await?;
-                                        host_stdout.flush().await?;
-                                    }
-                                    Response::Exit { session_id: sid, code } if sid == session_id => {
-                                        exit_code = code;
-                                    }
-                                    Response::Error { message, .. } => {
-                                        eprintln!("\nRemote error: {}", message);
-                                        return Ok(ExitCode::FAILURE);
-                                    }
-                                    _ => {}
+                            let event = match response {
+                                Response::Output { session_id: sid, stream, data } if sid == session_id => {
+                                    Some(ExecuteEvent::Output { stream, data })
                                 }
-                            }
+                                Response::Exit { session_id: sid, code } if sid == session_id => {
+                                    Some(ExecuteEvent::Exit { code })
+                                }
+                                _ => None,
+                            };
 
-                            if exit_code.is_some() {
-                                break;
+                            if let Some(evt) = event {
+                                let is_exit = matches!(evt, ExecuteEvent::Exit { .. });
+                                if event_tx.send(evt).await.is_err() { return; }
+                                if is_exit { return; }
                             }
                         }
                     }
+                    Err(_) => break,
                 }
             }
-        }
+        });
 
-        self.shutdown().await;
-        Ok(ExitCode::from(exit_code.unwrap_or(0) as u8))
-    }
-
-    async fn shutdown(mut self) {
-        use tokio::io::AsyncWriteExt;
-        use ebdev_remote::{Request, encode_message};
-
-        let _ = self.stdin.write_all(&encode_message(&Request::Shutdown).unwrap_or_default()).await;
-        let _ = self.child.wait().await;
+        Ok(ExecuteHandle {
+            stdin_tx,
+            resize_tx: Some(resize_tx),
+            kill_tx: None, // Kill not implemented for remote - would need to send Request::Kill
+        })
     }
 }
 
