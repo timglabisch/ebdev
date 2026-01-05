@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use clap::{Parser, Subcommand};
@@ -81,6 +82,9 @@ enum RemoteCommands {
         /// Working directory inside the container
         #[arg(long, short = 'w')]
         workdir: Option<String>,
+        /// Run in interactive mode with PTY (for vim, htop, etc.)
+        #[arg(long, short = 'i')]
+        interactive: bool,
     },
 }
 
@@ -194,7 +198,7 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     // RemoteBridge und Remote brauchen keine Config - direkt ausführen
     if matches!(cli.command, Commands::RemoteBridge) {
-        if let Err(e) = ebdev_remote::run_bridge() {
+        if let Err(e) = ebdev_remote::run_bridge().await {
             eprintln!("Remote bridge error: {}", e);
             return Ok(ExitCode::FAILURE);
         }
@@ -401,8 +405,12 @@ async fn run() -> anyhow::Result<ExitCode> {
 /// Handle remote commands (don't need config)
 async fn handle_remote_command(command: RemoteCommands) -> anyhow::Result<ExitCode> {
     match command {
-        RemoteCommands::Run { container, command, args, workdir } => {
-            remote_run(&container, &command, &args, workdir.as_deref()).await
+        RemoteCommands::Run { container, command, args, workdir, interactive } => {
+            if interactive {
+                remote_run_interactive(&container, &command, &args, workdir.as_deref()).await
+            } else {
+                remote_run(&container, &command, &args, workdir.as_deref()).await
+            }
         }
     }
 }
@@ -487,6 +495,7 @@ async fn remote_run(
         args: args.to_vec(),
         working_dir: workdir.map(|s| s.to_string()),
         env: vec![],
+        pty: None,
     };
     let msg = encode_message(&request)?;
     stdin.write_all(&msg).await?;
@@ -538,6 +547,240 @@ async fn remote_run(
     let _ = child.wait().await;
 
     Ok(ExitCode::from(exit_code.unwrap_or(1) as u8))
+}
+
+/// Run a command interactively inside a Docker container with PTY support
+async fn remote_run_interactive(
+    container: &str,
+    program: &str,
+    args: &[String],
+    workdir: Option<&str>,
+) -> anyhow::Result<ExitCode> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use ebdev_remote::{Request, Response, PtyConfig, MAGIC, encode_message, decode_message};
+
+    // Check if we have a TTY
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("Interactive mode requires a terminal. Use without -i for non-interactive.");
+    }
+
+    // Get terminal size
+    let (cols, rows) = get_terminal_size()?;
+
+    // 1. Find the Linux binary path
+    let binary_path = find_linux_binary()?;
+
+    // 2. Copy binary to container
+    let container_binary_path = "/tmp/ebdev";
+    let cp_status = Command::new("docker")
+        .args(["cp", &binary_path.to_string_lossy(), &format!("{}:{}", container, container_binary_path)])
+        .status()
+        .await?;
+
+    if !cp_status.success() {
+        anyhow::bail!("Failed to copy binary to container");
+    }
+
+    // 3. Make it executable
+    let chmod_status = Command::new("docker")
+        .args(["exec", container, "chmod", "+x", container_binary_path])
+        .status()
+        .await?;
+
+    if !chmod_status.success() {
+        anyhow::bail!("Failed to make binary executable");
+    }
+
+    // 4. Start the bridge process in the container
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", container, container_binary_path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    let mut bridge_stdin = child.stdin.take().expect("stdin");
+    let mut bridge_stdout = child.stdout.take().expect("stdout");
+
+    // 5. Wait for MAGIC + Ready
+    let mut magic_buf = [0u8; 4];
+    bridge_stdout.read_exact(&mut magic_buf).await?;
+    if &magic_buf != MAGIC {
+        anyhow::bail!("Invalid magic bytes from bridge");
+    }
+
+    let mut buffer = Vec::new();
+    let mut read_buf = [0u8; 4096];
+
+    // Read Ready response
+    loop {
+        let n = bridge_stdout.read(&mut read_buf).await?;
+        if n == 0 {
+            anyhow::bail!("Bridge closed unexpectedly");
+        }
+        buffer.extend_from_slice(&read_buf[..n]);
+
+        if let Some((response, consumed)) = decode_message::<Response>(&buffer)? {
+            buffer.drain(..consumed);
+            match response {
+                Response::Ready => break,
+                _ => anyhow::bail!("Expected Ready, got {:?}", response),
+            }
+        }
+    }
+
+    // 6. Send Execute request with PTY
+    let request = Request::Execute {
+        program: program.to_string(),
+        args: args.to_vec(),
+        working_dir: workdir.map(|s| s.to_string()),
+        env: vec![],
+        pty: Some(PtyConfig { cols, rows }),
+    };
+    let msg = encode_message(&request)?;
+    bridge_stdin.write_all(&msg).await?;
+    bridge_stdin.flush().await?;
+
+    // 7. Set terminal to raw mode
+    let orig_termios = set_raw_mode()?;
+
+    // Setup cleanup on exit
+    struct RawModeGuard {
+        orig: libc::termios,
+    }
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            restore_terminal_mode(&self.orig);
+        }
+    }
+    let _guard = RawModeGuard { orig: orig_termios };
+
+    // 8. Main loop: multiplex stdin/stdout/resize
+    let mut exit_code = None;
+    let mut host_stdin = tokio::io::stdin();
+    let mut host_stdout = tokio::io::stdout();
+
+    // Separate buffers for stdin and stdout to avoid borrow conflicts
+    let mut stdin_buf = [0u8; 4096];
+    let mut stdout_buf = [0u8; 4096];
+
+    // Setup SIGWINCH handler for terminal resize
+    let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Handle terminal resize (high priority)
+            _ = sigwinch.recv() => {
+                if let Ok((new_cols, new_rows)) = get_terminal_size() {
+                    let resize_request = Request::Resize {
+                        cols: new_cols,
+                        rows: new_rows,
+                    };
+                    let msg = encode_message(&resize_request)?;
+                    bridge_stdin.write_all(&msg).await?;
+                    bridge_stdin.flush().await?;
+                }
+            }
+
+            // Read from host stdin and send to bridge
+            result = host_stdin.read(&mut stdin_buf) => {
+                match result {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        let stdin_request = Request::Stdin {
+                            data: stdin_buf[..n].to_vec(),
+                        };
+                        let msg = encode_message(&stdin_request)?;
+                        bridge_stdin.write_all(&msg).await?;
+                        bridge_stdin.flush().await?;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Read from bridge and write to host stdout
+            result = bridge_stdout.read(&mut stdout_buf) => {
+                match result {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        buffer.extend_from_slice(&stdout_buf[..n]);
+
+                        while let Some((response, consumed)) = decode_message::<Response>(&buffer)? {
+                            buffer.drain(..consumed);
+
+                            match response {
+                                Response::Output { data, .. } => {
+                                    host_stdout.write_all(&data).await?;
+                                    host_stdout.flush().await?;
+                                }
+                                Response::Exit { code } => {
+                                    exit_code = code;
+                                }
+                                Response::Error { message } => {
+                                    eprintln!("\nRemote error: {}", message);
+                                    return Ok(ExitCode::FAILURE);
+                                }
+                                Response::Ready => {}
+                            }
+                        }
+
+                        if exit_code.is_some() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    // Shutdown cleanly
+    let shutdown = encode_message(&Request::Shutdown)?;
+    let _ = bridge_stdin.write_all(&shutdown).await;
+    let _ = child.wait().await;
+
+    Ok(ExitCode::from(exit_code.unwrap_or(0) as u8))
+}
+
+/// Get terminal size
+fn get_terminal_size() -> anyhow::Result<(u16, u16)> {
+    unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) != 0 {
+            anyhow::bail!("Failed to get terminal size");
+        }
+        Ok((size.ws_col, size.ws_row))
+    }
+}
+
+/// Set terminal to raw mode, returns original termios for restoration
+fn set_raw_mode() -> anyhow::Result<libc::termios> {
+    unsafe {
+        let mut orig: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) != 0 {
+            anyhow::bail!("Failed to get terminal attributes");
+        }
+
+        let mut raw = orig;
+        libc::cfmakeraw(&mut raw);
+
+        if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+            anyhow::bail!("Failed to set raw mode");
+        }
+
+        Ok(orig)
+    }
+}
+
+/// Restore terminal mode
+fn restore_terminal_mode(orig: &libc::termios) {
+    unsafe {
+        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, orig);
+    }
 }
 
 /// Find the Linux bridge binary (built via make build-linux)

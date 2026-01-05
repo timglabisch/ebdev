@@ -1,4 +1,4 @@
-# Build-Container für minimale Bridge-Binary (statisch gelinkt mit musl)
+# Build-Container für Bridge-Binary mit PTY-Support (statisch gelinkt mit musl)
 # Verwendung: make build-linux
 
 FROM rust:alpine AS builder
@@ -23,6 +23,8 @@ path = "src/bin/bridge.rs"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net"] }
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

@@ -2,10 +2,21 @@
 //!
 //! Dieses Modul definiert das bincode-Protokoll für die Kommunikation
 //! zwischen dem Host (ebdev) und der Remote-Binary im Container.
+//! Unterstützt sowohl einfache Befehle als auch interaktive PTY-Sessions.
 
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+
+pub mod bridge;
+pub use bridge::run_bridge;
+
+/// PTY-Konfiguration für interaktive Sessions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyConfig {
+    /// Terminal-Breite in Spalten
+    pub cols: u16,
+    /// Terminal-Höhe in Zeilen
+    pub rows: u16,
+}
 
 /// Request vom Host an die Remote-Binary
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,15 +31,34 @@ pub enum Request {
         working_dir: Option<String>,
         /// Umgebungsvariablen (Key-Value Paare)
         env: Vec<(String, String)>,
+        /// PTY-Konfiguration für interaktive Sessions (None = kein PTY)
+        pty: Option<PtyConfig>,
     },
-    /// Beende die Remote-Binary
+    /// Stdin-Daten für den laufenden Prozess
+    Stdin {
+        /// Die Daten die an stdin gesendet werden sollen
+        data: Vec<u8>,
+    },
+    /// Terminal-Größe ändern (nur bei PTY-Sessions)
+    Resize {
+        /// Neue Breite in Spalten
+        cols: u16,
+        /// Neue Höhe in Zeilen
+        rows: u16,
+    },
+    /// Sende Signal an den laufenden Prozess
+    Signal {
+        /// Signal-Nummer (z.B. SIGTERM=15, SIGKILL=9, SIGINT=2)
+        signal: i32,
+    },
+    /// Beende die Remote-Binary (killt auch laufende Prozesse)
     Shutdown,
 }
 
 /// Response von der Remote-Binary an den Host
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    /// Output-Chunk (stdout oder stderr)
+    /// Output-Chunk (stdout oder stderr, bei PTY nur Output)
     Output {
         /// Art des Outputs
         stream: OutputStream,
@@ -57,7 +87,7 @@ pub enum OutputStream {
 }
 
 /// Protokoll-Version für Kompatibilitätsprüfung
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Magic-Bytes für Protokoll-Identifikation
 pub const MAGIC: &[u8; 4] = b"EBDV";
@@ -91,159 +121,6 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
     Ok(Some((msg, 4 + len)))
 }
 
-/// Startet den Bridge-Modus (wird aufgerufen wenn ebdev --remote-bridge läuft)
-/// Kommuniziert über stdin/stdout mit dem Host
-pub fn run_bridge() -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
-
-    // Sende Magic-Bytes und Ready-Signal
-    stdout.write_all(MAGIC)?;
-    let ready_msg = encode_message(&Response::Ready)?;
-    stdout.write_all(&ready_msg)?;
-    stdout.flush()?;
-
-    let mut buffer = Vec::new();
-    let mut read_buf = [0u8; 4096];
-
-    loop {
-        // Lese Daten von stdin
-        let n = stdin.read(&mut read_buf)?;
-        if n == 0 {
-            // EOF - Beende
-            break;
-        }
-        buffer.extend_from_slice(&read_buf[..n]);
-
-        // Versuche Nachrichten zu dekodieren
-        while let Some((request, consumed)) = decode_message::<Request>(&buffer)? {
-            buffer.drain(..consumed);
-
-            match request {
-                Request::Execute {
-                    program,
-                    args,
-                    working_dir,
-                    env,
-                } => {
-                    execute_command(&mut stdout, &program, &args, working_dir.as_deref(), &env)?;
-                }
-                Request::Shutdown => {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn execute_command(
-    stdout: &mut impl Write,
-    program: &str,
-    args: &[String],
-    working_dir: Option<&str>,
-    env: &[(String, String)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            let error_msg = encode_message(&Response::Error {
-                message: format!("Failed to spawn process: {}", e),
-            })?;
-            stdout.write_all(&error_msg)?;
-            stdout.flush()?;
-            return Ok(());
-        }
-    };
-
-    // Lese stdout und stderr in separaten Threads
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
-
-    let stdout_handle = if let Some(mut child_out) = child_stdout {
-        Some(std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut chunks = Vec::new();
-            loop {
-                match child_out.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        chunks.push((OutputStream::Stdout, buf[..n].to_vec()));
-                    }
-                    Err(_) => break,
-                }
-            }
-            chunks
-        }))
-    } else {
-        None
-    };
-
-    let stderr_handle = if let Some(mut child_err) = child_stderr {
-        Some(std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut chunks = Vec::new();
-            loop {
-                match child_err.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        chunks.push((OutputStream::Stderr, buf[..n].to_vec()));
-                    }
-                    Err(_) => break,
-                }
-            }
-            chunks
-        }))
-    } else {
-        None
-    };
-
-    // Sammle stdout-Chunks
-    if let Some(handle) = stdout_handle {
-        if let Ok(chunks) = handle.join() {
-            for (stream, data) in chunks {
-                let msg = encode_message(&Response::Output { stream, data })?;
-                stdout.write_all(&msg)?;
-            }
-        }
-    }
-
-    // Sammle stderr-Chunks
-    if let Some(handle) = stderr_handle {
-        if let Ok(chunks) = handle.join() {
-            for (stream, data) in chunks {
-                let msg = encode_message(&Response::Output { stream, data })?;
-                stdout.write_all(&msg)?;
-            }
-        }
-    }
-
-    // Warte auf Prozess-Ende
-    let status = child.wait()?;
-    let exit_msg = encode_message(&Response::Exit {
-        code: status.code(),
-    })?;
-    stdout.write_all(&exit_msg)?;
-    stdout.flush()?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,17 +132,20 @@ mod tests {
             args: vec!["-la".to_string()],
             working_dir: Some("/tmp".to_string()),
             env: vec![("FOO".to_string(), "bar".to_string())],
+            pty: Some(PtyConfig { cols: 80, rows: 24 }),
         };
 
         let encoded = encode_message(&req).unwrap();
-        let (decoded, consumed): (Request, usize) =
-            decode_message(&encoded).unwrap().unwrap();
+        let (decoded, consumed): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
 
         assert_eq!(consumed, encoded.len());
         match decoded {
-            Request::Execute { program, args, .. } => {
+            Request::Execute {
+                program, args, pty, ..
+            } => {
                 assert_eq!(program, "ls");
                 assert_eq!(args, vec!["-la"]);
+                assert!(pty.is_some());
             }
             _ => panic!("Unexpected variant"),
         }
@@ -285,6 +165,42 @@ mod tests {
             Response::Output { stream, data } => {
                 assert_eq!(stream, OutputStream::Stdout);
                 assert_eq!(data, b"hello world");
+            }
+            _ => panic!("Unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_stdin_request() {
+        let req = Request::Stdin {
+            data: b"input data".to_vec(),
+        };
+
+        let encoded = encode_message(&req).unwrap();
+        let (decoded, _): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
+
+        match decoded {
+            Request::Stdin { data } => {
+                assert_eq!(data, b"input data");
+            }
+            _ => panic!("Unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_resize_request() {
+        let req = Request::Resize {
+            cols: 120,
+            rows: 40,
+        };
+
+        let encoded = encode_message(&req).unwrap();
+        let (decoded, _): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
+
+        match decoded {
+            Request::Resize { cols, rows } => {
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 40);
             }
             _ => panic!("Unexpected variant"),
         }
