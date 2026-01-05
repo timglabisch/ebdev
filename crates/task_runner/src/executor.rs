@@ -1,13 +1,13 @@
+use crate::backend::{BackendEvent, ExecutionBackend};
 use crate::command::{CommandId, CommandRequest, CommandResult, DebugMessage, ExecutorMessage, RegisteredTask, TuiEvent};
 use crate::ui::TaskRunnerUI;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Event vom PTY-Thread zurück zum Executor
@@ -73,6 +73,8 @@ pub struct Executor {
     registered_tasks: Vec<RegisteredTask>,
     /// Optional debug logger
     debug_logger: Option<DebugLogger>,
+    /// Execution backend (shared across threads via Arc)
+    backend: std::sync::Arc<std::sync::Mutex<ExecutionBackend>>,
 }
 
 impl Executor {
@@ -82,6 +84,7 @@ impl Executor {
         tui_event_tx: mpsc::UnboundedSender<TuiEvent>,
     ) -> Self {
         let (pty_tx, pty_rx) = std_mpsc::channel();
+        let backend = ExecutionBackend::new().expect("Failed to create ExecutionBackend");
         Self {
             rx,
             pty_rx,
@@ -93,6 +96,7 @@ impl Executor {
             tui_event_tx,
             registered_tasks: Vec::new(),
             debug_logger: None,
+            backend: std::sync::Arc::new(std::sync::Mutex::new(backend)),
         }
     }
 
@@ -269,9 +273,6 @@ impl Executor {
     fn execute<UI: TaskRunnerUI>(&mut self, request: CommandRequest, ui: &mut UI) {
         let CommandRequest { id, command, result_tx } = request;
         let name = command.display_name();
-        let (program, args) = command.to_cmd_args();
-        let cwd = command.cwd().or(self.default_cwd.as_deref()).map(|s| s.to_string());
-        let env = command.env().cloned();
         let timeout = command.timeout();
 
         // Speichere den Result-Sender
@@ -283,112 +284,50 @@ impl Executor {
         let rows = self.rows;
         let cols = self.cols;
         let pty_tx = self.pty_tx.clone();
+        let default_cwd = self.default_cwd.clone();
+        let backend = self.backend.clone();
 
-        // Spawn PTY in einem eigenen Thread
+        // Spawn Execution in einem eigenen Thread
         thread::spawn(move || {
-            let pty_result = run_with_timeout(program, args, cwd, env, rows, cols, timeout, id, pty_tx.clone());
+            let (event_tx, event_rx) = std_mpsc::channel::<BackendEvent>();
 
-            match pty_result {
-                Ok(result) => {
-                    let _ = pty_tx.send(PtyEvent::Completed { id, result });
+            // Starte Event-Forwarder Thread
+            let pty_tx_clone = pty_tx.clone();
+            let forward_handle = thread::spawn(move || {
+                for event in event_rx {
+                    match event {
+                        BackendEvent::Output(data) => {
+                            let _ = pty_tx_clone.send(PtyEvent::Output { id, data });
+                        }
+                        BackendEvent::Completed(result) => {
+                            let _ = pty_tx_clone.send(PtyEvent::Completed { id, result });
+                        }
+                        BackendEvent::Error(error) => {
+                            let _ = pty_tx_clone.send(PtyEvent::Error { id, error });
+                        }
+                    }
                 }
-                Err(error) => {
-                    let _ = pty_tx.send(PtyEvent::Error { id, error });
-                }
+            });
+
+            // Führe Command aus
+            let mut backend_guard = backend.lock().unwrap();
+            let result = backend_guard.execute(
+                &command,
+                default_cwd.as_deref(),
+                rows,
+                cols,
+                timeout,
+                event_tx,
+            );
+
+            // Warte auf Event-Forwarder
+            drop(backend_guard);
+            let _ = forward_handle.join();
+
+            // Falls execute() einen Fehler zurückgab (sollte nicht passieren, da Completed/Error gesendet wird)
+            if let Err(error) = result {
+                let _ = pty_tx.send(PtyEvent::Error { id, error });
             }
         });
-    }
-}
-
-fn run_with_timeout(
-    program: String,
-    args: Vec<String>,
-    cwd: Option<String>,
-    env: Option<HashMap<String, String>>,
-    rows: u16,
-    cols: u16,
-    timeout: Duration,
-    id: CommandId,
-    pty_tx: std_mpsc::Sender<PtyEvent>,
-) -> Result<CommandResult, String> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
-
-    let mut cmd = CommandBuilder::new(&program);
-    for arg in &args {
-        cmd.arg(arg);
-    }
-    if let Some(ref dir) = cwd {
-        cmd.cwd(dir);
-    }
-    if let Some(ref env_vars) = env {
-        for (k, v) in env_vars {
-            cmd.env(k, v);
-        }
-    }
-
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-
-    // Reader-Thread für PTY-Output
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let output_tx = pty_tx.clone();
-
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = output_tx.send(PtyEvent::Output {
-                        id,
-                        data: buf[..n].to_vec(),
-                    });
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Use a channel to receive the wait result with timeout
-    let (wait_tx, wait_rx) = std_mpsc::channel();
-
-    thread::spawn(move || {
-        let status = child.wait();
-        let _ = wait_tx.send(status);
-    });
-
-    // Wait for child with timeout
-    match wait_rx.recv_timeout(timeout) {
-        Ok(Ok(exit)) => {
-            let code = exit.exit_code() as i32;
-            Ok(CommandResult {
-                exit_code: code,
-                success: code == 0,
-                timed_out: false,
-            })
-        }
-        Ok(Err(e)) => {
-            Err(e.to_string())
-        }
-        Err(std_mpsc::RecvTimeoutError::Timeout) => {
-            // Timeout occurred - we can't easily kill the child from here
-            // since it moved into the thread, but the process will be orphaned
-            // and cleaned up when the thread drops
-            Ok(CommandResult {
-                exit_code: -1,
-                success: false,
-                timed_out: true,
-            })
-        }
-        Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-            Err("Child process thread disconnected unexpectedly".to_string())
-        }
     }
 }

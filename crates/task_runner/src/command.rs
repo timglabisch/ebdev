@@ -3,14 +3,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-/// Escape a string for safe use in a shell command (single-quote escaping).
-/// This wraps the string in single quotes and escapes any embedded single quotes.
-/// In single quotes, all characters are literal except single quote itself.
-/// To include a single quote: end quote, escaped quote, start quote: '\''
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace("'", "'\\''"))
-}
-
 /// Unique ID for commands
 pub type CommandId = u64;
 
@@ -88,90 +80,6 @@ impl Command {
                     format!("docker:{} {}", image, cmd.join(" "))
                 })
             }
-        }
-    }
-
-    /// Convert to actual command line arguments
-    pub fn to_cmd_args(&self) -> (String, Vec<String>) {
-        match self {
-            Command::Exec { cmd, .. } => {
-                (cmd[0].clone(), cmd[1..].to_vec())
-            }
-            Command::Shell { script, .. } => {
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let arg = if cfg!(windows) { "/C" } else { "-c" };
-                (shell.to_string(), vec![arg.to_string(), script.clone()])
-            }
-            Command::DockerExec { container, cmd, user, env, .. } => {
-                // Build docker exec command string with proper shell escaping
-                // -t allocates a pseudo-TTY so programs output colored text
-                let mut docker_cmd = String::from("docker exec -t");
-                if let Some(u) = user {
-                    docker_cmd.push_str(&format!(" -u {}", shell_escape(u)));
-                }
-                if let Some(e) = env {
-                    for (k, v) in e {
-                        docker_cmd.push_str(&format!(" -e {}={}", shell_escape(k), shell_escape(v)));
-                    }
-                }
-                docker_cmd.push_str(&format!(" {}", shell_escape(container)));
-                for arg in cmd {
-                    docker_cmd.push_str(&format!(" {}", shell_escape(arg)));
-                }
-                // Wrap in shell like shell() does - this fixes PTY handling
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let arg = if cfg!(windows) { "/C" } else { "-c" };
-                (shell.to_string(), vec![arg.to_string(), docker_cmd])
-            }
-            Command::DockerRun { image, cmd, volumes, workdir, network, env, .. } => {
-                // Build docker run command string with proper shell escaping
-                // -t allocates a pseudo-TTY so programs output colored text
-                let mut docker_cmd = String::from("docker run --rm -t");
-                if let Some(vols) = volumes {
-                    for v in vols {
-                        docker_cmd.push_str(&format!(" -v {}", shell_escape(v)));
-                    }
-                }
-                if let Some(w) = workdir {
-                    docker_cmd.push_str(&format!(" -w {}", shell_escape(w)));
-                }
-                if let Some(n) = network {
-                    docker_cmd.push_str(&format!(" --network {}", shell_escape(n)));
-                }
-                if let Some(e) = env {
-                    for (k, v) in e {
-                        docker_cmd.push_str(&format!(" -e {}={}", shell_escape(k), shell_escape(v)));
-                    }
-                }
-                docker_cmd.push_str(&format!(" {}", shell_escape(image)));
-                for arg in cmd {
-                    docker_cmd.push_str(&format!(" {}", shell_escape(arg)));
-                }
-                // Wrap in shell like shell() does - this fixes PTY handling
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let arg = if cfg!(windows) { "/C" } else { "-c" };
-                (shell.to_string(), vec![arg.to_string(), docker_cmd])
-            }
-        }
-    }
-
-    /// Get the working directory for this command
-    pub fn cwd(&self) -> Option<&str> {
-        match self {
-            Command::Exec { cwd, .. } => cwd.as_deref(),
-            Command::Shell { cwd, .. } => cwd.as_deref(),
-            Command::DockerExec { .. } => None,
-            Command::DockerRun { .. } => None,
-        }
-    }
-
-    /// Get environment variables for this command
-    pub fn env(&self) -> Option<&HashMap<String, String>> {
-        match self {
-            Command::Exec { env, .. } => env.as_ref(),
-            Command::Shell { env, .. } => env.as_ref(),
-            Command::DockerExec { .. } => None, // Handled in to_cmd_args
-            Command::DockerRun { .. } => None,  // Handled in to_cmd_args
         }
     }
 

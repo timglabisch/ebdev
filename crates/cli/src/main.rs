@@ -552,15 +552,31 @@ struct RemoteExecutor {
 
 impl RemoteExecutor {
     async fn connect(container: &str) -> anyhow::Result<Self> {
-        use std::process::Stdio;
         use tokio::process::Command;
-        use tokio::io::AsyncReadExt;
-        use ebdev_remote::{Response, MAGIC, decode_message};
+        use ebdev_remote::PROTOCOL_VERSION;
 
-        let binary_path = find_linux_binary()?;
         let container_binary_path = "/tmp/ebdev";
 
+        // Try to start existing binary first
+        let existing_result = Self::try_start_bridge(container, container_binary_path).await;
+
+        match existing_result {
+            Ok((child, stdin, stdout, buffer, version)) if version == PROTOCOL_VERSION => {
+                // Binary exists and has correct version
+                return Ok(Self { child, stdin: Some(stdin), stdout: Some(stdout), buffer, session_counter: 0 });
+            }
+            Ok((mut child, _, _, _, version)) => {
+                // Binary exists but wrong version - kill it and copy new one
+                let _ = child.kill().await;
+                eprintln!("Bridge version mismatch (got {}, need {}), updating...", version, PROTOCOL_VERSION);
+            }
+            Err(_) => {
+                // Binary doesn't exist or failed to start
+            }
+        }
+
         // Copy binary to container
+        let binary_path = find_linux_binary()?;
         let cp_status = Command::new("docker")
             .args(["cp", &binary_path.to_string_lossy(), &format!("{}:{}", container, container_binary_path)])
             .status()
@@ -579,19 +595,42 @@ impl RemoteExecutor {
         }
 
         // Start bridge
+        let (child, stdin, stdout, buffer, version) = Self::try_start_bridge(container, container_binary_path).await?;
+
+        if version != PROTOCOL_VERSION {
+            anyhow::bail!("Bridge protocol version mismatch after copy (got {}, need {})", version, PROTOCOL_VERSION);
+        }
+
+        Ok(Self { child, stdin: Some(stdin), stdout: Some(stdout), buffer, session_counter: 0 })
+    }
+
+    /// Try to start the bridge and get version, returns (child, stdin, stdout, buffer, protocol_version)
+    async fn try_start_bridge(
+        container: &str,
+        binary_path: &str,
+    ) -> anyhow::Result<(tokio::process::Child, tokio::process::ChildStdin, tokio::process::ChildStdout, Vec<u8>, u32)> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+        use tokio::io::AsyncReadExt;
+        use ebdev_remote::{Response, MAGIC, decode_message};
+
         let mut child = Command::new("docker")
-            .args(["exec", "-i", container, container_binary_path])
+            .args(["exec", "-i", container, binary_path])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null()) // Suppress stderr for version check
             .spawn()?;
 
         let stdin = child.stdin.take().expect("stdin");
         let mut stdout = child.stdout.take().expect("stdout");
 
-        // Wait for MAGIC
+        // Wait for MAGIC with timeout
         let mut magic_buf = [0u8; 4];
-        stdout.read_exact(&mut magic_buf).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stdout.read_exact(&mut magic_buf)
+        ).await.map_err(|_| anyhow::anyhow!("Timeout waiting for bridge magic"))??;
+
         if &magic_buf != MAGIC {
             anyhow::bail!("Invalid magic bytes from bridge");
         }
@@ -599,9 +638,18 @@ impl RemoteExecutor {
         let mut buffer = Vec::new();
         let mut read_buf = [0u8; 4096];
 
-        // Wait for Ready
+        // Wait for Ready with timeout
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            let n = stdout.read(&mut read_buf).await?;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!("Timeout waiting for bridge ready");
+            }
+
+            let n = tokio::time::timeout(remaining, stdout.read(&mut read_buf))
+                .await
+                .map_err(|_| anyhow::anyhow!("Timeout reading from bridge"))??;
+
             if n == 0 {
                 anyhow::bail!("Bridge closed unexpectedly");
             }
@@ -610,13 +658,13 @@ impl RemoteExecutor {
             if let Some((response, consumed)) = decode_message::<Response>(&buffer)? {
                 buffer.drain(..consumed);
                 match response {
-                    Response::Ready => break,
+                    Response::Ready { protocol_version } => {
+                        return Ok((child, stdin, stdout, buffer, protocol_version));
+                    }
                     _ => anyhow::bail!("Expected Ready, got {:?}", response),
                 }
             }
         }
-
-        Ok(Self { child, stdin: Some(stdin), stdout: Some(stdout), buffer, session_counter: 0 })
     }
 }
 

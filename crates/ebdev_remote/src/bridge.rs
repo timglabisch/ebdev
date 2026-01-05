@@ -2,7 +2,7 @@
 
 use crate::executor::{ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor};
 use crate::local::LocalExecutor;
-use crate::{decode_message, encode_message, Request, Response, MAGIC};
+use crate::{decode_message, encode_message, Request, Response, MAGIC, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -52,9 +52,9 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
-    // Sende Magic-Bytes und Ready-Signal
+    // Sende Magic-Bytes und Ready-Signal mit Protokoll-Version
     stdout.write_all(MAGIC).await?;
-    let ready_msg = encode_message(&Response::Ready)?;
+    let ready_msg = encode_message(&Response::Ready { protocol_version: PROTOCOL_VERSION })?;
     stdout.write_all(&ready_msg).await?;
     stdout.flush().await?;
 

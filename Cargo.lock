@@ -1070,8 +1070,8 @@ version = "0.1.0"
 dependencies = [
  "ansi-to-tui",
  "crossterm 0.28.1",
+ "ebdev_remote",
  "libc",
- "portable-pty",
  "ratatui",
  "serde",
  "serde_json",

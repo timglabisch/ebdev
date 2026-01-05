@@ -4,7 +4,7 @@
 //! über stdin/stdout mit dem bincode-Protokoll.
 
 use ebdev_remote::{
-    decode_message, encode_message, PtyConfig, Request, Response, OutputStream, MAGIC,
+    decode_message, encode_message, PtyConfig, Request, Response, OutputStream, MAGIC, PROTOCOL_VERSION,
 };
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,9 +44,14 @@ impl BridgeTestClient {
             buffer: Vec::new(),
         };
 
-        // Warte auf Ready
+        // Warte auf Ready mit Versionscheck
         let response = client.read_response().await;
-        assert!(matches!(response, Response::Ready), "Expected Ready, got {:?}", response);
+        match response {
+            Response::Ready { protocol_version } => {
+                assert_eq!(protocol_version, PROTOCOL_VERSION, "Protocol version mismatch");
+            }
+            _ => panic!("Expected Ready, got {:?}", response),
+        }
 
         client
     }

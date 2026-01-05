@@ -108,8 +108,11 @@ pub enum Response {
     },
     /// Keep-alive Pong (Antwort auf Ping)
     Pong,
-    /// Bestätigung dass die Binary bereit ist
-    Ready,
+    /// Bestätigung dass die Binary bereit ist (mit Protokoll-Version)
+    Ready {
+        /// Protokoll-Version der Bridge
+        protocol_version: u32,
+    },
 }
 
 /// Art des Output-Streams
@@ -120,7 +123,8 @@ pub enum OutputStream {
 }
 
 /// Protokoll-Version für Kompatibilitätsprüfung
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: Ready enthält jetzt protocol_version für Kompatibilitätsprüfung
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Magic-Bytes für Protokoll-Identifikation
 pub const MAGIC: &[u8; 4] = b"EBDV";
