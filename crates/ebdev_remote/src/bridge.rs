@@ -1,6 +1,7 @@
-//! Bridge-Implementierung mit tokio und PTY-Support
+//! Bridge-Implementierung mit tokio, PTY-Support und Multi-Session
 
 use crate::{decode_message, encode_message, OutputStream, PtyConfig, Request, Response, MAGIC};
+use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -125,9 +126,7 @@ impl Pty {
 }
 
 /// Handle für einen laufenden Prozess
-struct ProcessHandle {
-    /// Empfänger für Prozess-Output (stdout/stderr/exit)
-    output_rx: mpsc::Receiver<Response>,
+struct SessionHandle {
     /// Sender für stdin-Daten
     stdin_tx: mpsc::Sender<Vec<u8>>,
     /// Sender für resize-Events (nur bei PTY)
@@ -136,7 +135,7 @@ struct ProcessHandle {
     pid: Option<libc::pid_t>,
 }
 
-impl ProcessHandle {
+impl SessionHandle {
     /// Sendet ein Signal an den Prozess
     fn send_signal(&self, signal: i32) {
         if let Some(pid) = self.pid {
@@ -178,13 +177,26 @@ fn kill_process(pid: libc::pid_t) {
     }
 }
 
-impl Drop for ProcessHandle {
+impl Drop for SessionHandle {
     fn drop(&mut self) {
         // Automatisch Prozess beenden wenn Handle gedroppt wird
         if let Some(pid) = self.pid.take() {
             kill_process(pid);
         }
     }
+}
+
+/// Nachricht vom Prozess an den Main-Loop
+enum ProcessMessage {
+    Output {
+        session_id: u32,
+        stream: OutputStream,
+        data: Vec<u8>,
+    },
+    Exit {
+        session_id: u32,
+        code: Option<i32>,
+    },
 }
 
 /// Startet den Bridge-Modus (async mit tokio)
@@ -201,28 +213,34 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
     let mut buffer = Vec::new();
     let mut read_buf = [0u8; 4096];
 
-    // Aktueller Prozess-Handle
-    let mut process_handle: Option<ProcessHandle> = None;
+    // Session-Management
+    let mut sessions: HashMap<u32, SessionHandle> = HashMap::new();
+
+    // Gemeinsamer Output-Channel für alle Prozesse
+    let (output_tx, mut output_rx) = mpsc::channel::<ProcessMessage>(256);
 
     loop {
         tokio::select! {
             biased;
 
-            // Handle Prozess-Output (höhere Priorität)
-            Some(response) = async {
-                if let Some(ref mut handle) = process_handle {
-                    handle.output_rx.recv().await
-                } else {
-                    std::future::pending::<Option<Response>>().await
-                }
-            } => {
-                let is_exit = matches!(response, Response::Exit { .. });
-                let msg = encode_message(&response)?;
-                stdout.write_all(&msg).await?;
-                stdout.flush().await?;
+            // Handle Prozess-Output von allen Sessions (höhere Priorität)
+            Some(msg) = output_rx.recv() => {
+                match msg {
+                    ProcessMessage::Output { session_id, stream, data } => {
+                        let response = Response::Output { session_id, stream, data };
+                        let encoded = encode_message(&response)?;
+                        stdout.write_all(&encoded).await?;
+                        stdout.flush().await?;
+                    }
+                    ProcessMessage::Exit { session_id, code } => {
+                        // Session aus HashMap entfernen
+                        sessions.remove(&session_id);
 
-                if is_exit {
-                    process_handle = None;
+                        let response = Response::Exit { session_id, code };
+                        let encoded = encode_message(&response)?;
+                        stdout.write_all(&encoded).await?;
+                        stdout.flush().await?;
+                    }
                 }
             }
 
@@ -230,7 +248,8 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
             result = stdin.read(&mut read_buf) => {
                 let n = result?;
                 if n == 0 {
-                    // EOF - Beende
+                    // EOF - Beende alle Sessions und exit
+                    shutdown_all_sessions(&mut sessions);
                     break;
                 }
                 buffer.extend_from_slice(&read_buf[..n]);
@@ -241,52 +260,86 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
 
                     match request {
                         Request::Execute {
+                            session_id,
                             program,
                             args,
                             working_dir,
                             env,
                             pty,
                         } => {
+                            // Prüfe ob Session-ID schon existiert
+                            if sessions.contains_key(&session_id) {
+                                let error = Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("Session {} already exists", session_id),
+                                };
+                                let encoded = encode_message(&error)?;
+                                stdout.write_all(&encoded).await?;
+                                stdout.flush().await?;
+                                continue;
+                            }
+
                             // Starte neuen Prozess
                             match start_process(
+                                session_id,
                                 &program,
                                 &args,
                                 working_dir.as_deref(),
                                 &env,
                                 pty,
+                                output_tx.clone(),
                             ).await {
-                                Ok(h) => process_handle = Some(h),
+                                Ok(handle) => {
+                                    sessions.insert(session_id, handle);
+
+                                    // Sende Started Response
+                                    let started = Response::Started { session_id };
+                                    let encoded = encode_message(&started)?;
+                                    stdout.write_all(&encoded).await?;
+                                    stdout.flush().await?;
+                                }
                                 Err(e) => {
-                                    let error_msg = encode_message(&Response::Error {
+                                    let error = Response::Error {
+                                        session_id: Some(session_id),
                                         message: format!("Failed to start process: {}", e),
-                                    })?;
-                                    stdout.write_all(&error_msg).await?;
+                                    };
+                                    let encoded = encode_message(&error)?;
+                                    stdout.write_all(&encoded).await?;
                                     stdout.flush().await?;
                                 }
                             }
                         }
-                        Request::Stdin { data } => {
-                            if let Some(ref handle) = process_handle {
+                        Request::Stdin { session_id, data } => {
+                            if let Some(handle) = sessions.get(&session_id) {
                                 let _ = handle.stdin_tx.send(data).await;
                             }
                         }
-                        Request::Resize { cols, rows } => {
-                            if let Some(ref handle) = process_handle {
+                        Request::Resize { session_id, cols, rows } => {
+                            if let Some(handle) = sessions.get(&session_id) {
                                 if let Some(ref resize_tx) = handle.resize_tx {
                                     let _ = resize_tx.send((cols, rows)).await;
                                 }
                             }
                         }
-                        Request::Signal { signal } => {
-                            if let Some(ref handle) = process_handle {
+                        Request::Signal { session_id, signal } => {
+                            if let Some(handle) = sessions.get(&session_id) {
                                 handle.send_signal(signal);
                             }
                         }
-                        Request::Shutdown => {
-                            // Sauber beenden: erst SIGTERM, dann warten, dann SIGKILL
-                            if let Some(mut handle) = process_handle.take() {
+                        Request::Kill { session_id } => {
+                            if let Some(mut handle) = sessions.remove(&session_id) {
                                 handle.kill();
+                                // Exit wird vom Prozess selbst gesendet
                             }
+                        }
+                        Request::Ping => {
+                            let pong = Response::Pong;
+                            let encoded = encode_message(&pong)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::Shutdown => {
+                            shutdown_all_sessions(&mut sessions);
                             return Ok(());
                         }
                     }
@@ -298,28 +351,39 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// Beendet alle Sessions sauber
+fn shutdown_all_sessions(sessions: &mut HashMap<u32, SessionHandle>) {
+    for (_, mut handle) in sessions.drain() {
+        handle.kill();
+    }
+}
+
 /// Startet einen Prozess (mit oder ohne PTY)
 async fn start_process(
+    session_id: u32,
     program: &str,
     args: &[String],
     working_dir: Option<&str>,
     env: &[(String, String)],
     pty_config: Option<PtyConfig>,
-) -> Result<ProcessHandle, BridgeError> {
+    output_tx: mpsc::Sender<ProcessMessage>,
+) -> Result<SessionHandle, BridgeError> {
     if let Some(config) = pty_config {
-        start_pty_process(program, args, working_dir, env, config).await
+        start_pty_process(session_id, program, args, working_dir, env, config, output_tx).await
     } else {
-        start_simple_process(program, args, working_dir, env).await
+        start_simple_process(session_id, program, args, working_dir, env, output_tx).await
     }
 }
 
 /// Startet einen einfachen Prozess ohne PTY
 async fn start_simple_process(
+    session_id: u32,
     program: &str,
     args: &[String],
     working_dir: Option<&str>,
     env: &[(String, String)],
-) -> Result<ProcessHandle, BridgeError> {
+    output_tx: mpsc::Sender<ProcessMessage>,
+) -> Result<SessionHandle, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     cmd.stdin(Stdio::piped());
@@ -343,7 +407,6 @@ async fn start_simple_process(
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 
-    let (output_tx, output_rx) = mpsc::channel::<Response>(64);
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(16);
 
     // Stdin-Writer Task
@@ -370,7 +433,8 @@ async fn start_simple_process(
                     Ok(0) => break,
                     Ok(n) => {
                         let _ = tx
-                            .send(Response::Output {
+                            .send(ProcessMessage::Output {
+                                session_id,
                                 stream: OutputStream::Stdout,
                                 data: buf[..n].to_vec(),
                             })
@@ -392,7 +456,8 @@ async fn start_simple_process(
                     Ok(0) => break,
                     Ok(n) => {
                         let _ = tx
-                            .send(Response::Output {
+                            .send(ProcessMessage::Output {
+                                session_id,
                                 stream: OutputStream::Stderr,
                                 data: buf[..n].to_vec(),
                             })
@@ -408,11 +473,10 @@ async fn start_simple_process(
     tokio::spawn(async move {
         let status = child.wait().await;
         let code = status.ok().and_then(|s| s.code());
-        let _ = output_tx.send(Response::Exit { code }).await;
+        let _ = output_tx.send(ProcessMessage::Exit { session_id, code }).await;
     });
 
-    Ok(ProcessHandle {
-        output_rx,
+    Ok(SessionHandle {
         stdin_tx,
         resize_tx: None,
         pid,
@@ -421,12 +485,14 @@ async fn start_simple_process(
 
 /// Startet einen Prozess mit PTY
 async fn start_pty_process(
+    session_id: u32,
     program: &str,
     args: &[String],
     working_dir: Option<&str>,
     env: &[(String, String)],
     config: PtyConfig,
-) -> Result<ProcessHandle, BridgeError> {
+    output_tx: mpsc::Sender<ProcessMessage>,
+) -> Result<SessionHandle, BridgeError> {
     let pty = Pty::new()?;
     pty.set_size(config.cols, config.rows)?;
 
@@ -516,7 +582,6 @@ async fn start_pty_process(
         libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    let (output_tx, output_rx) = mpsc::channel::<Response>(64);
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(16);
     let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(4);
 
@@ -531,10 +596,12 @@ async fn start_pty_process(
             Ok(fd) => fd,
             Err(e) => {
                 let _ = output_tx_clone
-                    .send(Response::Error {
-                        message: format!("Failed to create AsyncFd: {}", e),
+                    .send(ProcessMessage::Exit {
+                        session_id,
+                        code: Some(1),
                     })
                     .await;
+                eprintln!("Failed to create AsyncFd: {}", e);
                 return;
             }
         };
@@ -605,7 +672,8 @@ async fn start_pty_process(
 
                             if n > 0 {
                                 let _ = output_tx_clone
-                                    .send(Response::Output {
+                                    .send(ProcessMessage::Output {
+                                        session_id,
                                         stream: OutputStream::Stdout,
                                         data: buf[..n as usize].to_vec(),
                                     })
@@ -645,10 +713,10 @@ async fn start_pty_process(
                 } else {
                     None
                 };
-                let _ = output_tx.send(Response::Exit { code }).await;
+                let _ = output_tx.send(ProcessMessage::Exit { session_id, code }).await;
                 break;
             } else if result < 0 {
-                let _ = output_tx.send(Response::Exit { code: None }).await;
+                let _ = output_tx.send(ProcessMessage::Exit { session_id, code: None }).await;
                 break;
             }
 
@@ -656,8 +724,7 @@ async fn start_pty_process(
         }
     });
 
-    Ok(ProcessHandle {
-        output_rx,
+    Ok(SessionHandle {
         stdin_tx,
         resize_tx: Some(resize_tx),
         pid: Some(child_pid),

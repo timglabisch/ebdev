@@ -2,7 +2,7 @@
 //!
 //! Dieses Modul definiert das bincode-Protokoll für die Kommunikation
 //! zwischen dem Host (ebdev) und der Remote-Binary im Container.
-//! Unterstützt sowohl einfache Befehle als auch interaktive PTY-Sessions.
+//! Unterstützt Multi-Session mit gleichzeitigen Prozessen und Keep-Alive.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,8 @@ pub struct PtyConfig {
 pub enum Request {
     /// Führe einen Befehl aus
     Execute {
+        /// Session-ID (vom Client generiert, eindeutig)
+        session_id: u32,
         /// Programm das ausgeführt werden soll
         program: String,
         /// Argumente für das Programm
@@ -34,32 +36,52 @@ pub enum Request {
         /// PTY-Konfiguration für interaktive Sessions (None = kein PTY)
         pty: Option<PtyConfig>,
     },
-    /// Stdin-Daten für den laufenden Prozess
+    /// Stdin-Daten für einen laufenden Prozess
     Stdin {
+        /// Session-ID des Zielprozesses
+        session_id: u32,
         /// Die Daten die an stdin gesendet werden sollen
         data: Vec<u8>,
     },
     /// Terminal-Größe ändern (nur bei PTY-Sessions)
     Resize {
+        /// Session-ID des Zielprozesses
+        session_id: u32,
         /// Neue Breite in Spalten
         cols: u16,
         /// Neue Höhe in Zeilen
         rows: u16,
     },
-    /// Sende Signal an den laufenden Prozess
+    /// Sende Signal an einen laufenden Prozess
     Signal {
+        /// Session-ID des Zielprozesses
+        session_id: u32,
         /// Signal-Nummer (z.B. SIGTERM=15, SIGKILL=9, SIGINT=2)
         signal: i32,
     },
-    /// Beende die Remote-Binary (killt auch laufende Prozesse)
+    /// Beende einen spezifischen Prozess
+    Kill {
+        /// Session-ID des zu beendenden Prozesses
+        session_id: u32,
+    },
+    /// Keep-alive Ping
+    Ping,
+    /// Beende die Remote-Binary (killt auch alle laufenden Prozesse)
     Shutdown,
 }
 
 /// Response von der Remote-Binary an den Host
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    /// Output-Chunk (stdout oder stderr, bei PTY nur Output)
+    /// Prozess wurde erfolgreich gestartet
+    Started {
+        /// Session-ID des gestarteten Prozesses
+        session_id: u32,
+    },
+    /// Output-Chunk (stdout oder stderr)
     Output {
+        /// Session-ID des Prozesses
+        session_id: u32,
         /// Art des Outputs
         stream: OutputStream,
         /// Die Daten
@@ -67,14 +89,20 @@ pub enum Response {
     },
     /// Prozess wurde beendet
     Exit {
+        /// Session-ID des beendeten Prozesses
+        session_id: u32,
         /// Exit-Code des Prozesses (None wenn durch Signal beendet)
         code: Option<i32>,
     },
     /// Fehler bei der Ausführung
     Error {
+        /// Session-ID (None für globale Fehler)
+        session_id: Option<u32>,
         /// Fehlermeldung
         message: String,
     },
+    /// Keep-alive Pong (Antwort auf Ping)
+    Pong,
     /// Bestätigung dass die Binary bereit ist
     Ready,
 }
@@ -87,7 +115,7 @@ pub enum OutputStream {
 }
 
 /// Protokoll-Version für Kompatibilitätsprüfung
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Magic-Bytes für Protokoll-Identifikation
 pub const MAGIC: &[u8; 4] = b"EBDV";
@@ -128,6 +156,7 @@ mod tests {
     #[test]
     fn test_roundtrip_request() {
         let req = Request::Execute {
+            session_id: 42,
             program: "ls".to_string(),
             args: vec!["-la".to_string()],
             working_dir: Some("/tmp".to_string()),
@@ -141,8 +170,13 @@ mod tests {
         assert_eq!(consumed, encoded.len());
         match decoded {
             Request::Execute {
-                program, args, pty, ..
+                session_id,
+                program,
+                args,
+                pty,
+                ..
             } => {
+                assert_eq!(session_id, 42);
                 assert_eq!(program, "ls");
                 assert_eq!(args, vec!["-la"]);
                 assert!(pty.is_some());
@@ -154,6 +188,7 @@ mod tests {
     #[test]
     fn test_roundtrip_response() {
         let resp = Response::Output {
+            session_id: 123,
             stream: OutputStream::Stdout,
             data: b"hello world".to_vec(),
         };
@@ -162,7 +197,12 @@ mod tests {
         let (decoded, _): (Response, usize) = decode_message(&encoded).unwrap().unwrap();
 
         match decoded {
-            Response::Output { stream, data } => {
+            Response::Output {
+                session_id,
+                stream,
+                data,
+            } => {
+                assert_eq!(session_id, 123);
                 assert_eq!(stream, OutputStream::Stdout);
                 assert_eq!(data, b"hello world");
             }
@@ -171,36 +211,41 @@ mod tests {
     }
 
     #[test]
-    fn test_stdin_request() {
-        let req = Request::Stdin {
-            data: b"input data".to_vec(),
-        };
+    fn test_ping_pong() {
+        let ping = Request::Ping;
+        let encoded = encode_message(&ping).unwrap();
+        let (decoded, _): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
+        assert!(matches!(decoded, Request::Ping));
 
+        let pong = Response::Pong;
+        let encoded = encode_message(&pong).unwrap();
+        let (decoded, _): (Response, usize) = decode_message(&encoded).unwrap().unwrap();
+        assert!(matches!(decoded, Response::Pong));
+    }
+
+    #[test]
+    fn test_kill_request() {
+        let req = Request::Kill { session_id: 99 };
         let encoded = encode_message(&req).unwrap();
         let (decoded, _): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
 
         match decoded {
-            Request::Stdin { data } => {
-                assert_eq!(data, b"input data");
+            Request::Kill { session_id } => {
+                assert_eq!(session_id, 99);
             }
             _ => panic!("Unexpected variant"),
         }
     }
 
     #[test]
-    fn test_resize_request() {
-        let req = Request::Resize {
-            cols: 120,
-            rows: 40,
-        };
-
-        let encoded = encode_message(&req).unwrap();
-        let (decoded, _): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
+    fn test_started_response() {
+        let resp = Response::Started { session_id: 1 };
+        let encoded = encode_message(&resp).unwrap();
+        let (decoded, _): (Response, usize) = decode_message(&encoded).unwrap().unwrap();
 
         match decoded {
-            Request::Resize { cols, rows } => {
-                assert_eq!(cols, 120);
-                assert_eq!(rows, 40);
+            Response::Started { session_id } => {
+                assert_eq!(session_id, 1);
             }
             _ => panic!("Unexpected variant"),
         }
