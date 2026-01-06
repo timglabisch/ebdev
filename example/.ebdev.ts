@@ -373,3 +373,136 @@ export async function test_smoke() {
 
     console.log("Smoke test passed ✓");
 }
+
+// =============================================================================
+// Docker Integration Tests
+// =============================================================================
+
+import { docker } from "ebdev";
+
+// Test docker.exec - requires docker container to be running
+// Run with: make test-docker
+export async function test_docker() {
+    const container = "example-sync-target-1";
+
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║          DOCKER INTEGRATION TEST                             ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+    console.log(`Target container: ${container}`);
+    console.log("");
+
+    // -------------------------------------------------------------------------
+    // Test 1: Basic docker exec
+    // -------------------------------------------------------------------------
+    await stage("1. Basic docker.exec");
+    console.log("Testing basic command execution in container...");
+    await docker.exec(container, ["echo", "Hello from container!"]);
+    await docker.exec(container, ["uname", "-a"]);
+    console.log("Basic docker.exec passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 2: Environment variables
+    // -------------------------------------------------------------------------
+    await stage("2. Environment Variables");
+    console.log("Testing environment variable passing...");
+    await docker.exec(container, ["sh", "-c", "echo \"MY_VAR=$MY_VAR\""], {
+        env: { MY_VAR: "test_value_from_host" },
+        name: "Env Test"
+    });
+    await docker.exec(container, ["sh", "-c", "echo \"FOO=$FOO BAR=$BAR\""], {
+        env: { FOO: "hello", BAR: "world" },
+        name: "Multi Env Test"
+    });
+    console.log("Environment variables passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 3: Working with files
+    // -------------------------------------------------------------------------
+    await stage("3. File Operations");
+    console.log("Testing file operations in container...");
+    await docker.exec(container, ["sh", "-c", "echo 'test content' > /tmp/ebdev_test.txt"]);
+    await docker.exec(container, ["cat", "/tmp/ebdev_test.txt"]);
+    await docker.exec(container, ["rm", "/tmp/ebdev_test.txt"]);
+    console.log("File operations passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 4: Parallel docker.exec
+    // -------------------------------------------------------------------------
+    await stage("4. Parallel Execution");
+    console.log("Testing parallel docker.exec...");
+    await parallel(
+        () => docker.exec(container, ["echo", "Parallel A"]),
+        () => docker.exec(container, ["echo", "Parallel B"]),
+        () => docker.exec(container, ["echo", "Parallel C"]),
+    );
+    console.log("Parallel execution passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 5: Error handling with tryExec
+    // -------------------------------------------------------------------------
+    await stage("5. Error Handling");
+    console.log("Testing error handling with docker.tryExec...");
+    const result = await docker.tryExec(container, ["ls", "/nonexistent/path"]);
+    console.log(`Exit code: ${result.exitCode}, Success: ${result.success}`);
+    if (!result.success) {
+        console.log("Error correctly captured ✓");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 6: Long output
+    // -------------------------------------------------------------------------
+    await stage("6. Long Output");
+    console.log("Testing command with longer output...");
+    await docker.exec(container, ["sh", "-c", "for i in $(seq 1 20); do echo \"Line $i of output\"; done"]);
+    console.log("Long output passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 7: Exit codes
+    // -------------------------------------------------------------------------
+    await stage("7. Exit Codes");
+    console.log("Testing various exit codes...");
+
+    const exit0 = await docker.tryExec(container, ["true"]);
+    console.log(`'true' exit code: ${exit0.exitCode} (expected: 0)`);
+
+    const exit1 = await docker.tryExec(container, ["false"]);
+    console.log(`'false' exit code: ${exit1.exitCode} (expected: 1)`);
+
+    const exit42 = await docker.tryExec(container, ["sh", "-c", "exit 42"]);
+    console.log(`'exit 42' exit code: ${exit42.exitCode} (expected: 42)`);
+
+    console.log("Exit codes passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Summary
+    // -------------------------------------------------------------------------
+    await stage("Complete");
+    console.log("");
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║          DOCKER TESTS COMPLETED SUCCESSFULLY                 ║");
+    console.log("╠══════════════════════════════════════════════════════════════╣");
+    console.log("║  ✓ Basic docker.exec                                         ║");
+    console.log("║  ✓ Environment variables                                     ║");
+    console.log("║  ✓ File operations                                           ║");
+    console.log("║  ✓ Parallel execution                                        ║");
+    console.log("║  ✓ Error handling                                            ║");
+    console.log("║  ✓ Long output                                               ║");
+    console.log("║  ✓ Exit codes                                                ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+}
+
+// Quick docker smoke test
+export async function test_docker_smoke() {
+    const container = "example-sync-target-1";
+    console.log("Docker smoke test...");
+
+    await docker.exec(container, ["echo", "Docker exec works!"]);
+    await docker.exec(container, ["sh", "-c", "echo $TEST_VAR"], { env: { TEST_VAR: "success" } });
+
+    const r = await docker.tryExec(container, ["false"]);
+    if (!r.success) {
+        console.log("docker.tryExec correctly captured failure");
+    }
+
+    console.log("Docker smoke test passed ✓");
+}

@@ -39,7 +39,25 @@ impl RemoteExecutor {
     /// Verbindet sich zu einem Docker-Container
     ///
     /// Kopiert die Bridge-Binary falls nötig und startet sie.
+    /// Verwendet `find_linux_binary()` um die Binary zu finden.
     pub async fn connect(container: &str) -> Result<Self, ExecutorError> {
+        Self::connect_internal(container, None).await
+    }
+
+    /// Verbindet sich zu einem Docker-Container mit eingebetteter Binary
+    ///
+    /// Verwendet die übergebene Binary statt sie aus dem Dateisystem zu laden.
+    /// Die Binary wird direkt via stdin in den Container gepiped.
+    pub async fn connect_with_embedded(container: &str, embedded_binary: &[u8]) -> Result<Self, ExecutorError> {
+        if embedded_binary.is_empty() {
+            // Fallback to file-based if embedded is empty
+            return Self::connect(container).await;
+        }
+        Self::connect_internal(container, Some(embedded_binary)).await
+    }
+
+    /// Interne Verbindungslogik
+    async fn connect_internal(container: &str, embedded_binary: Option<&[u8]>) -> Result<Self, ExecutorError> {
         let container_binary_path = "/tmp/ebdev";
 
         // Try to start existing binary first
@@ -70,31 +88,56 @@ impl RemoteExecutor {
             }
         }
 
-        // Copy binary to container
-        let binary_path = find_linux_binary()?;
-        let cp_status = Command::new("docker")
-            .args([
-                "cp",
-                &binary_path.to_string_lossy(),
-                &format!("{}:{}", container, container_binary_path),
-            ])
-            .status()
-            .await
-            .map_err(|e| ExecutorError::Io(e))?;
+        // Copy binary to container - prefer embedded, fall back to file
+        if let Some(binary_data) = embedded_binary {
+            // Use embedded binary - pipe directly via stdin
+            use std::process::Stdio;
 
-        if !cp_status.success() {
-            return Err(ExecutorError::Spawn("Failed to copy binary to container".into()));
-        }
+            let mut child = Command::new("docker")
+                .args([
+                    "exec", "-i", container, "sh", "-c",
+                    &format!("cat > {} && chmod +x {}", container_binary_path, container_binary_path),
+                ])
+                .stdin(Stdio::piped())
+                .spawn()
+                .map_err(ExecutorError::Io)?;
 
-        // Make executable
-        let chmod_status = Command::new("docker")
-            .args(["exec", container, "chmod", "+x", container_binary_path])
-            .status()
-            .await
-            .map_err(|e| ExecutorError::Io(e))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(binary_data).await?;
+                drop(stdin); // Close stdin to signal EOF
+            }
 
-        if !chmod_status.success() {
-            return Err(ExecutorError::Spawn("Failed to make binary executable".into()));
+            let status = child.wait().await.map_err(ExecutorError::Io)?;
+            if !status.success() {
+                return Err(ExecutorError::Spawn("Failed to copy embedded binary to container".into()));
+            }
+        } else {
+            // Fall back to file-based copy
+            let binary_path = find_linux_binary()?;
+            let cp_status = Command::new("docker")
+                .args([
+                    "cp",
+                    &binary_path.to_string_lossy(),
+                    &format!("{}:{}", container, container_binary_path),
+                ])
+                .status()
+                .await
+                .map_err(ExecutorError::Io)?;
+
+            if !cp_status.success() {
+                return Err(ExecutorError::Spawn("Failed to copy binary to container".into()));
+            }
+
+            // Make executable
+            let chmod_status = Command::new("docker")
+                .args(["exec", container, "chmod", "+x", container_binary_path])
+                .status()
+                .await
+                .map_err(ExecutorError::Io)?;
+
+            if !chmod_status.success() {
+                return Err(ExecutorError::Spawn("Failed to make binary executable".into()));
+            }
         }
 
         // Start bridge

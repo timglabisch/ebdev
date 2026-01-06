@@ -9,6 +9,10 @@ use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
 use ebdev_mutagen_config::{discover_projects, SyncMode};
 
+/// Embedded Linux bridge binary (built via `make build-linux`)
+/// Empty if binary wasn't available at compile time
+const EMBEDDED_LINUX_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ebdev-bridge-linux"));
+
 #[derive(Parser)]
 #[command(name = "ebdev", version, about = "easybill development toolchain")]
 struct Cli {
@@ -420,7 +424,8 @@ async fn handle_remote_command(command: RemoteCommands) -> anyhow::Result<ExitCo
             };
 
             // Gemeinsame Ausführungslogik über Executor Trait
-            let mut executor = RemoteExecutor::connect(&container)
+            // Verwende embedded binary falls verfügbar, sonst file-based fallback
+            let mut executor = RemoteExecutor::connect_with_embedded(&container, EMBEDDED_LINUX_BINARY)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             run_with_executor(&mut executor, &command, &args, workdir.as_deref(), pty_config, interactive).await
