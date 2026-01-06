@@ -7,7 +7,6 @@ use ebdev_config::Config;
 use ebdev_remote::RemoteExecutor;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
-use ebdev_mutagen_config::{discover_projects, SyncMode};
 
 /// Embedded Linux bridge binary (built via `make build-linux`)
 /// Empty if binary wasn't available at compile time
@@ -103,26 +102,10 @@ enum ToolchainCommands {
 
 #[derive(Subcommand)]
 enum MutagenCommands {
-    /// Show discovered mutagen sync projects (debug)
-    Debug,
-    /// Start staged mutagen sync
-    Sync {
-        /// Terminate all sessions and run init stages (0..N-1)
-        #[arg(long)]
-        init: bool,
-        /// Run the final sync stage
-        #[arg(long)]
-        sync: bool,
-        /// Stay in watch mode after sync completes (requires --sync)
-        #[arg(long)]
-        keep_open: bool,
-        /// Terminate all sessions for this project and exit
-        #[arg(long)]
-        terminate: bool,
-        /// Run with TUI visualization
-        #[arg(long)]
-        tui: bool,
-    },
+    /// Show current mutagen sessions
+    Status,
+    /// Terminate all mutagen sessions for this project
+    Terminate,
 }
 
 fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>) -> OsString {
@@ -248,97 +231,92 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
             }
         },
-        Commands::Mutagen { command } => match command {
-            MutagenCommands::Debug => {
-                let projects = discover_projects(&base_path).await?;
+        Commands::Mutagen { command } => {
+            let mutagen_version = config.toolchain.mutagen
+                .as_ref()
+                .map(|m| m.version.as_str())
+                .ok_or_else(|| anyhow::anyhow!("No mutagen version configured in toolchain config"))?;
 
-                if projects.is_empty() {
-                    println!("No mutagen sync projects found.");
-                    return Ok(ExitCode::SUCCESS);
+            // Ensure mutagen is installed
+            let mutagen_env = match MutagenEnv::new(&base_path, mutagen_version) {
+                Ok(env) => env,
+                Err(_) => {
+                    println!("Installing mutagen {}...", mutagen_version);
+                    ebdev_toolchain_mutagen::install_mutagen(mutagen_version, &base_path).await?;
+                    MutagenEnv::new(&base_path, mutagen_version)?
                 }
+            };
 
-                // Sort by stage
-                let mut projects = projects;
-                projects.sort_by_key(|p| p.project.stage);
+            let mutagen_bin = mutagen_env.bin_path();
 
-                println!("Discovered {} mutagen sync project(s):\n", projects.len());
+            // Compute project CRC32 from config path
+            let config_path = base_path.canonicalize()?.join(".ebdev.ts");
+            let project_crc32 = crc32fast::hash(config_path.to_string_lossy().as_bytes());
+            let project_suffix = format!("{:08x}", project_crc32);
 
-                for (i, p) in projects.iter().enumerate() {
-                    println!("{}. {}", i + 1, p.project.name);
-                    println!("   Config:    {}", p.config_path.display());
-                    println!("   Directory: {}", p.resolved_directory.display());
-                    println!("   Target:    {}", p.project.target);
-                    println!("   Mode:      {}", match p.project.mode {
-                        SyncMode::TwoWay => "two-way",
-                        SyncMode::OneWayCreate => "one-way-create",
-                        SyncMode::OneWayReplica => "one-way-replica",
-                    });
-                    println!("   Stage:     {}", p.project.stage);
-                    if p.project.polling.enabled {
-                        println!("   Polling:   enabled ({}s)", p.project.polling.interval);
+            match command {
+                MutagenCommands::Status => {
+                    // List all mutagen sessions, highlight ones belonging to this project
+                    let output = tokio::process::Command::new(&mutagen_bin)
+                        .args(["sync", "list"])
+                        .output()
+                        .await?;
+
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if stderr.contains("no sessions") {
+                            println!("No mutagen sessions.");
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                        eprintln!("Failed to list sessions: {}", stderr);
+                        return Ok(ExitCode::FAILURE);
                     }
-                    if !p.project.ignore.is_empty() {
-                        println!("   Ignore:    {}", p.project.ignore.join(", "));
+
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    println!("Project CRC: {}\n", project_suffix);
+
+                    // Show raw output with project sessions marked
+                    for line in stdout.lines() {
+                        if line.contains(&project_suffix) {
+                            println!("► {}", line);
+                        } else {
+                            println!("  {}", line);
+                        }
                     }
-                    println!();
                 }
-            }
-            MutagenCommands::Sync { init, sync, keep_open, terminate, tui } => {
-                let mutagen_version = config.toolchain.mutagen
-                    .as_ref()
-                    .map(|m| m.version.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("No mutagen version configured in config file"))?;
+                MutagenCommands::Terminate => {
+                    println!("Terminating sessions for project {}...", project_suffix);
 
-                // Ensure mutagen is installed
-                let mutagen_env = match MutagenEnv::new(&base_path, mutagen_version) {
-                    Ok(env) => env,
-                    Err(_) => {
-                        println!("Installing mutagen {}...", mutagen_version);
-                        ebdev_toolchain_mutagen::install_mutagen(mutagen_version, &base_path).await?;
-                        MutagenEnv::new(&base_path, mutagen_version)?
+                    // Get session list as JSON to find sessions for this project
+                    let output = tokio::process::Command::new(&mutagen_bin)
+                        .args(["sync", "list", "--template", "{{json .}}"])
+                        .output()
+                        .await?;
+
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(sessions) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+                            let mut terminated = 0;
+                            for session in sessions {
+                                if let (Some(name), Some(id)) = (
+                                    session.get("name").and_then(|v| v.as_str()),
+                                    session.get("identifier").and_then(|v| v.as_str()),
+                                ) {
+                                    if name.ends_with(&project_suffix) {
+                                        let _ = tokio::process::Command::new(&mutagen_bin)
+                                            .args(["sync", "terminate", id])
+                                            .output()
+                                            .await;
+                                        println!("  Terminated: {}", name);
+                                        terminated += 1;
+                                    }
+                                }
+                            }
+                            println!("\nTerminated {} session(s).", terminated);
+                        }
+                    } else {
+                        println!("No sessions to terminate.");
                     }
-                };
-
-                let mutagen_bin = mutagen_env.bin_path();
-
-                // Handle --terminate: terminate all mutagen sessions and exit
-                if terminate {
-                    println!("Terminating all mutagen sessions...");
-                    ebdev_mutagen_runner::terminate_all_sessions(&mutagen_bin).await?;
-                    println!("Done.");
-                    return Ok(ExitCode::SUCCESS);
-                }
-
-                let projects = discover_projects(&base_path).await?;
-
-                // Default behavior: --sync only (just final stage)
-                let (run_init, run_sync) = match (init, sync) {
-                    (false, false) => (false, true),  // Default: only sync
-                    (true, false) => (true, false),   // --init only
-                    (false, true) => (false, true),   // --sync only
-                    (true, true) => (true, true),     // --init --sync: both
-                };
-
-                // Terminate all sessions if --init flag is set
-                if run_init {
-                    println!("Terminating all mutagen sessions...");
-                    ebdev_mutagen_runner::terminate_all_sessions(&mutagen_bin).await?;
-                }
-
-                let options = ebdev_mutagen_runner::SyncOptions {
-                    run_init_stages: run_init,
-                    run_final_stage: run_sync,
-                    keep_open,
-                };
-
-                // Use new V2 API with Operator Pattern Controller
-                let backend = std::sync::Arc::new(
-                    ebdev_mutagen_runner::RealMutagen::new(mutagen_bin.to_path_buf())
-                );
-                if tui {
-                    ebdev_mutagen_runner::run_sync_tui(backend, projects, options).await?;
-                } else {
-                    ebdev_mutagen_runner::run_sync_headless(backend, projects, options).await?;
                 }
             }
         },
@@ -391,12 +369,28 @@ async fn run() -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
 
+            // Determine mutagen path if configured
+            let mutagen_path = if let Some(mutagen_config) = &config.toolchain.mutagen {
+                let mutagen_version = &mutagen_config.version;
+                let mutagen_env = match MutagenEnv::new(&base_path, mutagen_version) {
+                    Ok(env) => env,
+                    Err(_) => {
+                        // Install mutagen if not available
+                        ebdev_toolchain_mutagen::install_mutagen(mutagen_version, &base_path).await?;
+                        MutagenEnv::new(&base_path, mutagen_version)?
+                    }
+                };
+                Some(mutagen_env.bin_path())
+            } else {
+                None
+            };
+
             if tui {
                 // Run with TUI visualization
-                return run_task_with_tui(&config_path, &name, &base_path, debug_log).await;
+                return run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path).await;
             } else {
                 // Run in headless mode with PTY support
-                return run_task_headless(&config_path, &name, &base_path, debug_log).await;
+                return run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path).await;
             }
         }
         // Handled earlier before config load
@@ -602,6 +596,7 @@ async fn run_task_with_tui(
     task_name: &str,
     base_path: &PathBuf,
     debug_log: Option<std::path::PathBuf>,
+    mutagen_path: Option<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
     // Start TUI task runner in separate thread
     let (handle, tui_thread) = match ebdev_task_runner::run_with_tui(
@@ -626,7 +621,7 @@ async fn run_task_with_tui(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle)).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path).await;
 
     // Signal shutdown to TUI
     if let Err(e) = handle_for_shutdown.shutdown() {
@@ -656,6 +651,7 @@ async fn run_task_headless(
     task_name: &str,
     base_path: &PathBuf,
     debug_log: Option<std::path::PathBuf>,
+    mutagen_path: Option<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
     // Start headless task runner in separate thread
     let (handle, runner_thread) = ebdev_task_runner::run_headless(
@@ -668,7 +664,7 @@ async fn run_task_headless(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle)).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path).await;
 
     // Signal shutdown
     let _ = handle_for_shutdown.shutdown();

@@ -407,4 +407,68 @@ declare module "ebdev" {
    * ```
    */
   export function log(message: string): Promise<void>;
+
+  // =============================================================================
+  // Mutagen Sync API
+  // =============================================================================
+
+  /**
+   * Mutagen session configuration for file synchronization
+   */
+  export interface MutagenSession {
+    /** Unique name for this sync session */
+    name: string;
+    /** Target URL (e.g., "docker://container/path") */
+    target: string;
+    /** Local directory to sync (relative to config file) */
+    directory: string;
+    /** Sync mode (default: "two-way") */
+    mode?: SyncMode;
+    /** Patterns to ignore during sync */
+    ignore?: string[];
+  }
+
+  /**
+   * Options for mutagenReconcile
+   */
+  export interface MutagenReconcileOptions {
+    /**
+     * Project identifier for session namespacing.
+     * Sessions are named "{project}-{session.name}".
+     * Default: CRC32 hash of the absolute .ebdev.ts path.
+     */
+    project?: string;
+  }
+
+  /**
+   * Reconcile mutagen sessions to the desired state.
+   * Creates, updates, or terminates sessions as needed.
+   * Waits until all sessions reach "watching" status.
+   *
+   * @param sessions - Desired session configurations
+   * @param options - Reconcile options
+   *
+   * @example
+   * ```typescript
+   * const sessions: MutagenSession[] = [
+   *   {
+   *     name: "app",
+   *     target: "docker://app/var/www",
+   *     directory: "./src",
+   *     mode: "two-way",
+   *     ignore: [".git", "node_modules"],
+   *   },
+   * ];
+   *
+   * // Start sync
+   * await mutagenReconcile(sessions);
+   *
+   * // Later: cleanup all sessions
+   * await mutagenReconcile([]);
+   * ```
+   */
+  export function mutagenReconcile(
+    sessions: MutagenSession[],
+    options?: MutagenReconcileOptions
+  ): Promise<void>;
 }

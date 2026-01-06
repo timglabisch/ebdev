@@ -6,7 +6,6 @@ members = [
     "crates/toolchain_mutagen",
     "crates/toolchain_deno",
     "crates/ebdev_config",
-    "crates/mutagen_config",
     "crates/mutagen_runner",
     "crates/parallel_runner",
     "crates/task_runner",
@@ -31,7 +30,6 @@ xz2 = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
-walkdir = "2"
 ratatui = "0.30"
 crossterm = "0.28"
 serde_json = "1"

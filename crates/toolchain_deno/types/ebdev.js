@@ -511,3 +511,55 @@ console.error = (...args) => {
     originalConsoleError.apply(console, args);
   });
 };
+
+// =============================================================================
+// Mutagen Sync API
+// =============================================================================
+
+/**
+ * Reconcile mutagen sessions to the desired state.
+ * Creates, updates, or terminates sessions as needed.
+ * Waits until all sessions reach "watching" status.
+ *
+ * @param {Array<{name: string, target: string, directory: string, mode?: string, ignore?: string[]}>} sessions
+ * @param {{project?: string}} [options]
+ * @returns {Promise<void>}
+ *
+ * @example
+ * // Start sync
+ * await mutagenReconcile([
+ *   { name: "app", target: "docker://app/www", directory: "./src" }
+ * ]);
+ *
+ * // Cleanup all sessions
+ * await mutagenReconcile([]);
+ */
+export async function mutagenReconcile(sessions, options = {}) {
+  if (!Array.isArray(sessions)) {
+    throw new Error("mutagenReconcile: sessions must be an array");
+  }
+
+  // Validate each session
+  for (const session of sessions) {
+    if (typeof session.name !== "string" || session.name.length === 0) {
+      throw new Error("mutagenReconcile: each session must have a non-empty 'name'");
+    }
+    if (typeof session.target !== "string" || session.target.length === 0) {
+      throw new Error("mutagenReconcile: each session must have a non-empty 'target'");
+    }
+    if (typeof session.directory !== "string" || session.directory.length === 0) {
+      throw new Error("mutagenReconcile: each session must have a non-empty 'directory'");
+    }
+  }
+
+  return await Deno.core.ops.op_mutagen_reconcile({
+    sessions: sessions.map(s => ({
+      name: s.name,
+      target: s.target,
+      directory: s.directory,
+      mode: s.mode,
+      ignore: s.ignore,
+    })),
+    project: options.project,
+  });
+}

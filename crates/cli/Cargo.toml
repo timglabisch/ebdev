@@ -14,12 +14,12 @@ ebdev-toolchain-mutagen = { path = "../toolchain_mutagen" }
 ebdev-toolchain-deno = { path = "../toolchain_deno" }
 ebdev-task-runner = { path = "../task_runner" }
 ebdev-config = { path = "../ebdev_config" }
-ebdev-mutagen-config = { path = "../mutagen_config" }
-ebdev-mutagen-runner = { path = "../mutagen_runner" }
 ebdev_remote = { path = "../ebdev_remote" }
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde_json.workspace = true
+crc32fast.workspace = true
 libc = "0.2"
 
 [dev-dependencies]

@@ -1,4 +1,4 @@
-import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask } from "ebdev";
+import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
 
 export default defineConfig({
     toolchain: {
@@ -6,21 +6,83 @@ export default defineConfig({
         pnpm: "9.15.0",
         mutagen: "0.18.1",
     },
-    mutagen: {
-        sync: [{
-            name: "shared",
-            target: "docker://ebdev@example-sync-target-1/var/www/shared",
-            directory: "./shared",
-            mode: "two-way",
-            stage: 0,
-            ignore: [".git", "node_modules"],
-        }],
-    },
 });
+
+// =============================================================================
+// Mutagen Sessions - defined here, used via mutagenReconcile() in tasks
+// =============================================================================
+
+const mutagenSessions: MutagenSession[] = [
+    {
+        name: "shared",
+        target: "docker://ebdev@example-sync-target-1/var/www/shared",
+        directory: "./shared",
+        mode: "two-way",
+        ignore: [".git", "node_modules"],
+    },
+    {
+        name: "backend",
+        target: "docker://ebdev@example-sync-target-1/var/www/backend",
+        directory: "./backend",
+        mode: "two-way",
+        ignore: [".git", "vendor", "var", ".env"],
+    },
+    {
+        name: "frontend",
+        target: "docker://ebdev@example-sync-target-1/var/www/frontend",
+        directory: "./frontend",
+        mode: "two-way",
+        ignore: [".git", "node_modules", "dist", ".next"],
+    },
+];
 
 // =============================================================================
 // Tasks - exported async functions that can be run with `ebdev task <name>`
 // =============================================================================
+
+// Start development environment with mutagen sync
+export async function dev() {
+    await stage("Sync");
+    console.log("Starting mutagen sync...");
+    await mutagenReconcile(mutagenSessions);
+    console.log("Mutagen sync established!");
+
+    await stage("Services");
+    console.log("Starting docker services...");
+    // await exec(["docker", "compose", "up", "-d"]);
+    await exec(["echo", "Docker services would start here"]);
+    console.log("Development environment ready!");
+}
+
+// Stop development environment and cleanup mutagen
+export async function down() {
+    await stage("Services");
+    console.log("Stopping docker services...");
+    // await exec(["docker", "compose", "down"]);
+    await exec(["echo", "Docker services would stop here"]);
+
+    await stage("Cleanup");
+    console.log("Cleaning up mutagen sessions...");
+    await mutagenReconcile([]);
+    console.log("Cleanup complete!");
+}
+
+// Test mutagen reconcile functionality
+export async function test_mutagen() {
+    console.log("Testing mutagenReconcile...");
+
+    await stage("Create Sessions");
+    await mutagenReconcile(mutagenSessions);
+    console.log("Sessions created!");
+
+    await exec(["sleep", "2"]);
+
+    await stage("Cleanup Sessions");
+    await mutagenReconcile([]);
+    console.log("Sessions cleaned up!");
+
+    console.log("Mutagen test passed ✓");
+}
 
 export async function hello() {
     await exec(["echo", "Hello from ebdev task runner!"]);

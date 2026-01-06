@@ -1,9 +1,11 @@
 use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
+use ebdev_mutagen_runner::{reconcile_sessions_simple, state::DesiredSession, SessionStatusInfo, SyncMode};
 use ebdev_task_runner::{Command, TaskRunnerHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -14,6 +16,14 @@ pub struct TaskRunnerState {
     pub handle: Option<TaskRunnerHandle>,
     /// Working directory override
     pub cwd: Option<String>,
+}
+
+/// State stored in Deno runtime for mutagen ops
+pub struct MutagenState {
+    /// Path to the mutagen binary
+    pub mutagen_path: Option<PathBuf>,
+    /// Path to the .ebdev.ts config file (for computing project CRC32)
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +327,110 @@ pub async fn op_log(
     Ok(())
 }
 
+// =============================================================================
+// Mutagen Reconcile Op
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct MutagenSessionArg {
+    name: String,
+    target: String,
+    directory: String,
+    mode: Option<String>,
+    ignore: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReconcileArgs {
+    sessions: Vec<MutagenSessionArg>,
+    project: Option<String>,
+}
+
+#[op2(async)]
+pub async fn op_mutagen_reconcile(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: ReconcileArgs,
+) -> Result<(), JsErrorBox> {
+    let (mutagen_path, config_path, handle) = {
+        let state = state.borrow();
+        let mutagen_state = state.try_borrow::<MutagenState>();
+        let runner_state = state.borrow::<TaskRunnerState>();
+
+        let mutagen_state = mutagen_state.ok_or_else(|| {
+            JsErrorBox::generic("Mutagen not configured. Ensure mutagen is in toolchain config.")
+        })?;
+
+        let mutagen_path = mutagen_state.mutagen_path.clone().ok_or_else(|| {
+            JsErrorBox::generic("Mutagen binary not found. Ensure mutagen is in toolchain config.")
+        })?;
+
+        (mutagen_path, mutagen_state.config_path.clone(), runner_state.handle.clone())
+    };
+
+    // Compute project CRC32 (default: from config path)
+    let project_crc32 = if let Some(project) = &args.project {
+        // User provided explicit project - use its hash
+        crc32fast::hash(project.as_bytes())
+    } else {
+        // Use CRC32 of absolute config path
+        let path_str = config_path.to_string_lossy();
+        crc32fast::hash(path_str.as_bytes())
+    };
+
+    // Build DesiredSessions from args
+    let base_dir = config_path.parent().unwrap_or(&config_path);
+    let desired_sessions: Vec<DesiredSession> = args
+        .sessions
+        .into_iter()
+        .map(|s| {
+            let mode = match s.mode.as_deref() {
+                Some("one-way-create") => SyncMode::OneWayCreate,
+                Some("one-way-replica") => SyncMode::OneWayReplica,
+                _ => SyncMode::TwoWay,
+            };
+
+            let alpha = base_dir.join(&s.directory);
+            let session_name = format!("{}-{:08x}", s.name, project_crc32);
+
+            DesiredSession::new(
+                session_name,
+                s.name,
+                alpha,
+                s.target,
+                mode,
+                s.ignore.unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    // Run reconcile with status updates
+    let handle_clone = handle.clone();
+    reconcile_sessions_simple(
+        &mutagen_path,
+        desired_sessions,
+        project_crc32,
+        move |statuses: Vec<SessionStatusInfo>| {
+            // Send status update to TUI if handle is available
+            if let Some(h) = &handle_clone {
+                let status_str = statuses
+                    .iter()
+                    .map(|s| format!("{}:{}", s.name.split('-').next().unwrap_or(&s.name), &s.status))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let _ = h.log(&format!("[mutagen] {}", status_str));
+            }
+        },
+    )
+    .await
+    .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    Ok(())
+}
+
+// =============================================================================
+// Command Execution
+// =============================================================================
+
 async fn execute_command(
     handle: Option<TaskRunnerHandle>,
     command: Command,
@@ -363,6 +477,18 @@ pub fn init_task_runner_state(
     state.put(TaskRunnerState { handle, cwd });
 }
 
+/// Initialize the mutagen state in OpState
+pub fn init_mutagen_state(
+    state: &mut OpState,
+    mutagen_path: Option<PathBuf>,
+    config_path: PathBuf,
+) {
+    state.put(MutagenState {
+        mutagen_path,
+        config_path,
+    });
+}
+
 deno_core::extension!(
     ebdev_deno_ops,
     ops = [
@@ -377,5 +503,6 @@ deno_core::extension!(
         op_task_unregister,
         op_poll_task_trigger,
         op_log,
+        op_mutagen_reconcile,
     ],
 );
