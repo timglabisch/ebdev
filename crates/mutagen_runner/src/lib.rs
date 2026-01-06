@@ -60,6 +60,43 @@ impl RealMutagen {
     }
 }
 
+/// Builds the command line arguments for creating a mutagen sync session.
+/// Extracted for testability.
+pub fn build_create_args(session: &state::DesiredSession, no_watch: bool) -> Vec<String> {
+    let alpha = session.alpha.to_string_lossy().to_string();
+
+    let mut args = vec![
+        "sync".to_string(),
+        "create".to_string(),
+        alpha,
+        session.beta.clone(),
+        format!("--name={}", session.name),
+    ];
+
+    let mode_str = match session.mode {
+        SyncMode::TwoWay => "two-way-safe",
+        SyncMode::OneWayCreate => "one-way-safe",
+        SyncMode::OneWayReplica => "one-way-replica",
+    };
+    args.push(format!("--sync-mode={}", mode_str));
+
+    for pattern in &session.ignore {
+        args.push(format!("--ignore={}", pattern));
+    }
+
+    if no_watch {
+        args.push("--watch-mode=no-watch".to_string());
+    } else if session.polling.enabled {
+        args.push("--watch-mode=force-poll".to_string());
+        args.push(format!("--watch-polling-interval={}", session.polling.interval));
+    }
+
+    args.push(format!("--default-file-mode={:o}", session.permissions.default_file_mode));
+    args.push(format!("--default-directory-mode={:o}", session.permissions.default_directory_mode));
+
+    args
+}
+
 #[async_trait]
 impl MutagenBackend for RealMutagen {
     async fn list_sessions(&self) -> Vec<MutagenSession> {
@@ -84,37 +121,7 @@ impl MutagenBackend for RealMutagen {
         session: &state::DesiredSession,
         no_watch: bool,
     ) -> Result<String, MutagenRunnerError> {
-        let alpha = session.alpha.to_string_lossy().to_string();
-
-        let mut args = vec![
-            "sync".to_string(),
-            "create".to_string(),
-            alpha,
-            session.beta.clone(),
-            format!("--name={}", session.name),
-        ];
-
-        let mode_str = match session.mode {
-            SyncMode::TwoWay => "two-way-safe",
-            SyncMode::OneWayCreate => "one-way-safe",
-            SyncMode::OneWayReplica => "one-way-replica",
-        };
-        args.push(format!("--sync-mode={}", mode_str));
-
-        for pattern in &session.ignore {
-            args.push(format!("--ignore={}", pattern));
-        }
-
-        if no_watch {
-            args.push("--watch-mode=no-watch".to_string());
-        } else if session.polling.enabled {
-            args.push("--watch-mode=force-poll".to_string());
-            args.push(format!("--watch-polling-interval={}", session.polling.interval));
-        }
-
-        // Add permissions configuration
-        args.push(format!("--default-file-mode={:o}", session.permissions.default_file_mode));
-        args.push(format!("--default-directory-mode={:o}", session.permissions.default_directory_mode));
+        let args = build_create_args(session, no_watch);
 
         let output = Command::new(&self.bin_path)
             .args(&args)

@@ -27,12 +27,12 @@ impl ActualState {
         self.sessions.iter().find(|s| s.name == name)
     }
 
-    /// Prüft ob alle angegebenen Sessions "complete" sind.
+    /// Prüft ob alle angegebenen Sessions existieren UND "complete" sind.
     pub fn all_complete(&self, names: &[String]) -> bool {
         names.iter().all(|name| {
             self.find_by_name(name)
                 .map(|s| s.status.is_complete())
-                .unwrap_or(true) // Nicht existierende Sessions gelten als "complete"
+                .unwrap_or(false) // Nicht existierende Sessions sind NICHT complete
         })
     }
 }
@@ -191,6 +191,19 @@ mod tests {
         assert!(!state.all_complete(&[
             "frontend-abc123".to_string(),
             "backend-abc123".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_all_complete_with_missing_session() {
+        let sessions = vec![mock_mutagen_session("frontend-abc123", "watching")];
+
+        let state = ActualState::from_mutagen_sessions(sessions);
+
+        // Missing sessions should make all_complete return false
+        assert!(!state.all_complete(&[
+            "frontend-abc123".to_string(),
+            "nonexistent-abc123".to_string()
         ]));
     }
 
