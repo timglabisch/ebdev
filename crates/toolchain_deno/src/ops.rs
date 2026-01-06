@@ -1,6 +1,6 @@
 use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
-use ebdev_mutagen_runner::{reconcile_sessions_simple, state::DesiredSession, SessionStatusInfo, SyncMode};
+use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, SessionStatusInfo, SyncMode};
 use ebdev_task_runner::{Command, TaskRunnerHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -405,7 +405,7 @@ pub async fn op_mutagen_reconcile(
 
     // Run reconcile with status updates
     let handle_clone = handle.clone();
-    reconcile_sessions_simple(
+    reconcile_sessions(
         &mutagen_path,
         desired_sessions,
         project_crc32,

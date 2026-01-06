@@ -157,7 +157,7 @@ impl MutagenBackend for RealMutagen {
 }
 
 // ============================================================================
-// Simple Reconcile API - For TaskRunner Integration
+// Reconcile API
 // ============================================================================
 
 /// Session status for status callbacks
@@ -169,17 +169,18 @@ pub struct SessionStatusInfo {
 
 /// Reconciles mutagen sessions to the desired state.
 ///
-/// This is a simplified API for TaskRunner integration that:
-/// 1. Takes a list of DesiredSessions directly
+/// 1. Takes a list of DesiredSessions
 /// 2. Runs the reconcile loop until all sessions are "watching"
 /// 3. Calls the status_callback with current status on each iteration
+///
+/// Pass an empty sessions list to terminate all sessions for this project.
 ///
 /// # Arguments
 /// * `mutagen_bin` - Path to the mutagen binary
 /// * `sessions` - List of desired sessions
 /// * `project_crc32` - CRC32 of the project path (for session naming uniqueness)
 /// * `status_callback` - Called with current session statuses on each iteration
-pub async fn reconcile_sessions_simple<F>(
+pub async fn reconcile_sessions<F>(
     mutagen_bin: &Path,
     sessions: Vec<state::DesiredSession>,
     project_crc32: u32,

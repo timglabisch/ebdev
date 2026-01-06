@@ -27,30 +27,6 @@ impl ActualState {
         self.sessions.iter().find(|s| s.name == name)
     }
 
-    /// Findet alle Sessions die mit einem bestimmten Prefix beginnen.
-    pub fn find_by_prefix(&self, prefix: &str) -> Vec<&ActualSession> {
-        self.sessions
-            .iter()
-            .filter(|s| s.name.starts_with(prefix))
-            .collect()
-    }
-
-    /// Findet alle Sessions die zu einem bestimmten Root gehören (anhand CRC32-Suffix).
-    pub fn find_by_root_suffix(&self, suffix: &str) -> Vec<&ActualSession> {
-        self.sessions
-            .iter()
-            .filter(|s| {
-                // Session-Namen haben das Format: "name-crc32suffix"
-                s.name.ends_with(suffix)
-            })
-            .collect()
-    }
-
-    /// Prüft ob eine Session mit dem gegebenen Namen existiert.
-    pub fn has_session(&self, name: &str) -> bool {
-        self.sessions.iter().any(|s| s.name == name)
-    }
-
     /// Prüft ob alle angegebenen Sessions "complete" sind.
     pub fn all_complete(&self, names: &[String]) -> bool {
         names.iter().all(|name| {
@@ -131,21 +107,6 @@ impl SessionStatus {
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Watching | Self::WaitingForRescan)
     }
-
-    /// Prüft ob die Session aktiv synchronisiert.
-    pub fn is_syncing(&self) -> bool {
-        matches!(self, Self::Scanning | Self::Syncing)
-    }
-
-    /// Prüft ob die Session verbunden ist.
-    pub fn is_connected(&self) -> bool {
-        !matches!(self, Self::Disconnected | Self::Connecting)
-    }
-
-    /// Prüft ob die Session angehalten ist.
-    pub fn is_halted(&self) -> bool {
-        matches!(self, Self::Halted(_))
-    }
 }
 
 #[cfg(test)]
@@ -201,21 +162,6 @@ mod tests {
 
         assert!(state.find_by_name("frontend-abc123").is_some());
         assert!(state.find_by_name("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_find_by_prefix() {
-        let sessions = vec![
-            mock_mutagen_session("frontend-abc123", "watching"),
-            mock_mutagen_session("frontend-def456", "scanning"),
-            mock_mutagen_session("backend-abc123", "watching"),
-        ];
-
-        let state = ActualState::from_mutagen_sessions(sessions);
-
-        assert_eq!(state.find_by_prefix("frontend-").len(), 2);
-        assert_eq!(state.find_by_prefix("backend-").len(), 1);
-        assert_eq!(state.find_by_prefix("config-").len(), 0);
     }
 
     #[test]
@@ -278,13 +224,5 @@ mod tests {
         assert!(SessionStatus::WaitingForRescan.is_complete());
         assert!(!SessionStatus::Scanning.is_complete());
         assert!(!SessionStatus::Connecting.is_complete());
-    }
-
-    #[test]
-    fn test_session_status_is_syncing() {
-        assert!(SessionStatus::Syncing.is_syncing());
-        assert!(SessionStatus::Scanning.is_syncing());
-        assert!(!SessionStatus::Watching.is_syncing());
-        assert!(!SessionStatus::Connecting.is_syncing());
     }
 }
