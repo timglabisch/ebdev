@@ -1,13 +1,31 @@
-.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build test-docker test-docker-smoke test-taskrunner
+.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build-linux-arm64 build-linux-all build test-docker test-docker-smoke test-taskrunner
 
-# Build Linux bridge binary via Docker (statisch gelinkt, ~1MB)
+# =============================================================================
+# Linux Bridge Builds (statisch gelinkt mit musl, ~1MB)
+# =============================================================================
+
+# Build Linux x86_64 bridge binary
 build-linux:
 	@mkdir -p target/linux
-	docker build -f Dockerfile.build --target export --output type=local,dest=target/linux .
-	@echo "Binary: target/linux/ebdev-bridge"
+	docker buildx build --platform linux/amd64 -f Dockerfile.build --target export --output type=local,dest=target/linux .
+	@echo "Binary: target/linux/ebdev-bridge (x86_64)"
 	@ls -lh target/linux/ebdev-bridge
 
-# Build release binary with embedded Linux bridge
+# Build Linux ARM64 bridge binary
+build-linux-arm64:
+	@mkdir -p target/linux-arm64
+	docker buildx build --platform linux/arm64 -f Dockerfile.build --target export --output type=local,dest=target/linux-arm64 .
+	@echo "Binary: target/linux-arm64/ebdev-bridge (aarch64)"
+	@ls -lh target/linux-arm64/ebdev-bridge
+
+# Build all Linux bridge binaries
+build-linux-all: build-linux build-linux-arm64
+
+# =============================================================================
+# Main Build
+# =============================================================================
+
+# Build release binary with embedded Linux bridge (x86_64)
 build: build-linux
 	cargo build --release --package ebdev
 	@echo "Binary: target/release/ebdev (with embedded Linux bridge)"

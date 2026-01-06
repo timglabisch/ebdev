@@ -1,5 +1,11 @@
 # Build-Container für Bridge-Binary mit PTY-Support (statisch gelinkt mit musl)
-# Verwendung: make build-linux
+# Verwendung:
+#   make build-linux              # x86_64 (default)
+#   make build-linux-arm64        # aarch64
+#
+# Oder direkt:
+#   docker buildx build --platform linux/amd64 -f Dockerfile.build --target export --output type=local,dest=target/linux .
+#   docker buildx build --platform linux/arm64 -f Dockerfile.build --target export --output type=local,dest=target/linux-arm64 .
 
 FROM rust:alpine AS builder
 
@@ -37,7 +43,7 @@ EOF
 # Kopiere Source
 COPY crates/ebdev_remote/src ./src
 
-# Baue die Bridge-Binary (Alpine nutzt musl automatisch)
+# Baue die Bridge-Binary (Alpine nutzt musl automatisch für die jeweilige Plattform)
 RUN cargo build --release --bin ebdev-bridge
 
 # Export
