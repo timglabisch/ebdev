@@ -21,6 +21,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolchainConfig {
+    pub ebdev: EbdevSelfConfig,
     pub node: NodeConfig,
     #[serde(default)]
     pub pnpm: Option<PnpmConfig>,
@@ -40,6 +41,11 @@ pub struct PnpmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutagenConfig {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EbdevSelfConfig {
     pub version: String,
 }
 

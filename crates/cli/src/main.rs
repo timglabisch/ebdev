@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::IsTerminal;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use clap::{Parser, Subcommand};
@@ -200,12 +201,30 @@ async fn run() -> anyhow::Result<ExitCode> {
     let base_path = PathBuf::from(".");
     let config = Config::load_from_dir(&base_path).await?;
 
+    // Self-update check (skip if env var set to prevent loop)
+    if std::env::var("EBDEV_SKIP_SELF_UPDATE").is_err() {
+        let desired = &config.toolchain.ebdev.version;
+        let current = env!("CARGO_PKG_VERSION");
+        if desired != current {
+            let new_binary = ebdev_toolchain_ebdev::self_update(desired).await?;
+            // Re-exec with same args
+            let args: Vec<String> = std::env::args().collect();
+            let err = std::process::Command::new(&new_binary)
+                .args(&args[1..])
+                .env("EBDEV_SKIP_SELF_UPDATE", "1")
+                .exec();
+            // exec() only returns on error
+            anyhow::bail!("Failed to re-exec: {}", err);
+        }
+    }
+
     match cli.command {
         Commands::Toolchain { command } => match command {
             ToolchainCommands::Info => {
                 println!("Config: .ebdev.ts");
                 println!();
                 println!("Toolchain:");
+                println!("  ebdev:   {}", config.toolchain.ebdev.version);
                 println!("  Node:    {}", config.toolchain.node.version);
                 if let Some(pnpm) = &config.toolchain.pnpm {
                     println!("  pnpm:    {}", pnpm.version);

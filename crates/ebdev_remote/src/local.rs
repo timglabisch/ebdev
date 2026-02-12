@@ -209,16 +209,9 @@ impl Pty {
         };
 
         unsafe {
-            #[cfg(target_os = "macos")]
             let ret = libc::ioctl(
                 self.master.as_raw_fd(),
                 libc::TIOCSWINSZ as libc::c_ulong,
-                &size,
-            );
-            #[cfg(target_os = "linux")]
-            let ret = libc::ioctl(
-                self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_int,
                 &size,
             );
             if ret != 0 {
@@ -262,10 +255,7 @@ async fn start_pty_process(
             libc::setsid();
 
             // Slave als controlling terminal setzen
-            #[cfg(target_os = "macos")]
             libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
-            #[cfg(target_os = "linux")]
-            libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_int, 0);
 
             // Stdio auf slave umleiten
             libc::dup2(slave_fd, libc::STDIN_FILENO);
@@ -395,10 +385,7 @@ async fn start_pty_process(
                         ws_ypixel: 0,
                     };
                     unsafe {
-                        #[cfg(target_os = "macos")]
                         libc::ioctl(async_fd.as_raw_fd(), libc::TIOCSWINSZ as libc::c_ulong, &size);
-                        #[cfg(target_os = "linux")]
-                        libc::ioctl(async_fd.as_raw_fd(), libc::TIOCSWINSZ as libc::c_int, &size);
                     }
                 }
 

@@ -6,6 +6,7 @@ function normalizeToolchain(val) {
 
 export function defineConfig(config) {
   if (config.toolchain) {
+    if (config.toolchain.ebdev) config.toolchain.ebdev = normalizeToolchain(config.toolchain.ebdev);
     if (config.toolchain.node) config.toolchain.node = normalizeToolchain(config.toolchain.node);
     if (config.toolchain.pnpm) config.toolchain.pnpm = normalizeToolchain(config.toolchain.pnpm);
     if (config.toolchain.mutagen) config.toolchain.mutagen = normalizeToolchain(config.toolchain.mutagen);

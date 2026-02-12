@@ -1023,6 +1023,7 @@ dependencies = [
  "ebdev-task-runner",
  "ebdev-toolchain",
  "ebdev-toolchain-deno",
+ "ebdev-toolchain-ebdev",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
  "ebdev_remote",
@@ -1107,6 +1108,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ebdev-toolchain-ebdev"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "thiserror 2.0.17",
  "tokio",
 ]
 

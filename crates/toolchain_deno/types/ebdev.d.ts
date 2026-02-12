@@ -65,9 +65,19 @@ declare module "ebdev" {
   }
 
   /**
+   * ebdev self-update toolchain configuration
+   */
+  export interface EbdevToolchain {
+    /** ebdev version (e.g., "0.1.0") */
+    version: string;
+  }
+
+  /**
    * Toolchain configuration
    */
   export interface ToolchainConfig {
+    /** ebdev self-update configuration (required) */
+    ebdev: EbdevToolchain | string;
     /** Node.js configuration */
     node: NodeToolchain | string;
     /** pnpm configuration (optional) */

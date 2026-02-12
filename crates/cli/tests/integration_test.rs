@@ -4,7 +4,9 @@ use std::fs;
 use tempfile::TempDir;
 
 fn ebdev() -> Command {
-    Command::cargo_bin("ebdev").unwrap()
+    let mut cmd = Command::cargo_bin("ebdev").unwrap();
+    cmd.env("EBDEV_SKIP_SELF_UPDATE", "1");
+    cmd
 }
 
 #[test]
@@ -15,6 +17,7 @@ fn test_full_integration() {
 
 export default defineConfig({
   toolchain: {
+    ebdev: "0.1.0",
     node: "22.12.0",
     pnpm: "9.15.0",
     mutagen: "0.17.6",
@@ -259,6 +262,7 @@ fn test_auto_install_on_run() {
 
 export default defineConfig({
   toolchain: {
+    ebdev: "0.1.0",
     node: "22.12.0",
   },
 });
