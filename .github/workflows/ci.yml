@@ -16,7 +16,7 @@ env:
 
 jobs:
   # =============================================================================
-  # Test
+  # Test (macOS only)
   # =============================================================================
   test:
     name: Test
@@ -31,12 +31,51 @@ jobs:
         run: cargo test --workspace
 
   # =============================================================================
-  # Build release binaries (macOS only)
+  # Build Linux bridge binaries (embedded in macOS release)
+  # =============================================================================
+  build-bridge:
+    name: Build Bridge (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            docker_platform: linux/amd64
+          - arch: aarch64
+            docker_platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Linux bridge binary
+        run: |
+          mkdir -p target/linux-${{ matrix.arch }}
+          docker buildx build \
+            --platform ${{ matrix.docker_platform }} \
+            -f Dockerfile.build \
+            --target export \
+            --output type=local,dest=target/linux-${{ matrix.arch }} \
+            .
+          ls -lh target/linux-${{ matrix.arch }}/
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.arch }}
+          path: target/linux-${{ matrix.arch }}/ebdev-bridge
+          retention-days: 1
+
+  # =============================================================================
+  # Build release binaries (macOS only, with embedded Linux bridge)
   # =============================================================================
   build-release:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [test, build-bridge]
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
       matrix:
@@ -55,6 +94,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Download x86_64 bridge
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-x86_64
+          path: target/linux
 
       - name: Build release binary
         run: cargo build --release --package ebdev --target ${{ matrix.target }}
