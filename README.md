@@ -1,0 +1,240 @@
+# ebdev
+
+Development toolchain manager for easybill. Manages Node.js, pnpm, Mutagen, runs tasks in containers, and keeps itself up to date.
+
+## Quick Start
+
+```bash
+# Install toolchains defined in .ebdev.ts
+ebdev toolchain install
+
+# Run commands with managed toolchain
+ebdev run node -v
+ebdev run pnpm install
+ebdev run pnpm build
+
+# Run tasks defined in .ebdev.ts
+ebdev task build
+ebdev task dev --tui
+```
+
+## Configuration
+
+Every project needs a `.ebdev.ts` in the root:
+
+```typescript
+import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.0.5",       // auto-updates binary to this version
+    node: "22.12.0",
+    pnpm: "9.15.0",       // optional
+    mutagen: "0.18.1",    // optional
+  },
+});
+```
+
+Toolchains are installed to `.ebdev/toolchain/` relative to the config file.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `ebdev toolchain install` | Install all configured toolchains |
+| `ebdev toolchain info` | Show loaded configuration |
+| `ebdev run <cmd> [args]` | Run command with toolchain PATH |
+| `ebdev task <name>` | Run a task (headless) |
+| `ebdev task <name> --tui` | Run a task with interactive TUI |
+| `ebdev tasks` | List available tasks |
+| `ebdev mutagen status` | Show mutagen sync sessions |
+| `ebdev mutagen terminate` | Terminate project's sync sessions |
+| `ebdev remote run <container> <cmd>` | Execute command in Docker container |
+
+### Run Flags
+
+```bash
+ebdev run --node-version 20.0.0 node -v     # override node version
+ebdev run --pnpm-version 9.14.0 pnpm -v     # override pnpm version
+ebdev run --mutagen-version 0.17.5 mutagen version
+```
+
+### Remote Flags
+
+```bash
+ebdev remote run mycontainer bash              # simple execution
+ebdev remote run mycontainer -i vim file.txt   # interactive PTY mode
+ebdev remote run mycontainer -w /app ls        # set working directory
+```
+
+## Task Runner
+
+Tasks are exported async functions in `.ebdev.ts`:
+
+```typescript
+import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: { ebdev: "0.0.5", node: "22.12.0" },
+});
+
+export async function build() {
+  await exec(["pnpm", "build"]);
+}
+
+export async function ci() {
+  await stage("Lint");
+  await parallel(
+    () => exec(["pnpm", "lint"]),
+    () => exec(["pnpm", "type-check"]),
+  );
+
+  await stage("Test");
+  await exec(["pnpm", "test"]);
+}
+
+export async function dev() {
+  await stage("Sync");
+  await mutagenReconcile(sessions);
+
+  await stage("Services");
+  await task("reload-db", "Reload database fixtures", async () => {
+    await docker.exec("app", ["php", "artisan", "db:seed"]);
+  });
+
+  await log("Ready!");
+}
+```
+
+### API Reference
+
+#### Execution
+
+| Function | Throws on error | Shell |
+|---|---|---|
+| `exec(cmd, opts?)` | yes | no |
+| `tryExec(cmd, opts?)` | no | no |
+| `shell(script, opts?)` | yes | yes |
+| `tryShell(script, opts?)` | no | yes |
+
+```typescript
+// exec runs a command array directly (no shell interpretation)
+await exec(["echo", "hello"]);
+
+// shell runs through sh (pipes, redirects, etc.)
+await shell("echo hello | tr a-z A-Z");
+
+// try* variants return ExecResult instead of throwing
+const result = await tryExec(["false"]);
+// result.exitCode, result.success, result.timedOut
+```
+
+**ExecOptions:**
+```typescript
+{
+  cwd?: string,                    // working directory
+  env?: Record<string, string>,    // environment variables
+  name?: string,                   // display name in TUI
+  timeout?: number,                // seconds, default: 300
+}
+```
+
+#### Docker
+
+```typescript
+// Execute in running container
+await docker.exec("container", ["npm", "build"]);
+await docker.exec("container", ["cmd"], { user: "www-data", env: { NODE_ENV: "prod" } });
+
+// Run in new container
+await docker.run("node:22", ["npm", "--version"], {
+  volumes: ["./src:/app"],
+  workdir: "/app",
+  network: "host",
+});
+
+// try* variants available for both
+const result = await docker.tryExec("container", ["cmd"]);
+```
+
+#### Concurrency & Structure
+
+```typescript
+// Run functions in parallel
+await parallel(
+  () => exec(["task1"]),
+  () => exec(["task2"]),
+);
+
+// Organize output into collapsible stages
+await stage("Build");
+await exec(["pnpm", "build"]);
+
+await stage("Deploy");
+await exec(["./deploy.sh"]);
+```
+
+#### Dynamic Tasks (TUI only)
+
+Press `/` in TUI mode to open the Command Palette.
+
+```typescript
+// Register a task triggerable from TUI
+await task("seed-db", "Seed the database", async () => {
+  await docker.exec("app", ["php", "artisan", "db:seed"]);
+});
+
+// Unregister
+await untask("seed-db");
+```
+
+#### Logging
+
+```typescript
+await log("message");  // preferred over console.log for TUI compatibility
+```
+
+### Mutagen Sync
+
+```typescript
+import { mutagenReconcile, MutagenSession } from "ebdev";
+
+const sessions: MutagenSession[] = [
+  {
+    name: "app",
+    target: "docker://container/var/www",
+    directory: "./src",
+    mode: "two-way",             // "two-way" | "one-way-create" | "one-way-replica"
+    ignore: [".git", "node_modules", "dist"],
+  },
+];
+
+// Create/update sessions to match desired state
+await mutagenReconcile(sessions);
+
+// Terminate all sessions (cleanup)
+await mutagenReconcile([]);
+```
+
+## Self-Update
+
+ebdev auto-updates when the configured version differs from the running binary:
+
+1. Reads `toolchain.ebdev` from `.ebdev.ts`
+2. Downloads matching release from GitHub
+3. Replaces own binary atomically
+4. Re-executes the original command
+
+Set `EBDEV_SKIP_SELF_UPDATE=1` to disable.
+
+## Build from Source
+
+```bash
+# Build Linux bridge binary (runs in Docker containers)
+make build-linux           # x86_64
+make build-linux-arm64     # aarch64
+
+# Build release binary (macOS, with embedded Linux bridge)
+make build
+```
+
