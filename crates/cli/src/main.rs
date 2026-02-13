@@ -14,7 +14,7 @@ use ebdev_toolchain_mutagen::MutagenEnv;
 const EMBEDDED_LINUX_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ebdev-bridge-linux"));
 
 #[derive(Parser)]
-#[command(name = "ebdev", version, about = "easybill development toolchain")]
+#[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "easybill development toolchain")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

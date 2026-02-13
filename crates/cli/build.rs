@@ -1,8 +1,22 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
+    // Inject git version into binary
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/refs/tags");
+    if let Ok(output) = Command::new("git")
+        .args(["describe", "--tags", "--always", "--dirty"])
+        .output()
+    {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            println!("cargo:rustc-env=EBDEV_VERSION={}", version);
+        }
+    }
+
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("ebdev-bridge-linux");
 
