@@ -247,12 +247,14 @@ async fn test_stdout_and_stderr() {
 async fn test_working_directory() {
     let mut client = BridgeTestClient::spawn().await;
 
-    // Wechsle ins /tmp Verzeichnis
+    let tmp_dir = std::env::temp_dir();
+    let tmp_dir_str = tmp_dir.to_str().unwrap().to_string();
+
     client.send(&Request::Execute {
         session_id: 1,
         program: "pwd".to_string(),
-        args: vec![],
-        working_dir: Some("/tmp".to_string()),
+        args: vec!["-P".to_string()],
+        working_dir: Some(tmp_dir_str.clone()),
         env: vec![],
         pty: None,
     }).await;
@@ -268,8 +270,9 @@ async fn test_working_directory() {
         .flat_map(|(_, d)| d.clone())
         .collect();
     let pwd = String::from_utf8_lossy(&stdout).trim().to_string();
-    // macOS: /tmp ist ein Symlink zu /private/tmp
-    assert!(pwd == "/tmp" || pwd == "/private/tmp", "Expected /tmp or /private/tmp, got: {}", pwd);
+    // std::env::temp_dir() gibt den physischen Pfad, pwd -P löst Symlinks auf
+    let expected = tmp_dir.canonicalize().unwrap();
+    assert_eq!(pwd, expected.to_str().unwrap());
 
     client.shutdown().await;
 }
