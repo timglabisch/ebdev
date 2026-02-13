@@ -4,6 +4,7 @@ members = [
     "crates/toolchain",
     "crates/toolchain_node",
     "crates/toolchain_mutagen",
+    "crates/toolchain_rust",
     "crates/toolchain_ebdev",
     "crates/toolchain_deno",
     "crates/ebdev_config",

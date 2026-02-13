@@ -8,6 +8,7 @@ use ebdev_config::Config;
 use ebdev_remote::RemoteExecutor;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
+use ebdev_toolchain_rust::RustEnv;
 
 /// Embedded Linux bridge binary (built via `make build-linux`)
 /// Empty if binary wasn't available at compile time
@@ -44,6 +45,9 @@ enum Commands {
         /// Override mutagen version from config
         #[arg(long)]
         mutagen_version: Option<String>,
+        /// Override rust version from config
+        #[arg(long)]
+        rust_version: Option<String>,
         /// Command to run (e.g. node, npm, pnpm, mutagen)
         command: String,
         /// Arguments passed to the command
@@ -109,12 +113,17 @@ enum MutagenCommands {
     Terminate,
 }
 
-fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>) -> OsString {
+fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>, rust_env: Option<&RustEnv>) -> OsString {
     let mut paths: Vec<PathBuf> = Vec::new();
 
     // mutagen bin dir first (if configured)
     if let Some(env) = mutagen_env {
         paths.push(env.install_dir().to_path_buf());
+    }
+
+    // rust bin dir (if configured)
+    if let Some(env) = rust_env {
+        paths.push(env.bin_dir());
     }
 
     // pnpm bin dir (if configured)
@@ -140,7 +149,8 @@ async fn ensure_toolchain(
     node_version: &str,
     pnpm_version: Option<&str>,
     mutagen_version: Option<&str>,
-) -> anyhow::Result<(NodeEnv, Option<MutagenEnv>)> {
+    rust_version: Option<&str>,
+) -> anyhow::Result<(NodeEnv, Option<MutagenEnv>, Option<RustEnv>)> {
     let node_env = match NodeEnv::new(base_path, node_version) {
         Ok(env) => env,
         Err(_) => {
@@ -168,7 +178,20 @@ async fn ensure_toolchain(
         None
     };
 
-    Ok((node_env, mutagen_env))
+    let rust_env = if let Some(rust_v) = rust_version {
+        let env = match RustEnv::new(base_path, rust_v) {
+            Ok(env) => env,
+            Err(_) => {
+                ebdev_toolchain_rust::install_rust(rust_v, base_path).await?;
+                RustEnv::new(base_path, rust_v)?
+            }
+        };
+        Some(env)
+    } else {
+        None
+    };
+
+    Ok((node_env, mutagen_env, rust_env))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -232,6 +255,9 @@ async fn run() -> anyhow::Result<ExitCode> {
                 if let Some(mutagen) = &config.toolchain.mutagen {
                     println!("  Mutagen: {}", mutagen.version);
                 }
+                if let Some(rust) = &config.toolchain.rust {
+                    println!("  Rust:    {}", rust.version);
+                }
             }
             ToolchainCommands::Install => {
                 let node_version = &config.toolchain.node.version;
@@ -247,6 +273,10 @@ async fn run() -> anyhow::Result<ExitCode> {
 
                 if let Some(mutagen_v) = mutagen_version {
                     ebdev_toolchain_mutagen::install_mutagen(mutagen_v, &base_path).await?;
+                }
+
+                if let Some(rust) = &config.toolchain.rust {
+                    ebdev_toolchain_rust::install_rust(&rust.version, &base_path).await?;
                 }
             }
         },
@@ -339,19 +369,34 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
             }
         },
-        Commands::Run { node_version, pnpm_version, mutagen_version, command, args } => {
+        Commands::Run { node_version, pnpm_version, mutagen_version, rust_version, command, args } => {
             let node_v = node_version.as_deref()
                 .unwrap_or(&config.toolchain.node.version);
             let pnpm_v = pnpm_version.as_deref()
                 .or(config.toolchain.pnpm.as_ref().map(|p| p.version.as_str()));
             let mutagen_v = mutagen_version.as_deref()
                 .or(config.toolchain.mutagen.as_ref().map(|m| m.version.as_str()));
+            let rust_v = rust_version.as_deref()
+                .or(config.toolchain.rust.as_ref().map(|r| r.version.as_str()));
 
-            let (node_env, mutagen_env) = ensure_toolchain(&base_path, node_v, pnpm_v, mutagen_v).await?;
-            let path = build_path(&node_env, pnpm_v, mutagen_env.as_ref());
+            let (node_env, mutagen_env, rust_env) = ensure_toolchain(&base_path, node_v, pnpm_v, mutagen_v, rust_v).await?;
+            let path = build_path(&node_env, pnpm_v, mutagen_env.as_ref(), rust_env.as_ref());
 
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let status = node_env.run(&command, &args_ref, &path).await?;
+
+            let mut cmd = tokio::process::Command::new(&command);
+            cmd.args(&args_ref)
+                .env("PATH", &path)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
+
+            if let Some(ref env) = rust_env {
+                cmd.env("RUSTUP_HOME", env.rustup_home());
+                cmd.env("CARGO_HOME", env.cargo_home());
+            }
+
+            let status = cmd.status().await?;
 
             return Ok(ExitCode::from(status.code().unwrap_or(1) as u8));
         }

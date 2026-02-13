@@ -1,6 +1,6 @@
 # ebdev
 
-Development toolchain manager for easybill. Manages Node.js, pnpm, Mutagen, runs tasks in containers, and keeps itself up to date.
+Development toolchain manager for easybill. Manages Node.js, pnpm, Rust, Mutagen, runs tasks in containers, and keeps itself up to date.
 
 ## Quick Start
 
@@ -11,7 +11,7 @@ ebdev toolchain install
 # Run commands with managed toolchain
 ebdev run node -v
 ebdev run pnpm install
-ebdev run pnpm build
+ebdev run cargo build
 
 # Run tasks defined in .ebdev.ts
 ebdev task build
@@ -30,6 +30,7 @@ export default defineConfig({
     ebdev: "0.0.5",       // auto-updates binary to this version
     node: "22.12.0",
     pnpm: "9.15.0",       // optional
+    rust: "1.84.0",       // optional - installs via rustup
     mutagen: "0.18.1",    // optional
   },
 });
@@ -56,8 +57,11 @@ Toolchains are installed to `.ebdev/toolchain/` relative to the config file.
 ```bash
 ebdev run --node-version 20.0.0 node -v     # override node version
 ebdev run --pnpm-version 9.14.0 pnpm -v     # override pnpm version
+ebdev run --rust-version 1.83.0 rustc --version
 ebdev run --mutagen-version 0.17.5 mutagen version
 ```
+
+When Rust is configured, `ebdev run` sets `RUSTUP_HOME` and `CARGO_HOME` so that `rustc`, `cargo`, and `rustup` use the managed installation instead of any system Rust.
 
 ### Remote Flags
 

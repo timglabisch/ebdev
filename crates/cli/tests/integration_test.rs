@@ -283,6 +283,302 @@ export default defineConfig({
 }
 
 // =============================================================================
+// Rust Toolchain Tests (require network access to download rustup)
+// =============================================================================
+
+#[test]
+fn test_rust_toolchain() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    rust: "1.84.0",
+  },
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // ========================================================================
+    // Toolchain Install
+    // ========================================================================
+    println!("Testing rust toolchain install...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "install"])
+        .timeout(std::time::Duration::from_secs(600))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust v1.84.0"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0/cargo_home/bin/rustc").exists());
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0/cargo_home/bin/cargo").exists());
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0/rustup_home").exists());
+
+    // Already installed
+    println!("Testing rust already installed...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust v1.84.0 already installed"));
+
+    // ========================================================================
+    // Toolchain Info
+    // ========================================================================
+    println!("Testing toolchain info shows rust...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "info"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust:    1.84.0"));
+
+    // ========================================================================
+    // Run Commands
+    // ========================================================================
+    println!("Testing run rustc...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "rustc", "--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.84.0"));
+
+    println!("Testing run cargo...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "cargo", "--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cargo 1.84.0"));
+
+    // ========================================================================
+    // RUSTUP_HOME / CARGO_HOME Environment
+    // ========================================================================
+    println!("Testing RUSTUP_HOME and CARGO_HOME are set...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log('RUSTUP_HOME=' + process.env.RUSTUP_HOME)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RUSTUP_HOME="))
+        .stdout(predicate::str::contains("rust/v1.84.0/rustup_home"));
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log('CARGO_HOME=' + process.env.CARGO_HOME)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CARGO_HOME="))
+        .stdout(predicate::str::contains("rust/v1.84.0/cargo_home"));
+
+    // ========================================================================
+    // PATH contains rust bin dir
+    // ========================================================================
+    println!("Testing PATH contains rust bin dir...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log(process.env.PATH)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rust/v1.84.0/cargo_home/bin"));
+
+    println!("All rust tests passed!");
+}
+
+#[test]
+fn test_rust_version_override() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    rust: "1.84.0",
+  },
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    println!("Testing rust version override...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "--rust-version", "1.83.0", "rustc", "--version"])
+        .timeout(std::time::Duration::from_secs(600))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.83.0"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.83.0/cargo_home/bin/rustc").exists());
+
+    println!("Rust version override test passed!");
+}
+
+#[test]
+fn test_rust_auto_install_on_run() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    rust: "1.84.0",
+  },
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // Should auto-install rust when running
+    println!("Testing rust auto-install on run...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "rustc", "--version"])
+        .timeout(std::time::Duration::from_secs(600))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.84.0"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0").exists());
+
+    println!("Rust auto-install test passed!");
+}
+
+#[test]
+fn test_rust_optional_not_configured() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Config without rust - should still work fine
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+  },
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // toolchain info should not show Rust
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "info"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust").not());
+
+    // run should work without rust
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-v"])
+        .timeout(std::time::Duration::from_secs(300))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v22.12.0"));
+}
+
+/// Write a .ebdev.ts config with the given rust version
+fn write_rust_config(dir: &Path, rust_version: &str) {
+    let config = format!(
+        r#"import {{ defineConfig }} from "ebdev";
+
+export default defineConfig({{
+  toolchain: {{
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    rust: "{}",
+  }},
+}});
+"#,
+        rust_version
+    );
+    fs::write(dir.join(".ebdev.ts"), config).unwrap();
+}
+
+#[test]
+fn test_rust_upgrade_and_downgrade() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // ========================================================================
+    // Install 1.83.0
+    // ========================================================================
+    println!("Installing Rust 1.83.0...");
+    write_rust_config(temp_dir.path(), "1.83.0");
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "rustc", "--version"])
+        .timeout(std::time::Duration::from_secs(600))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.83.0"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.83.0/cargo_home/bin/rustc").exists());
+
+    // ========================================================================
+    // UPGRADE: 1.83.0 → 1.84.0
+    // ========================================================================
+    println!("Upgrading to Rust 1.84.0...");
+    write_rust_config(temp_dir.path(), "1.84.0");
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "rustc", "--version"])
+        .timeout(std::time::Duration::from_secs(600))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.84.0"));
+
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0/cargo_home/bin/rustc").exists());
+
+    // Verify RUSTUP_HOME/CARGO_HOME point to the new version
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log(process.env.RUSTUP_HOME)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rust/v1.84.0/rustup_home"));
+
+    // ========================================================================
+    // DOWNGRADE: 1.84.0 → 1.83.0
+    // ========================================================================
+    println!("Downgrading back to Rust 1.83.0...");
+    write_rust_config(temp_dir.path(), "1.83.0");
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "rustc", "--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rustc 1.83.0"));
+
+    // Verify RUSTUP_HOME/CARGO_HOME point back to the old version
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log(process.env.RUSTUP_HOME)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rust/v1.83.0/rustup_home"));
+
+    // ========================================================================
+    // Both versions coexist
+    // ========================================================================
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.83.0/cargo_home/bin/rustc").exists());
+    assert!(temp_dir.path().join(".ebdev/toolchain/rust/v1.84.0/cargo_home/bin/rustc").exists());
+
+    println!("Rust upgrade and downgrade test passed!");
+}
+
+// =============================================================================
 // Self-Update Tests (require network access to GitHub releases)
 // =============================================================================
 

@@ -27,6 +27,8 @@ pub struct ToolchainConfig {
     pub pnpm: Option<PnpmConfig>,
     #[serde(default)]
     pub mutagen: Option<MutagenConfig>,
+    #[serde(default)]
+    pub rust: Option<RustConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,11 @@ pub struct PnpmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutagenConfig {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustConfig {
     pub version: String,
 }
 

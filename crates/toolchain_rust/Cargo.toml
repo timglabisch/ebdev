@@ -1,0 +1,10 @@
+[package]
+name = "ebdev-toolchain-rust"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true

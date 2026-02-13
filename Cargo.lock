@@ -1026,6 +1026,7 @@ dependencies = [
  "ebdev-toolchain-ebdev",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
+ "ebdev-toolchain-rust",
  "ebdev_remote",
  "libc",
  "predicates",
@@ -1145,6 +1146,16 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "xz2",
+]
+
+[[package]]
+name = "ebdev-toolchain-rust"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]
