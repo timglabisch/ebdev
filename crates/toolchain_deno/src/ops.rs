@@ -16,6 +16,8 @@ pub struct TaskRunnerState {
     pub handle: Option<TaskRunnerHandle>,
     /// Working directory override
     pub cwd: Option<String>,
+    /// Extra environment variables injected into every exec/shell command
+    pub env: HashMap<String, String>,
 }
 
 /// State stored in Deno runtime for mutagen ops
@@ -101,16 +103,16 @@ pub async fn op_exec(
     state: Rc<RefCell<OpState>>,
     #[serde] args: ExecArgs,
 ) -> Result<ExecResult, JsErrorBox> {
-    let (handle, state_cwd) = {
+    let (handle, state_cwd, state_env) = {
         let state = state.borrow();
         let runner_state = state.borrow::<TaskRunnerState>();
-        (runner_state.handle.clone(), runner_state.cwd.clone())
+        (runner_state.handle.clone(), runner_state.cwd.clone(), runner_state.env.clone())
     };
 
     let command = Command::Exec {
         cmd: args.cmd.clone(),
         cwd: args.cwd.or(state_cwd),
-        env: args.env,
+        env: Some(merge_env(&state_env, args.env)),
         name: args.name.clone(),
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
@@ -126,10 +128,10 @@ pub async fn op_shell(
     state: Rc<RefCell<OpState>>,
     #[serde] args: ShellArgs,
 ) -> Result<ExecResult, JsErrorBox> {
-    let (handle, state_cwd) = {
+    let (handle, state_cwd, state_env) = {
         let state = state.borrow();
         let runner_state = state.borrow::<TaskRunnerState>();
-        (runner_state.handle.clone(), runner_state.cwd.clone())
+        (runner_state.handle.clone(), runner_state.cwd.clone(), runner_state.env.clone())
     };
 
     let full_script = args.script.clone();
@@ -150,7 +152,7 @@ pub async fn op_shell(
     let command = Command::Shell {
         script: args.script,
         cwd: args.cwd.or(state_cwd),
-        env: args.env,
+        env: Some(merge_env(&state_env, args.env)),
         name: args.name,
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
@@ -516,13 +518,23 @@ async fn execute_command(
     })
 }
 
+/// Merge base env vars with command-specific env vars (command wins on conflict)
+fn merge_env(base: &HashMap<String, String>, command_env: Option<HashMap<String, String>>) -> HashMap<String, String> {
+    let mut merged = base.clone();
+    if let Some(env) = command_env {
+        merged.extend(env);
+    }
+    merged
+}
+
 /// Initialize the task runner state in OpState
 pub fn init_task_runner_state(
     state: &mut OpState,
     handle: Option<TaskRunnerHandle>,
     cwd: Option<String>,
+    env: HashMap<String, String>,
 ) {
-    state.put(TaskRunnerState { handle, cwd });
+    state.put(TaskRunnerState { handle, cwd, env });
 }
 
 /// Initialize the mutagen state in OpState
