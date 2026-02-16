@@ -84,6 +84,7 @@ export async function exec(cmd, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: false,
+    interactive: options.interactive || false,
   });
 }
 
@@ -108,6 +109,7 @@ export async function tryExec(cmd, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: true,
+    interactive: options.interactive || false,
   });
 }
 
@@ -133,6 +135,7 @@ export async function shell(script, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: false,
+    interactive: options.interactive || false,
   });
 }
 
@@ -157,6 +160,7 @@ export async function tryShell(script, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: true,
+    interactive: options.interactive || false,
   });
 }
 
@@ -223,6 +227,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: false,
+      interactive: options.interactive || false,
     });
   },
 
@@ -252,6 +257,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: true,
+      interactive: options.interactive || false,
     });
   },
 
@@ -286,6 +292,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: false,
+      interactive: options.interactive || false,
     });
   },
 
@@ -319,6 +326,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: true,
+      interactive: options.interactive || false,
     });
   },
 };

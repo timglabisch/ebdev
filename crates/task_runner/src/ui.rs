@@ -52,6 +52,12 @@ pub trait TaskRunnerUI {
     /// Setzt die Terminal-Größe für PTY-Output
     fn set_terminal_size(&mut self, _rows: u16, _cols: u16) {}
 
+    /// Suspend the UI (for interactive commands that need real terminal access)
+    fn suspend(&mut self) -> io::Result<()> { Ok(()) }
+
+    /// Resume the UI after an interactive command finishes
+    fn resume(&mut self) -> io::Result<()> { Ok(()) }
+
     /// Wird am Ende aufgerufen für Cleanup
     fn cleanup(&mut self) -> io::Result<()> { Ok(()) }
 }
@@ -1209,6 +1215,25 @@ impl TaskRunnerUI for TuiUI {
     fn set_terminal_size(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
+    }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        if self.terminal.is_some() {
+            io::stdout().execute(DisableMouseCapture)?;
+            io::stdout().execute(LeaveAlternateScreen)?;
+            disable_raw_mode()?;
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        if self.terminal.is_some() {
+            enable_raw_mode()?;
+            io::stdout().execute(EnterAlternateScreen)?;
+            io::stdout().execute(EnableMouseCapture)?;
+            self.terminal.as_mut().unwrap().clear()?;
+        }
+        Ok(())
     }
 
     fn cleanup(&mut self) -> io::Result<()> {

@@ -20,6 +20,7 @@ pub enum Command {
         name: Option<String>,
         timeout: Option<Duration>,
         ignore_error: bool,
+        interactive: bool,
     },
     /// Execute a shell script
     Shell {
@@ -29,6 +30,7 @@ pub enum Command {
         name: Option<String>,
         timeout: Option<Duration>,
         ignore_error: bool,
+        interactive: bool,
     },
     /// Execute in a docker container
     DockerExec {
@@ -39,6 +41,7 @@ pub enum Command {
         name: Option<String>,
         timeout: Option<Duration>,
         ignore_error: bool,
+        interactive: bool,
     },
     /// Run a new docker container
     DockerRun {
@@ -51,6 +54,7 @@ pub enum Command {
         name: Option<String>,
         timeout: Option<Duration>,
         ignore_error: bool,
+        interactive: bool,
     },
 }
 
@@ -100,6 +104,16 @@ impl Command {
             Command::Shell { ignore_error, .. } => *ignore_error,
             Command::DockerExec { ignore_error, .. } => *ignore_error,
             Command::DockerRun { ignore_error, .. } => *ignore_error,
+        }
+    }
+
+    /// Check if this command should run interactively (with real terminal)
+    pub fn interactive(&self) -> bool {
+        match self {
+            Command::Exec { interactive, .. } => *interactive,
+            Command::Shell { interactive, .. } => *interactive,
+            Command::DockerExec { interactive, .. } => *interactive,
+            Command::DockerRun { interactive, .. } => *interactive,
         }
     }
 }

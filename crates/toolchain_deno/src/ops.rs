@@ -36,6 +36,8 @@ pub struct ExecArgs {
     timeout: Option<u64>, // in seconds
     #[serde(default)]
     ignore_error: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +50,8 @@ pub struct ShellArgs {
     timeout: Option<u64>,
     #[serde(default)]
     ignore_error: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +65,8 @@ pub struct DockerExecArgs {
     timeout: Option<u64>,
     #[serde(default)]
     ignore_error: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +82,8 @@ pub struct DockerRunArgs {
     timeout: Option<u64>,
     #[serde(default)]
     ignore_error: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +114,7 @@ pub async fn op_exec(
         name: args.name.clone(),
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
+        interactive: args.interactive,
     };
 
     execute_command(handle, command, args.ignore_error, args.name.unwrap_or_else(|| args.cmd.join(" ")), None).await
@@ -145,6 +154,7 @@ pub async fn op_shell(
         name: args.name,
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
+        interactive: args.interactive,
     };
 
     execute_command(handle, command, args.ignore_error, display_name, full_command).await
@@ -174,6 +184,7 @@ pub async fn op_docker_exec(
         name: args.name,
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
+        interactive: args.interactive,
     };
 
     execute_command(handle, command, args.ignore_error, display_name, None).await
@@ -205,6 +216,7 @@ pub async fn op_docker_run(
         name: args.name,
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
+        interactive: args.interactive,
     };
 
     execute_command(handle, command, args.ignore_error, display_name, None).await

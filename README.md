@@ -140,6 +140,7 @@ const result = await tryExec(["false"]);
   env?: Record<string, string>,    // environment variables
   name?: string,                   // display name in TUI
   timeout?: number,                // seconds, default: 300
+  interactive?: boolean,           // run with real terminal (suspends TUI)
 }
 ```
 
@@ -159,6 +160,9 @@ await docker.run("node:22", ["npm", "--version"], {
 
 // try* variants available for both
 const result = await docker.tryExec("container", ["cmd"]);
+
+// Interactive shell in a container (suspends TUI, gives real terminal)
+await docker.exec("app", ["/bin/bash"], { interactive: true });
 ```
 
 #### Concurrency & Structure
@@ -176,6 +180,20 @@ await exec(["pnpm", "build"]);
 
 await stage("Deploy");
 await exec(["./deploy.sh"]);
+```
+
+#### Interactive Commands
+
+Commands that need a real terminal (e.g. shells, interactive editors) can use `interactive: true`.
+This suspends the TUI, gives the process full stdin/stdout/stderr access, and resumes the TUI when it exits.
+
+```typescript
+// Drop into a bash shell inside a container
+await exec(["bash"], { interactive: true });
+await docker.exec("app", ["/bin/bash"], { interactive: true });
+
+// Interactive docker run
+await docker.run("ubuntu:24.04", ["/bin/bash"], { interactive: true });
 ```
 
 #### Dynamic Tasks (TUI only)

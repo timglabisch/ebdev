@@ -222,6 +222,8 @@ declare module "ebdev" {
     name?: string;
     /** Timeout in seconds (default: 300) */
     timeout?: number;
+    /** Run interactively with real terminal (suspends TUI) */
+    interactive?: boolean;
   }
 
   /**
@@ -236,6 +238,8 @@ declare module "ebdev" {
     name?: string;
     /** Timeout in seconds (default: 300) */
     timeout?: number;
+    /** Run interactively with real terminal (suspends TUI) */
+    interactive?: boolean;
   }
 
   /**
@@ -254,6 +258,8 @@ declare module "ebdev" {
     name?: string;
     /** Timeout in seconds (default: 300) */
     timeout?: number;
+    /** Run interactively with real terminal (suspends TUI) */
+    interactive?: boolean;
   }
 
   /**

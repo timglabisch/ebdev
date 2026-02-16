@@ -273,6 +273,12 @@ impl Executor {
     /// Führt einen Command im PTY aus
     fn execute<UI: TaskRunnerUI>(&mut self, request: CommandRequest, ui: &mut UI) {
         let CommandRequest { id, command, result_tx } = request;
+
+        if command.interactive() {
+            self.execute_interactive(id, command, result_tx, ui);
+            return;
+        }
+
         let name = command.display_name();
         let timeout = command.timeout();
 
@@ -329,4 +335,116 @@ impl Executor {
             }
         });
     }
+
+    /// Execute a command interactively with real terminal access
+    fn execute_interactive<UI: TaskRunnerUI>(
+        &mut self,
+        id: CommandId,
+        command: crate::command::Command,
+        result_tx: tokio::sync::oneshot::Sender<CommandResult>,
+        ui: &mut UI,
+    ) {
+        let name = command.display_name();
+        ui.on_task_start(id, &name);
+
+        let _ = ui.suspend();
+
+        let mut proc = build_interactive_process(&command, self.default_cwd.as_deref());
+        let result = match proc.status() {
+            Ok(status) => CommandResult {
+                exit_code: status.code().unwrap_or(-1),
+                success: status.success(),
+                timed_out: false,
+            },
+            Err(e) => {
+                eprintln!("Failed to run interactive command: {}", e);
+                CommandResult {
+                    exit_code: -1,
+                    success: false,
+                    timed_out: false,
+                }
+            }
+        };
+
+        let _ = ui.resume();
+
+        ui.on_task_complete(id, &result);
+        let _ = result_tx.send(result);
+    }
+}
+
+/// Build a std::process::Command for interactive execution with inherited stdio
+fn build_interactive_process(
+    command: &crate::command::Command,
+    default_cwd: Option<&str>,
+) -> std::process::Command {
+    use std::process::{Command as StdCommand, Stdio};
+
+    let mut proc = match command {
+        crate::command::Command::Exec { cmd, cwd, env, .. } => {
+            let mut p = StdCommand::new(&cmd[0]);
+            p.args(&cmd[1..]);
+            if let Some(cwd) = cwd.as_deref().or(default_cwd) {
+                p.current_dir(cwd);
+            }
+            if let Some(env) = env {
+                p.envs(env);
+            }
+            p
+        }
+        crate::command::Command::Shell { script, cwd, env, .. } => {
+            let mut p = StdCommand::new("sh");
+            p.args(["-c", script]);
+            if let Some(cwd) = cwd.as_deref().or(default_cwd) {
+                p.current_dir(cwd);
+            }
+            if let Some(env) = env {
+                p.envs(env);
+            }
+            p
+        }
+        crate::command::Command::DockerExec { container, cmd, user, env, .. } => {
+            let mut p = StdCommand::new("docker");
+            p.args(["exec", "-it"]);
+            if let Some(user) = user {
+                p.args(["-u", user]);
+            }
+            if let Some(env) = env {
+                for (k, v) in env {
+                    p.args(["-e", &format!("{}={}", k, v)]);
+                }
+            }
+            p.arg(container);
+            p.args(cmd);
+            p
+        }
+        crate::command::Command::DockerRun { image, cmd, volumes, workdir, network, env, .. } => {
+            let mut p = StdCommand::new("docker");
+            p.args(["run", "--rm", "-it"]);
+            if let Some(volumes) = volumes {
+                for v in volumes {
+                    p.args(["-v", v]);
+                }
+            }
+            if let Some(workdir) = workdir {
+                p.args(["-w", workdir]);
+            }
+            if let Some(network) = network {
+                p.args(["--network", network]);
+            }
+            if let Some(env) = env {
+                for (k, v) in env {
+                    p.args(["-e", &format!("{}={}", k, v)]);
+                }
+            }
+            p.arg(image);
+            p.args(cmd);
+            p
+        }
+    };
+
+    proc.stdin(Stdio::inherit());
+    proc.stdout(Stdio::inherit());
+    proc.stderr(Stdio::inherit());
+    proc
 }

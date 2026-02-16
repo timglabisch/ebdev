@@ -224,6 +224,7 @@ mod tests {
             name: None,
             timeout: None,
             ignore_error: false,
+            interactive: false,
         }).await;
 
         assert!(result.is_ok());
@@ -249,6 +250,7 @@ mod tests {
             name: Some("Sleep 1".into()),
             timeout: None,
             ignore_error: false,
+            interactive: false,
         });
 
         let r2 = handle.execute(Command::Shell {
@@ -258,6 +260,7 @@ mod tests {
             name: Some("Sleep 2".into()),
             timeout: None,
             ignore_error: false,
+            interactive: false,
         });
 
         let (result1, result2) = tokio::join!(r1, r2);
@@ -292,6 +295,7 @@ mod tests {
             name: Some("Task 1".into()),
             timeout: None,
             ignore_error: false,
+            interactive: false,
         });
 
         let r2 = handle.execute(Command::Exec {
@@ -301,6 +305,7 @@ mod tests {
             name: Some("Task 2".into()),
             timeout: None,
             ignore_error: false,
+            interactive: false,
         });
 
         let (result1, result2) = tokio::join!(r1, r2);
@@ -308,6 +313,130 @@ mod tests {
         assert!(result2.is_ok());
 
         handle.parallel_end().unwrap();
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_exec() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["echo".into(), "interactive".into()],
+            cwd: None,
+            env: None,
+            name: Some("Interactive echo".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.success);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_shell() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Shell {
+            script: "echo hello && echo world".into(),
+            cwd: None,
+            env: None,
+            name: Some("Interactive shell".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.success);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_failure() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["false".into()],
+            cwd: None,
+            env: None,
+            name: Some("Interactive false".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 1);
+        assert!(!result.success);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_env_and_cwd() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        // Test that env and cwd are passed through in interactive mode
+        let mut env = std::collections::HashMap::new();
+        env.insert("EBDEV_TEST_VAR".into(), "42".into());
+
+        let result = handle.execute(Command::Shell {
+            script: "test \"$EBDEV_TEST_VAR\" = \"42\"".into(),
+            cwd: Some("/tmp".into()),
+            env: Some(env),
+            name: Some("Interactive env+cwd".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.exit_code, 0, "env/cwd not passed through in interactive mode");
+        assert!(result.success);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_then_normal() {
+        // Verify that after an interactive command, normal PTY commands still work
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["true".into()],
+            cwd: None,
+            env: None,
+            name: Some("Interactive first".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["echo".into(), "back to normal".into()],
+            cwd: None,
+            env: None,
+            name: Some("Normal after interactive".into()),
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+
         let _ = handle.shutdown();
     }
 }
