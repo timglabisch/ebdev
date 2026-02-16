@@ -176,7 +176,7 @@ impl TaskRunnerUI for HeadlessUI {
 // TuiUI - Ratatui-basierte TUI
 // ============================================================================
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -184,7 +184,9 @@ use crossterm::ExecutableCommand;
 use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -403,11 +405,18 @@ pub struct TuiUI {
     auto_quit: bool,
     /// Auto-scroll to bottom when new output arrives
     auto_scroll: bool,
+    /// Pinned task index: None = stacked mode (default), Some(idx) = show only that task
+    pinned_task: Option<usize>,
+    /// Stored geometry of the left task list panel (for mouse hit-testing)
+    task_list_area: Rc<Cell<Rect>>,
+    /// Number of non-task lines at top of task list (collapsed stages + stage header) for click mapping
+    task_list_offset: Rc<Cell<usize>>,
 }
 
 impl TuiUI {
     pub fn new(task_name: String) -> io::Result<Self> {
         io::stdout().execute(EnterAlternateScreen)?;
+        io::stdout().execute(EnableMouseCapture)?;
         enable_raw_mode()?;
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
@@ -434,6 +443,9 @@ impl TuiUI {
             triggered_task: None,
             auto_quit: true,
             auto_scroll: true,
+            pinned_task: None,
+            task_list_area: Rc::new(Cell::new(Rect::default())),
+            task_list_offset: Rc::new(Cell::new(0)),
         })
     }
 
@@ -464,30 +476,33 @@ impl TuiUI {
             .collect();
         let has_registered_tasks = !self.registered_tasks.is_empty();
         let auto_quit = self.auto_quit;
+        let pinned_task = self.pinned_task;
 
-        // Calculate scroll offset with auto-scroll support
-        let terminal = self.terminal.as_mut().unwrap();
-        let visible_height = terminal.size()?.height.saturating_sub(10) as usize;
+        // Only compute auto-scroll for pinned mode (stacked mode always auto-scrolls)
+        if pinned_task.is_some() {
+            let terminal = self.terminal.as_mut().unwrap();
+            let visible_height = terminal.size()?.height.saturating_sub(10) as usize;
 
-        // Get content height for focused task
-        let content_height = if self.focused_task < self.tasks.len() {
-            self.tasks[self.focused_task].screen_text().lines.len()
-        } else {
-            0
-        };
-        let max_scroll = content_height.saturating_sub(visible_height);
+            // Get content height for focused task
+            let content_height = if self.focused_task < self.tasks.len() {
+                self.tasks[self.focused_task].screen_text().lines.len()
+            } else {
+                0
+            };
+            let max_scroll = content_height.saturating_sub(visible_height);
 
-        // Apply auto-scroll: jump to bottom
-        if self.auto_scroll {
-            self.scroll_offset = max_scroll as u16;
-        }
+            // Apply auto-scroll: jump to bottom
+            if self.auto_scroll {
+                self.scroll_offset = max_scroll as u16;
+            }
 
-        // Clamp scroll_offset to valid range
-        self.scroll_offset = (self.scroll_offset as usize).min(max_scroll) as u16;
+            // Clamp scroll_offset to valid range
+            self.scroll_offset = (self.scroll_offset as usize).min(max_scroll) as u16;
 
-        // Re-enable auto_scroll if we're at the bottom
-        if self.scroll_offset as usize >= max_scroll && max_scroll > 0 {
-            self.auto_scroll = true;
+            // Re-enable auto_scroll if we're at the bottom
+            if self.scroll_offset as usize >= max_scroll && max_scroll > 0 {
+                self.auto_scroll = true;
+            }
         }
 
         let tasks = &self.tasks;
@@ -496,7 +511,10 @@ impl TuiUI {
         let scroll_offset = self.scroll_offset;
         let collapsed_stages = &self.collapsed_stages;
         let current_stage = &self.current_stage;
+        let task_list_area_rc = self.task_list_area.clone();
+        let task_list_offset_rc = self.task_list_offset.clone();
 
+        let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -520,7 +538,7 @@ impl TuiUI {
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
                 frame.render_widget(waiting, chunks[1]);
             } else {
-                Self::draw_tasks(frame, chunks[1], tasks, collapsed_stages, current_stage.as_deref(), focused_task, scroll_offset);
+                Self::draw_tasks(frame, chunks[1], tasks, collapsed_stages, current_stage.as_deref(), focused_task, scroll_offset, pinned_task, &task_list_area_rc, &task_list_offset_rc);
             }
 
             // Help line
@@ -641,7 +659,18 @@ impl TuiUI {
         frame.render_widget(header, area);
     }
 
-    fn draw_tasks(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage], current_stage: Option<&str>, focused_task: usize, scroll_offset: u16) {
+    fn draw_tasks(
+        frame: &mut Frame,
+        area: Rect,
+        tasks: &[TaskInfo],
+        collapsed_stages: &[CollapsedStage],
+        current_stage: Option<&str>,
+        focused_task: usize,
+        scroll_offset: u16,
+        pinned_task: Option<usize>,
+        task_list_area_rc: &Rc<Cell<Rect>>,
+        task_list_offset_rc: &Rc<Cell<usize>>,
+    ) {
         // Split area: task list on left, output on right
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -651,17 +680,64 @@ impl TuiUI {
             ])
             .split(area);
 
-        // Task list with collapsed stages
-        Self::draw_task_list(frame, chunks[0], tasks, collapsed_stages, current_stage, focused_task);
+        // Store task list area for mouse hit-testing
+        task_list_area_rc.set(chunks[0]);
 
-        // Output of focused task
-        if focused_task < tasks.len() {
-            Self::draw_task_output(frame, chunks[1], &tasks[focused_task], scroll_offset);
+        // Task list with collapsed stages — returns non-task line count
+        let offset = Self::draw_task_list(frame, chunks[0], tasks, collapsed_stages, current_stage, focused_task, pinned_task);
+        task_list_offset_rc.set(offset);
+
+        // Right panel: pinned mode vs stacked mode
+        if let Some(pin_idx) = pinned_task {
+            // Pinned mode: show single task with scroll control
+            if pin_idx < tasks.len() {
+                Self::draw_task_output(frame, chunks[1], &tasks[pin_idx], scroll_offset);
+            }
+        } else {
+            // Stacked mode: show up to 3 running tasks
+            Self::draw_stacked_outputs(frame, chunks[1], tasks);
         }
     }
 
-    fn draw_task_list(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage], current_stage: Option<&str>, focused_task: usize) {
+    fn draw_stacked_outputs(frame: &mut Frame, area: Rect, tasks: &[TaskInfo]) {
+        // Collect running tasks (up to 3)
+        let mut display_tasks: Vec<&TaskInfo> = tasks
+            .iter()
+            .filter(|t| matches!(t.state, TaskState::Running))
+            .take(3)
+            .collect();
+
+        // If no running tasks but tasks exist, show the last task
+        if display_tasks.is_empty() {
+            if let Some(last) = tasks.last() {
+                display_tasks.push(last);
+            }
+        }
+
+        if display_tasks.is_empty() {
+            return;
+        }
+
+        let count = display_tasks.len() as u32;
+        let constraints: Vec<Constraint> = (0..count)
+            .map(|_| Constraint::Ratio(1, count))
+            .collect();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        for (i, task) in display_tasks.iter().enumerate() {
+            // Auto-scroll to bottom in stacked mode
+            Self::draw_task_output(frame, chunks[i], task, u16::MAX);
+        }
+    }
+
+    /// Draw task list. Returns the number of non-task lines at the top (for mouse click mapping).
+    fn draw_task_list(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], collapsed_stages: &[CollapsedStage], current_stage: Option<&str>, focused_task: usize, pinned_task: Option<usize>) -> usize {
         let mut lines: Vec<Line> = Vec::new();
+        let mut non_task_lines: usize = 0;
 
         // Draw collapsed stages first
         for stage in collapsed_stages {
@@ -683,12 +759,14 @@ impl TuiUI {
                 Span::styled(stage_name, style.add_modifier(Modifier::BOLD)),
                 Span::styled(task_info, Style::default().fg(Color::DarkGray)),
             ]));
+            non_task_lines += 1;
         }
 
         // Draw current stage header if present
         if let Some(stage_name) = current_stage {
             if !collapsed_stages.is_empty() {
                 lines.push(Line::from(""));  // Empty line separator
+                non_task_lines += 1;
             }
             let header = format!("═══ {} ═══", stage_name);
             lines.push(Line::from(Span::styled(
@@ -696,17 +774,25 @@ impl TuiUI {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));  // Empty line after header
+            non_task_lines += 2;
         }
 
         // Draw current tasks
         for (i, task) in tasks.iter().enumerate() {
             let is_focused = i == focused_task;
+            let is_pinned = pinned_task == Some(i);
             let (icon, style) = task.icon_and_style();
             let duration_str = format!(" ({:.1}s)", task.duration().as_secs_f32());
-            let prefix = if is_focused { "> " } else { "  " };
+            let prefix = if is_pinned {
+                "▸ "
+            } else if is_focused {
+                "> "
+            } else {
+                "  "
+            };
             let name = truncate_string(&task.name, MAX_TASK_NAME_LEN);
 
-            let line_style = if is_focused {
+            let line_style = if is_pinned || is_focused {
                 style.add_modifier(Modifier::BOLD)
             } else {
                 style
@@ -723,6 +809,8 @@ impl TuiUI {
         let task_list = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" Tasks "));
         frame.render_widget(task_list, area);
+
+        non_task_lines
     }
 
     fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_offset: u16) {
@@ -808,9 +896,9 @@ impl TuiUI {
 
         // Help text
         let help_text = if has_registered_tasks {
-            "↑↓: scroll | Tab: switch task | /: run task | q: quit"
+            "j/k: select | Enter: pin | ↑↓: scroll | /: run task | q: quit"
         } else {
-            "↑↓: scroll | Tab: switch task | q: quit"
+            "j/k: select | Enter: pin | ↑↓: scroll | q: quit"
         };
         spans.push(Span::styled(help_text, Style::default().fg(Color::DarkGray)));
 
@@ -818,80 +906,136 @@ impl TuiUI {
         frame.render_widget(help, area);
     }
 
+    /// Focus a task by index and reset scroll state
+    fn focus_task(&mut self, idx: usize) {
+        self.focused_task = idx;
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+    }
+
+    /// Toggle pin on a task index. If already pinned, unpin.
+    fn toggle_pin(&mut self, idx: usize) {
+        if self.pinned_task == Some(idx) {
+            self.pinned_task = None;
+        } else {
+            self.pinned_task = Some(idx);
+        }
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+    }
+
+    /// Scroll output by delta lines (negative = up, positive = down)
+    fn scroll_by(&mut self, delta: i32) {
+        if self.pinned_task.is_none() {
+            return;
+        }
+        if delta < 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs() as u16);
+            self.auto_scroll = false;
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_add(delta as u16);
+        }
+    }
+
     fn handle_input(&mut self) -> io::Result<bool> {
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            let ev = event::read()?;
+            match ev {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if self.command_palette_open {
-                        // Handle Command Palette input
                         return self.handle_command_palette_input(key.code);
                     }
-
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            self.should_quit = true;
-                            return Ok(true);
-                        }
-                        KeyCode::Char('/') => {
-                            // Open Command Palette if there are registered tasks
-                            if !self.registered_tasks.is_empty() {
-                                self.command_palette_open = true;
-                                self.command_palette_input.clear();
-                                self.command_palette_selected = 0;
-                                // Disable auto-quit when user interacts with Command Palette
-                                self.auto_quit = false;
-                            }
-                        }
-                        // Tab/Shift+Tab: switch between tasks
-                        KeyCode::Tab => {
-                            if !self.tasks.is_empty() {
-                                self.focused_task = (self.focused_task + 1) % self.tasks.len();
-                                self.scroll_offset = 0;
-                                self.auto_scroll = true;
-                            }
-                        }
-                        KeyCode::BackTab => {
-                            if !self.tasks.is_empty() {
-                                self.focused_task = (self.focused_task + self.tasks.len() - 1) % self.tasks.len();
-                                self.scroll_offset = 0;
-                                self.auto_scroll = true;
-                            }
-                        }
-                        // Up/Down: scroll output
-                        KeyCode::Up => {
-                            if self.scroll_offset > 0 {
-                                self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                                self.auto_scroll = false;
-                            }
-                        }
-                        KeyCode::Down => {
-                            self.scroll_offset = self.scroll_offset.saturating_add(1);
-                            // auto_scroll will be re-enabled in draw if we're at bottom
-                        }
-                        KeyCode::PageUp => {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(10);
-                            self.auto_scroll = false;
-                        }
-                        KeyCode::PageDown => {
-                            self.scroll_offset = self.scroll_offset.saturating_add(10);
-                            // auto_scroll will be re-enabled in draw if we're at bottom
-                        }
-                        // End: jump to bottom and enable auto-scroll
-                        KeyCode::End => {
-                            self.scroll_offset = u16::MAX;
-                            self.auto_scroll = true;
-                        }
-                        // Home: jump to top
-                        KeyCode::Home => {
-                            self.scroll_offset = 0;
-                            self.auto_scroll = false;
-                        }
-                        _ => {}
-                    }
+                    self.handle_key(key.code)?;
                 }
+                Event::Mouse(mouse) => {
+                    self.handle_mouse(mouse);
+                }
+                _ => {}
             }
         }
         Ok(false)
+    }
+
+    fn handle_key(&mut self, code: KeyCode) -> io::Result<()> {
+        let task_count = self.tasks.len();
+
+        match code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('/') => {
+                if !self.registered_tasks.is_empty() {
+                    self.command_palette_open = true;
+                    self.command_palette_input.clear();
+                    self.command_palette_selected = 0;
+                    self.auto_quit = false;
+                }
+            }
+            // j / Tab: next task
+            KeyCode::Char('j') | KeyCode::Tab => {
+                if task_count > 0 {
+                    self.focus_task((self.focused_task + 1) % task_count);
+                }
+            }
+            // k / Shift+Tab: previous task
+            KeyCode::Char('k') | KeyCode::BackTab => {
+                if task_count > 0 {
+                    self.focus_task((self.focused_task + task_count - 1) % task_count);
+                }
+            }
+            // Enter: toggle pin on focused task
+            KeyCode::Enter => {
+                if task_count > 0 {
+                    self.toggle_pin(self.focused_task);
+                }
+            }
+            KeyCode::Up => self.scroll_by(-1),
+            KeyCode::Down => self.scroll_by(1),
+            KeyCode::PageUp => self.scroll_by(-10),
+            KeyCode::PageDown => self.scroll_by(10),
+            KeyCode::End => {
+                self.scroll_offset = u16::MAX;
+                self.auto_scroll = true;
+            }
+            KeyCode::Home => {
+                if self.pinned_task.is_some() {
+                    self.scroll_offset = 0;
+                    self.auto_scroll = false;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(task_idx) = self.task_index_from_click(mouse.column, mouse.row) {
+                    self.focus_task(task_idx);
+                    self.toggle_pin(task_idx);
+                }
+            }
+            MouseEventKind::ScrollUp => self.scroll_by(-3),
+            MouseEventKind::ScrollDown => self.scroll_by(3),
+            _ => {}
+        }
+    }
+
+    /// Map a mouse click position to a task index, if it falls on a task row in the task list.
+    fn task_index_from_click(&self, col: u16, row: u16) -> Option<usize> {
+        let area = self.task_list_area.get();
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+            return None;
+        }
+        // Subtract area y, border (1 row), and non-task offset lines
+        let row_in_list = row.saturating_sub(area.y + 1) as usize;
+        let offset = self.task_list_offset.get();
+        if row_in_list < offset {
+            return None;
+        }
+        let task_idx = row_in_list - offset;
+        if task_idx < self.tasks.len() { Some(task_idx) } else { None }
     }
 
     fn handle_command_palette_input(&mut self, key: KeyCode) -> io::Result<bool> {
@@ -948,8 +1092,10 @@ impl TaskRunnerUI for TuiUI {
         self.tasks.push(task);
         self.task_map.insert(id, idx);
 
-        // Auto-focus auf neuen Task
-        self.focused_task = idx;
+        // Auto-focus on new task only when not pinned
+        if self.pinned_task.is_none() {
+            self.focused_task = idx;
+        }
     }
 
     fn on_task_output(&mut self, id: CommandId, output: &[u8]) {
@@ -1002,6 +1148,7 @@ impl TaskRunnerUI for TuiUI {
             self.tasks.clear();
             self.task_map.clear();
             self.focused_task = 0;
+            self.pinned_task = None;
         }
 
         // Set new stage name
@@ -1049,9 +1196,11 @@ impl TaskRunnerUI for TuiUI {
         self.draw()?;
         self.handle_input()?;
 
-        // Auto-focus auf laufenden Task
-        if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
-            self.focused_task = idx;
+        // Auto-focus on running task only when not pinned
+        if self.pinned_task.is_none() {
+            if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
+                self.focused_task = idx;
+            }
         }
 
         Ok(())
@@ -1064,6 +1213,7 @@ impl TaskRunnerUI for TuiUI {
 
     fn cleanup(&mut self) -> io::Result<()> {
         if self.terminal.is_some() {
+            io::stdout().execute(DisableMouseCapture)?;
             io::stdout().execute(LeaveAlternateScreen)?;
             disable_raw_mode()?;
             self.terminal = None;
