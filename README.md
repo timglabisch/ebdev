@@ -196,6 +196,17 @@ await docker.exec("app", ["/bin/bash"], { interactive: true });
 await docker.run("ubuntu:24.04", ["/bin/bash"], { interactive: true });
 ```
 
+For tasks where every command needs a real terminal, use `enableInteractive()` instead of marking each command:
+
+```typescript
+export async function cli() {
+  enableInteractive();
+  await docker.exec("app", ["/bin/bash"]);
+  // all commands here run interactively
+  disableInteractive(); // optional: restore default
+}
+```
+
 #### Dynamic Tasks (TUI only)
 
 Press `/` in TUI mode to open the Command Palette.

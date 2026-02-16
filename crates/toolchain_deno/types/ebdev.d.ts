@@ -195,6 +195,16 @@ declare module "ebdev" {
   export function mergeIgnore(...lists: (string[] | undefined)[]): string[];
 
   // =============================================================================
+  // Interactive Mode
+  // =============================================================================
+
+  /** Enable interactive mode — all subsequent commands get real terminal access (suspends TUI) */
+  export function enableInteractive(): void;
+
+  /** Disable interactive mode — commands use PTY capture again */
+  export function disableInteractive(): void;
+
+  // =============================================================================
   // Task Runner API
   // =============================================================================
 

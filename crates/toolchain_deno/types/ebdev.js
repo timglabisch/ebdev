@@ -59,6 +59,15 @@ globalThis.mergeIgnore = mergeIgnore;
 globalThis.gitignore = gitignore;
 
 // =============================================================================
+// Interactive Mode
+// =============================================================================
+
+let interactiveMode = false;
+
+export function enableInteractive() { interactiveMode = true; }
+export function disableInteractive() { interactiveMode = false; }
+
+// =============================================================================
 // Task Runner API
 // =============================================================================
 
@@ -84,7 +93,7 @@ export async function exec(cmd, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: false,
-    interactive: options.interactive || false,
+    interactive: options.interactive || interactiveMode,
   });
 }
 
@@ -109,7 +118,7 @@ export async function tryExec(cmd, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: true,
-    interactive: options.interactive || false,
+    interactive: options.interactive || interactiveMode,
   });
 }
 
@@ -135,7 +144,7 @@ export async function shell(script, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: false,
-    interactive: options.interactive || false,
+    interactive: options.interactive || interactiveMode,
   });
 }
 
@@ -160,7 +169,7 @@ export async function tryShell(script, options = {}) {
     name: options.name,
     timeout: options.timeout,
     ignore_error: true,
-    interactive: options.interactive || false,
+    interactive: options.interactive || interactiveMode,
   });
 }
 
@@ -227,7 +236,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: false,
-      interactive: options.interactive || false,
+      interactive: options.interactive || interactiveMode,
     });
   },
 
@@ -257,7 +266,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: true,
-      interactive: options.interactive || false,
+      interactive: options.interactive || interactiveMode,
     });
   },
 
@@ -292,7 +301,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: false,
-      interactive: options.interactive || false,
+      interactive: options.interactive || interactiveMode,
     });
   },
 
@@ -326,7 +335,7 @@ export const docker = {
       name: options.name,
       timeout: options.timeout,
       ignore_error: true,
-      interactive: options.interactive || false,
+      interactive: options.interactive || interactiveMode,
     });
   },
 };
