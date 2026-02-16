@@ -10,6 +10,8 @@ pub mod bridge;
 pub mod executor;
 pub mod local;
 pub mod remote;
+#[cfg(feature = "wasm-runtime")]
+pub mod wasm_host;
 
 pub use bridge::run_bridge;
 pub use executor::{ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor, ExecutorError};
@@ -75,6 +77,19 @@ pub enum Request {
     Ping,
     /// Beende die Remote-Binary (killt auch alle laufenden Prozesse)
     Shutdown,
+    /// Führe ein WASM/WASI Modul aus
+    WasmExec {
+        /// Session-ID (vom Client generiert, eindeutig)
+        session_id: u32,
+        /// WASM Module Bytes
+        module: Vec<u8>,
+        /// WASI args
+        args: Vec<String>,
+        /// WASI env (Key-Value Paare)
+        env: Vec<(String, String)>,
+        /// Arbeitsverzeichnis (optional)
+        working_dir: Option<String>,
+    },
 }
 
 /// Response von der Remote-Binary an den Host
@@ -126,7 +141,8 @@ pub enum OutputStream {
 
 /// Protokoll-Version für Kompatibilitätsprüfung
 /// v4: Ready enthält jetzt protocol_version für Kompatibilitätsprüfung
-pub const PROTOCOL_VERSION: u32 = 4;
+/// v5: WasmExec Request für WASM/WASI Modul-Ausführung
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Magic-Bytes für Protokoll-Identifikation
 pub const MAGIC: &[u8; 4] = b"EBDV";
@@ -243,6 +259,38 @@ mod tests {
         match decoded {
             Request::Kill { session_id } => {
                 assert_eq!(session_id, 99);
+            }
+            _ => panic!("Unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_wasm_exec_roundtrip() {
+        let req = Request::WasmExec {
+            session_id: 7,
+            module: vec![0x00, 0x61, 0x73, 0x6d], // WASM magic bytes
+            args: vec!["--seed".to_string(), "--force".to_string()],
+            env: vec![("DB_URL".to_string(), "postgres://localhost".to_string())],
+            working_dir: Some("/var/www".to_string()),
+        };
+
+        let encoded = encode_message(&req).unwrap();
+        let (decoded, consumed): (Request, usize) = decode_message(&encoded).unwrap().unwrap();
+
+        assert_eq!(consumed, encoded.len());
+        match decoded {
+            Request::WasmExec {
+                session_id,
+                module,
+                args,
+                env,
+                working_dir,
+            } => {
+                assert_eq!(session_id, 7);
+                assert_eq!(module, vec![0x00, 0x61, 0x73, 0x6d]);
+                assert_eq!(args, vec!["--seed", "--force"]);
+                assert_eq!(env, vec![("DB_URL".to_string(), "postgres://localhost".to_string())]);
+                assert_eq!(working_dir, Some("/var/www".to_string()));
             }
             _ => panic!("Unexpected variant"),
         }

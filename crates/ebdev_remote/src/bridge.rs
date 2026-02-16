@@ -193,6 +193,83 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
                                 }
                             }
                         }
+                        #[cfg(feature = "wasm-runtime")]
+                        Request::WasmExec {
+                            session_id,
+                            module,
+                            args,
+                            env,
+                            working_dir,
+                        } => {
+                            // Prüfe ob Session-ID schon existiert
+                            if sessions.contains_key(&session_id) {
+                                let error = Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("Session {} already exists", session_id),
+                                };
+                                let encoded = encode_message(&error)?;
+                                stdout.write_all(&encoded).await?;
+                                stdout.flush().await?;
+                                continue;
+                            }
+
+                            // Started Response senden
+                            let started = Response::Started { session_id };
+                            let encoded = encode_message(&started)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+
+                            // WASM Modul in Blocking-Task ausführen
+                            let main_tx = event_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let (output_tx, output_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+                                // Output forwarding in separatem Thread
+                                let output_main_tx = main_tx.clone();
+                                let output_thread = std::thread::spawn(move || {
+                                    while let Ok(data) = output_rx.recv() {
+                                        let event = ExecuteEvent::Output {
+                                            stream: crate::OutputStream::Stdout,
+                                            data,
+                                        };
+                                        if output_main_tx.blocking_send(SessionEvent::Event {
+                                            session_id,
+                                            event,
+                                        }).is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+
+                                // WASM Modul ausführen
+                                let exit_code = crate::wasm_host::run_wasm_module(
+                                    &module,
+                                    args,
+                                    env,
+                                    working_dir,
+                                    output_tx,
+                                );
+
+                                // Output Thread beenden (output_tx dropped)
+                                let _ = output_thread.join();
+
+                                // Exit Event senden
+                                let _ = main_tx.blocking_send(SessionEvent::Event {
+                                    session_id,
+                                    event: ExecuteEvent::Exit { code: Some(exit_code) },
+                                });
+                            });
+                        }
+                        #[cfg(not(feature = "wasm-runtime"))]
+                        Request::WasmExec { session_id, .. } => {
+                            let error = Response::Error {
+                                session_id: Some(session_id),
+                                message: "WASM runtime not enabled in this build".to_string(),
+                            };
+                            let encoded = encode_message(&error)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
                         Request::Ping => {
                             let pong = Response::Pong;
                             let encoded = encode_message(&pong)?;

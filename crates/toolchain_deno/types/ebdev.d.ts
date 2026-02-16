@@ -342,6 +342,98 @@ declare module "ebdev" {
   };
 
   // =============================================================================
+  // WASM Plugin API
+  // =============================================================================
+
+  /**
+   * Options for wasm.remote command
+   */
+  export interface WasmRemoteOptions {
+    /** WASI arguments passed to the module */
+    args?: string[];
+    /** Environment variables */
+    env?: Record<string, string>;
+    /** Working directory in container */
+    cwd?: string;
+    /** Display name for TUI */
+    name?: string;
+    /** Timeout in seconds (default: 300) */
+    timeout?: number;
+  }
+
+  /**
+   * Options for wasm.exec command
+   */
+  export interface WasmExecOptions {
+    /** WASI arguments passed to the module */
+    args?: string[];
+    /** Environment variables */
+    env?: Record<string, string>;
+    /** Working directory */
+    cwd?: string;
+    /** Display name for TUI */
+    name?: string;
+    /** Timeout in seconds (default: 300) */
+    timeout?: number;
+  }
+
+  /**
+   * WASM/WASI plugin operations
+   *
+   * Execute WASM modules (.wasm) or auto-compile Rust files (.rs) to WASM.
+   *
+   * @example
+   * ```typescript
+   * import { wasm } from "ebdev";
+   *
+   * // Execute pre-compiled WASM in container
+   * await wasm.remote("app", "./tasks/migrate.wasm", {
+   *   args: ["--seed"],
+   *   env: { DATABASE_URL: "postgres://..." },
+   * });
+   *
+   * // Auto-compile .rs to .wasm and execute
+   * await wasm.remote("app", "./tasks/migrate.rs", { args: ["--seed"] });
+   *
+   * // Execute locally
+   * await wasm.exec("./tasks/build.wasm", { args: ["--release"] });
+   * ```
+   */
+  export const wasm: {
+    /**
+     * Execute a WASM module in a remote container
+     * @param container - Container name or ID
+     * @param modulePath - Path to .wasm or .rs file (relative to project root)
+     * @param options - Options
+     * @throws Error if execution fails or times out
+     */
+    remote(container: string, modulePath: string, options?: WasmRemoteOptions): Promise<ExecResult>;
+
+    /**
+     * Execute a WASM module in a remote container, ignoring errors
+     * @param container - Container name or ID
+     * @param modulePath - Path to .wasm or .rs file
+     * @param options - Options
+     */
+    tryRemote(container: string, modulePath: string, options?: WasmRemoteOptions): Promise<ExecResult>;
+
+    /**
+     * Execute a WASM module locally
+     * @param modulePath - Path to .wasm or .rs file (relative to project root)
+     * @param options - Options
+     * @throws Error if execution fails or times out
+     */
+    exec(modulePath: string, options?: WasmExecOptions): Promise<ExecResult>;
+
+    /**
+     * Execute a WASM module locally, ignoring errors
+     * @param modulePath - Path to .wasm or .rs file
+     * @param options - Options
+     */
+    tryExec(modulePath: string, options?: WasmExecOptions): Promise<ExecResult>;
+  };
+
+  // =============================================================================
   // On-the-fly Task Registration (Command Palette)
   // =============================================================================
 

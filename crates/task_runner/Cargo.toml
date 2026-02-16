@@ -3,6 +3,10 @@ name = "ebdev-task-runner"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+wasm-runtime = ["ebdev_remote/wasm-runtime"]
+
 [dependencies]
 tokio.workspace = true
 crossterm.workspace = true

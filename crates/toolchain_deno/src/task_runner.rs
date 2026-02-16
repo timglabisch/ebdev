@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::module_loader::TsModuleLoader;
-use crate::ops::{ebdev_deno_ops, init_mutagen_state, init_task_runner_state};
+use crate::ops::{ebdev_deno_ops, init_mutagen_state, init_task_runner_state, init_wasm_state};
 use crate::runtime::Error;
 
 /// List all exported async functions (tasks) from a .ebdev.ts file
@@ -23,6 +23,7 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<String>, Error> {
         let op_state = rt.op_state();
         let mut state = op_state.borrow_mut();
         init_task_runner_state(&mut state, None, None);
+        init_wasm_state(&mut state, dir.to_path_buf(), None);
     }
 
     let module = ModuleSpecifier::from_file_path(&path).map_err(|_| Error("Invalid path".into()))?;
@@ -61,6 +62,7 @@ pub async fn run_task(
     task_name: &str,
     handle: Option<TaskRunnerHandle>,
     mutagen_path: Option<PathBuf>,
+    rust_env: Option<(PathBuf, PathBuf)>,
 ) -> Result<(), Error> {
     let path = path.canonicalize()?;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -77,6 +79,7 @@ pub async fn run_task(
         let mut state = op_state.borrow_mut();
         init_task_runner_state(&mut state, handle, Some(dir.to_string_lossy().to_string()));
         init_mutagen_state(&mut state, mutagen_path, path.clone());
+        init_wasm_state(&mut state, dir.to_path_buf(), rust_env);
     }
 
     let module = ModuleSpecifier::from_file_path(&path).map_err(|_| Error("Invalid path".into()))?;
@@ -188,7 +191,7 @@ export async function build() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None);
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "build", Some(handle), None).await;
+        let result = run_task(&config_path, "build", Some(handle), None, None).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "Task should succeed: {:?}", result);
@@ -211,7 +214,7 @@ export async function build() {}
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None);
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "nonexistent", Some(handle), None).await;
+        let result = run_task(&config_path, "nonexistent", Some(handle), None, None).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_err());

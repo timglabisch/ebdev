@@ -52,6 +52,29 @@ pub enum Command {
         timeout: Option<Duration>,
         ignore_error: bool,
     },
+    /// Execute a WASM module in a remote container
+    WasmRemote {
+        container: String,
+        #[serde(skip)]
+        module: Vec<u8>,
+        args: Vec<String>,
+        env: Option<HashMap<String, String>>,
+        cwd: Option<String>,
+        name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
+    },
+    /// Execute a WASM module locally
+    WasmExec {
+        #[serde(skip)]
+        module: Vec<u8>,
+        args: Vec<String>,
+        env: Option<HashMap<String, String>>,
+        cwd: Option<String>,
+        name: Option<String>,
+        timeout: Option<Duration>,
+        ignore_error: bool,
+    },
 }
 
 impl Command {
@@ -80,6 +103,14 @@ impl Command {
                     format!("docker:{} {}", image, cmd.join(" "))
                 })
             }
+            Command::WasmRemote { container, name, .. } => {
+                name.clone().unwrap_or_else(|| {
+                    format!("wasm:{}", container)
+                })
+            }
+            Command::WasmExec { name, .. } => {
+                name.clone().unwrap_or_else(|| "wasm".to_string())
+            }
         }
     }
 
@@ -90,6 +121,8 @@ impl Command {
             Command::Shell { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
             Command::DockerExec { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
             Command::DockerRun { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+            Command::WasmRemote { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
+            Command::WasmExec { timeout, .. } => timeout.unwrap_or(DEFAULT_TIMEOUT),
         }
     }
 
@@ -100,6 +133,8 @@ impl Command {
             Command::Shell { ignore_error, .. } => *ignore_error,
             Command::DockerExec { ignore_error, .. } => *ignore_error,
             Command::DockerRun { ignore_error, .. } => *ignore_error,
+            Command::WasmRemote { ignore_error, .. } => *ignore_error,
+            Command::WasmExec { ignore_error, .. } => *ignore_error,
         }
     }
 }

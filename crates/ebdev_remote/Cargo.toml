@@ -13,12 +13,22 @@ path = "src/lib.rs"
 name = "ebdev-bridge"
 path = "src/bin/bridge.rs"
 
+[features]
+default = []
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:serde_json", "dep:bytes", "dep:async-trait", "dep:anyhow"]
+
 [dependencies]
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net"] }
 libc = "0.2"
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime"], optional = true }
+wasmtime-wasi = { version = "29", optional = true }
+serde_json = { workspace = true, optional = true }
+bytes = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+anyhow = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "process"] }

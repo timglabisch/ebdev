@@ -1,4 +1,4 @@
-import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
+import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession, wasm } from "ebdev";
 
 export default defineConfig({
     toolchain: {
@@ -441,7 +441,7 @@ export async function test_smoke() {
 // Docker Integration Tests
 // =============================================================================
 
-import { docker } from "ebdev";
+import { docker, wasm } from "ebdev";
 
 // Test docker.exec - requires docker container to be running
 // Run with: make test-docker
@@ -568,4 +568,41 @@ export async function test_docker_smoke() {
     }
 
     console.log("Docker smoke test passed ✓");
+}
+
+// =============================================================================
+// WASM Integration Tests
+// =============================================================================
+
+// Test WASM local execution with .rs auto-compilation
+export async function test_wasm() {
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║          WASM INTEGRATION TEST                               ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+
+    // Test 1: Local WASM execution with auto-compiled .rs
+    await stage("1. Local WASM (.rs auto-compile)");
+    console.log("Testing .rs → .wasm auto-compilation and local execution...");
+    await wasm.exec("./tasks/hello.rs", {
+        args: ["--test", "--verbose"],
+        env: { MY_VAR: "wasm_test" },
+        name: "Hello WASM",
+    });
+    console.log("Local WASM execution passed ✓");
+
+    // Test 2: Try variant (non-throwing)
+    await stage("2. tryExec WASM");
+    console.log("Testing wasm.tryExec...");
+    const result = await wasm.tryExec("./tasks/hello.rs", {
+        args: ["--check"],
+        name: "WASM Try",
+    });
+    console.log(`WASM tryExec result: exitCode=${result.exitCode}, success=${result.success}`);
+    console.log("tryExec WASM passed ✓");
+
+    await stage("Complete");
+    console.log("");
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║          WASM TESTS COMPLETED SUCCESSFULLY                   ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
 }

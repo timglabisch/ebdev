@@ -1,0 +1,12 @@
+[package]
+name = "ebdev-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Guest library for ebdev WASM plugins"
+
+# NOT in workspace - targets wasm32-wasip1
+# Build with: cargo build --target wasm32-wasip1 --release
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

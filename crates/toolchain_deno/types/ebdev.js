@@ -324,6 +324,121 @@ export const docker = {
 };
 
 // =============================================================================
+// WASM Plugin API
+// =============================================================================
+
+/**
+ * WASM/WASI plugin operations
+ */
+export const wasm = {
+  /**
+   * Execute a WASM module in a remote container
+   * @param {string} container - Container name or ID
+   * @param {string} modulePath - Path to .wasm or .rs file (relative to project root)
+   * @param {Object} [options] - Options
+   * @param {string[]} [options.args] - WASI arguments
+   * @param {Record<string, string>} [options.env] - Environment variables
+   * @param {string} [options.cwd] - Working directory in container
+   * @param {string} [options.name] - Display name for TUI
+   * @param {number} [options.timeout] - Timeout in seconds (default: 300)
+   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+   * @throws {Error} If execution fails or times out
+   */
+  async remote(container, modulePath, options = {}) {
+    if (typeof container !== "string") {
+      throw new Error("wasm.remote: container must be a string");
+    }
+    if (typeof modulePath !== "string") {
+      throw new Error("wasm.remote: modulePath must be a string");
+    }
+    return await Deno.core.ops.op_wasm_remote({
+      container,
+      module_path: modulePath,
+      args: options.args,
+      env: options.env,
+      cwd: options.cwd,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: false,
+    });
+  },
+
+  /**
+   * Execute a WASM module in a remote container, ignoring errors
+   * @param {string} container - Container name or ID
+   * @param {string} modulePath - Path to .wasm or .rs file
+   * @param {Object} [options] - Options
+   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+   */
+  async tryRemote(container, modulePath, options = {}) {
+    if (typeof container !== "string") {
+      throw new Error("wasm.tryRemote: container must be a string");
+    }
+    if (typeof modulePath !== "string") {
+      throw new Error("wasm.tryRemote: modulePath must be a string");
+    }
+    return await Deno.core.ops.op_wasm_remote({
+      container,
+      module_path: modulePath,
+      args: options.args,
+      env: options.env,
+      cwd: options.cwd,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: true,
+    });
+  },
+
+  /**
+   * Execute a WASM module locally
+   * @param {string} modulePath - Path to .wasm or .rs file (relative to project root)
+   * @param {Object} [options] - Options
+   * @param {string[]} [options.args] - WASI arguments
+   * @param {Record<string, string>} [options.env] - Environment variables
+   * @param {string} [options.cwd] - Working directory
+   * @param {string} [options.name] - Display name for TUI
+   * @param {number} [options.timeout] - Timeout in seconds (default: 300)
+   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+   * @throws {Error} If execution fails or times out
+   */
+  async exec(modulePath, options = {}) {
+    if (typeof modulePath !== "string") {
+      throw new Error("wasm.exec: modulePath must be a string");
+    }
+    return await Deno.core.ops.op_wasm_exec({
+      module_path: modulePath,
+      args: options.args,
+      env: options.env,
+      cwd: options.cwd,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: false,
+    });
+  },
+
+  /**
+   * Execute a WASM module locally, ignoring errors
+   * @param {string} modulePath - Path to .wasm or .rs file
+   * @param {Object} [options] - Options
+   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+   */
+  async tryExec(modulePath, options = {}) {
+    if (typeof modulePath !== "string") {
+      throw new Error("wasm.tryExec: modulePath must be a string");
+    }
+    return await Deno.core.ops.op_wasm_exec({
+      module_path: modulePath,
+      args: options.args,
+      env: options.env,
+      cwd: options.cwd,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: true,
+    });
+  },
+};
+
+// =============================================================================
 // On-the-fly Task Registration (Command Palette)
 // =============================================================================
 

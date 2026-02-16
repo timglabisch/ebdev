@@ -95,6 +95,25 @@ impl ExecutionBackend {
                     event_tx,
                 )
             }
+            Command::WasmRemote {
+                container,
+                module,
+                args,
+                env,
+                cwd,
+                ..
+            } => {
+                self.execute_wasm_remote(container, module, args, env.clone(), cwd.clone(), timeout, event_tx)
+            }
+            Command::WasmExec {
+                module,
+                args,
+                env,
+                cwd,
+                ..
+            } => {
+                self.execute_wasm_local(module, args, env.clone(), cwd.clone(), timeout, event_tx)
+            }
         }
     }
 
@@ -292,6 +311,207 @@ impl ExecutionBackend {
 
         let mut executor = LocalExecutor::new();
         self.run_executor(&mut executor, options, timeout, event_tx)
+    }
+
+    /// Führt ein WASM Modul remote in einem Container aus
+    fn execute_wasm_remote(
+        &mut self,
+        container: &str,
+        module: &[u8],
+        args: &[String],
+        env: Option<std::collections::HashMap<String, String>>,
+        cwd: Option<String>,
+        timeout: Duration,
+        event_tx: std_mpsc::Sender<BackendEvent>,
+    ) -> Result<(), String> {
+        let container = container.to_string();
+        let module = module.to_vec();
+        let args = args.to_vec();
+        let env_vec: Vec<(String, String)> = env
+            .map(|e| e.into_iter().collect())
+            .unwrap_or_default();
+
+        self.runtime.block_on(async {
+            let mut executor = match RemoteExecutor::connect(&container).await {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = event_tx.send(BackendEvent::Error(format!("Failed to connect to container: {}", e)));
+                    return Err(format!("Failed to connect to container: {}", e));
+                }
+            };
+
+            // Send WasmExec request
+            let session_id = 1u32;
+            let request = ebdev_remote::Request::WasmExec {
+                session_id,
+                module,
+                args,
+                env: env_vec,
+                working_dir: cwd,
+            };
+            let msg = ebdev_remote::encode_message(&request)
+                .map_err(|e| format!("Failed to encode request: {}", e))?;
+
+            let stdin = executor.stdin_mut()
+                .ok_or_else(|| "stdin not available".to_string())?;
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(&msg).await.map_err(|e| format!("Write error: {}", e))?;
+            stdin.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+            // Wait for Started
+            let stdout = executor.stdout_mut()
+                .ok_or_else(|| "stdout not available".to_string())?;
+            let mut buffer = Vec::new();
+            let mut read_buf = [0u8; 4096];
+            use tokio::io::AsyncReadExt;
+
+            loop {
+                let n = stdout.read(&mut read_buf).await.map_err(|e| format!("Read error: {}", e))?;
+                if n == 0 {
+                    return Err("Bridge closed unexpectedly".to_string());
+                }
+                buffer.extend_from_slice(&read_buf[..n]);
+
+                if let Some((response, consumed)) = ebdev_remote::decode_message::<ebdev_remote::Response>(&buffer)
+                    .map_err(|e| format!("Decode error: {}", e))?
+                {
+                    buffer.drain(..consumed);
+                    match response {
+                        ebdev_remote::Response::Started { .. } => break,
+                        ebdev_remote::Response::Error { message, .. } => return Err(message),
+                        _ => return Err(format!("Expected Started, got {:?}", response)),
+                    }
+                }
+            }
+
+            // Stream Output/Exit events with timeout
+            let timeout_at = tokio::time::Instant::now() + timeout;
+            let mut exit_code = None;
+            let mut timed_out = false;
+
+            loop {
+                tokio::select! {
+                    result = stdout.read(&mut read_buf) => {
+                        let n = result.map_err(|e| format!("Read error: {}", e))?;
+                        if n == 0 { break; }
+                        buffer.extend_from_slice(&read_buf[..n]);
+
+                        while let Some((response, consumed)) = ebdev_remote::decode_message::<ebdev_remote::Response>(&buffer)
+                            .map_err(|e| format!("Decode error: {}", e))?
+                        {
+                            buffer.drain(..consumed);
+                            match response {
+                                ebdev_remote::Response::Output { data, .. } => {
+                                    let _ = event_tx.send(BackendEvent::Output(data));
+                                }
+                                ebdev_remote::Response::Exit { code, .. } => {
+                                    exit_code = code;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if exit_code.is_some() { break; }
+                    }
+                    _ = tokio::time::sleep_until(timeout_at) => {
+                        timed_out = true;
+                        break;
+                    }
+                }
+            }
+
+            let result = CommandResult {
+                exit_code: exit_code.unwrap_or(-1),
+                success: exit_code == Some(0),
+                timed_out,
+            };
+            let _ = event_tx.send(BackendEvent::Completed(result));
+            Ok(())
+        })
+    }
+
+    /// Führt ein WASM Modul lokal aus
+    #[cfg(feature = "wasm-runtime")]
+    fn execute_wasm_local(
+        &mut self,
+        module: &[u8],
+        args: &[String],
+        env: Option<std::collections::HashMap<String, String>>,
+        cwd: Option<String>,
+        timeout: Duration,
+        event_tx: std_mpsc::Sender<BackendEvent>,
+    ) -> Result<(), String> {
+        let module = module.to_vec();
+        let args = args.to_vec();
+        let env_vec: Vec<(String, String)> = env
+            .map(|e| e.into_iter().collect())
+            .unwrap_or_default();
+
+        let (output_tx, output_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        // Run WASM in blocking thread
+        let wasm_handle = std::thread::spawn(move || {
+            ebdev_remote::wasm_host::run_wasm_module(
+                &module,
+                args,
+                env_vec,
+                cwd,
+                output_tx,
+            )
+        });
+
+        // Forward output with timeout
+        let deadline = std::time::Instant::now() + timeout;
+        let mut timed_out = false;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                timed_out = true;
+                break;
+            }
+
+            match output_rx.recv_timeout(remaining) {
+                Ok(data) => {
+                    let _ = event_tx.send(BackendEvent::Output(data));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    timed_out = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+
+        let exit_code = if timed_out {
+            -1
+        } else {
+            wasm_handle.join().unwrap_or(1)
+        };
+
+        let result = CommandResult {
+            exit_code,
+            success: exit_code == 0,
+            timed_out,
+        };
+        let _ = event_tx.send(BackendEvent::Completed(result));
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm-runtime"))]
+    fn execute_wasm_local(
+        &mut self,
+        _module: &[u8],
+        _args: &[String],
+        _env: Option<std::collections::HashMap<String, String>>,
+        _cwd: Option<String>,
+        _timeout: Duration,
+        event_tx: std_mpsc::Sender<BackendEvent>,
+    ) -> Result<(), String> {
+        let _ = event_tx.send(BackendEvent::Error("WASM runtime not enabled in this build".to_string()));
+        Err("WASM runtime not enabled".to_string())
     }
 
     /// Führt einen Executor aus und sendet Events

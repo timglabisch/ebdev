@@ -228,6 +228,18 @@ impl RemoteExecutor {
     }
 }
 
+impl RemoteExecutor {
+    /// Mutable access to stdin (for direct protocol communication)
+    pub fn stdin_mut(&mut self) -> Option<&mut ChildStdin> {
+        self.stdin.as_mut()
+    }
+
+    /// Mutable access to stdout (for direct protocol communication)
+    pub fn stdout_mut(&mut self) -> Option<&mut ChildStdout> {
+        self.stdout.as_mut()
+    }
+}
+
 impl Executor for RemoteExecutor {
     async fn execute(
         &mut self,

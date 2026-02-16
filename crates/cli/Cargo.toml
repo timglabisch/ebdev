@@ -14,7 +14,7 @@ ebdev-toolchain-mutagen = { path = "../toolchain_mutagen" }
 ebdev-toolchain-rust = { path = "../toolchain_rust" }
 ebdev-toolchain-ebdev = { path = "../toolchain_ebdev" }
 ebdev-toolchain-deno = { path = "../toolchain_deno" }
-ebdev-task-runner = { path = "../task_runner" }
+ebdev-task-runner = { path = "../task_runner", features = ["wasm-runtime"] }
 ebdev-config = { path = "../ebdev_config" }
 ebdev_remote = { path = "../ebdev_remote" }
 tokio.workspace = true

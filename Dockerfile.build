@@ -25,12 +25,22 @@ edition = "2021"
 name = "ebdev-bridge"
 path = "src/bin/bridge.rs"
 
+[features]
+default = []
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:serde_json", "dep:bytes", "dep:async-trait", "dep:anyhow"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net"] }
 libc = "0.2"
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime"], optional = true }
+wasmtime-wasi = { version = "29", optional = true }
+serde_json = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+anyhow = { version = "1", optional = true }
 
 [profile.release]
 opt-level = "z"
@@ -43,8 +53,8 @@ EOF
 # Kopiere Source
 COPY crates/ebdev_remote/src ./src
 
-# Baue die Bridge-Binary (Alpine nutzt musl automatisch für die jeweilige Plattform)
-RUN cargo build --release --bin ebdev-bridge
+# Baue die Bridge-Binary mit WASM Runtime (Alpine nutzt musl automatisch für die jeweilige Plattform)
+RUN cargo build --release --bin ebdev-bridge --features wasm-runtime
 
 # Export
 FROM scratch AS export

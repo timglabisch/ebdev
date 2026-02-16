@@ -1,4 +1,4 @@
-.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build-linux-arm64 build-linux-all build test-docker test-docker-smoke test-taskrunner test-integration test-integration-rust
+.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build-linux-arm64 build-linux-all build test-docker test-docker-smoke test-taskrunner test-integration test-integration-rust test-wasm test-wasm-integration
 
 # =============================================================================
 # Linux Bridge Builds (statisch gelinkt mit musl, ~1MB)
@@ -82,3 +82,15 @@ test-taskrunner:
 	cd example && cargo run --package ebdev -- task test_smoke
 	cd example && cargo run --package ebdev -- task test_stages
 	cd example && cargo run --package ebdev -- task test_try
+
+# =============================================================================
+# WASM Tests
+# =============================================================================
+
+# Run WASM unit tests
+test-wasm:
+	cargo test --package ebdev_remote --features wasm-runtime -- wasm
+
+# Run WASM integration test (requires rust toolchain for .rs compilation)
+test-wasm-integration:
+	cd example && cargo run --package ebdev -- task test_wasm

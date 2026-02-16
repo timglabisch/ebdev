@@ -449,12 +449,32 @@ async fn run() -> anyhow::Result<ExitCode> {
                 None
             };
 
+            // Extract rust_env paths for WASM compilation
+            let rust_env = if let Some(rust_config) = &config.toolchain.rust {
+                let rust_version = &rust_config.version;
+                match RustEnv::new(&base_path, rust_version) {
+                    Ok(env) => Some((env.cargo_home(), env.rustup_home())),
+                    Err(_) => {
+                        // Try to install if not available
+                        if let Ok(_) = ebdev_toolchain_rust::install_rust(rust_version, &base_path).await {
+                            RustEnv::new(&base_path, rust_version)
+                                .ok()
+                                .map(|env| (env.cargo_home(), env.rustup_home()))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
             if tui {
                 // Run with TUI visualization
-                return run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path).await;
+                return run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path, rust_env).await;
             } else {
                 // Run in headless mode with PTY support
-                return run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path).await;
+                return run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path, rust_env).await;
             }
         }
         // Handled earlier before config load
@@ -661,6 +681,7 @@ async fn run_task_with_tui(
     base_path: &PathBuf,
     debug_log: Option<std::path::PathBuf>,
     mutagen_path: Option<PathBuf>,
+    rust_env: Option<(PathBuf, PathBuf)>,
 ) -> anyhow::Result<ExitCode> {
     // Start TUI task runner in separate thread
     let (handle, tui_thread) = match ebdev_task_runner::run_with_tui(
@@ -685,7 +706,7 @@ async fn run_task_with_tui(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, rust_env).await;
 
     // Signal shutdown to TUI
     if let Err(e) = handle_for_shutdown.shutdown() {
@@ -716,6 +737,7 @@ async fn run_task_headless(
     base_path: &PathBuf,
     debug_log: Option<std::path::PathBuf>,
     mutagen_path: Option<PathBuf>,
+    rust_env: Option<(PathBuf, PathBuf)>,
 ) -> anyhow::Result<ExitCode> {
     // Start headless task runner in separate thread
     let (handle, runner_thread) = ebdev_task_runner::run_headless(
@@ -728,7 +750,7 @@ async fn run_task_headless(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, rust_env).await;
 
     // Signal shutdown
     let _ = handle_for_shutdown.shutdown();

@@ -18,6 +18,14 @@ pub struct TaskRunnerState {
     pub cwd: Option<String>,
 }
 
+/// State stored in Deno runtime for WASM compilation
+pub struct WasmCompilerState {
+    /// Project root directory (for resolving relative paths)
+    pub project_root: PathBuf,
+    /// Rust environment: (cargo_home, rustup_home)
+    pub rust_env: Option<(PathBuf, PathBuf)>,
+}
+
 /// State stored in Deno runtime for mutagen ops
 pub struct MutagenState {
     /// Path to the mutagen binary
@@ -71,6 +79,33 @@ pub struct DockerRunArgs {
     workdir: Option<String>,
     network: Option<String>,
     env: Option<HashMap<String, String>>,
+    name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WasmRemoteArgs {
+    container: String,
+    module_path: String,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+    name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WasmExecArgs {
+    module_path: String,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    cwd: Option<String>,
     name: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
@@ -195,6 +230,95 @@ pub async fn op_docker_run(
         workdir: args.workdir,
         network: args.network,
         env: args.env,
+        name: args.name,
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
+    };
+
+    execute_command(handle, command, args.ignore_error, display_name).await
+}
+
+#[op2(async)]
+#[serde]
+pub async fn op_wasm_remote(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: WasmRemoteArgs,
+) -> Result<ExecResult, JsErrorBox> {
+    let (handle, project_root, rust_env) = {
+        let state = state.borrow();
+        let runner_state = state.borrow::<TaskRunnerState>();
+        let wasm_state = state.borrow::<WasmCompilerState>();
+        (
+            runner_state.handle.clone(),
+            wasm_state.project_root.clone(),
+            wasm_state.rust_env.clone(),
+        )
+    };
+
+    // Resolve module path relative to project root
+    let module_path = project_root.join(&args.module_path);
+
+    // Compile or read WASM module
+    let module = crate::wasm_compiler::resolve_wasm_module(
+        &module_path,
+        rust_env.as_ref(),
+    )
+    .await
+    .map_err(|e| JsErrorBox::generic(e))?;
+
+    let display_name = args.name.clone().unwrap_or_else(|| {
+        format!("wasm:{} {}", args.container, args.module_path)
+    });
+
+    let command = Command::WasmRemote {
+        container: args.container,
+        module,
+        args: args.args.unwrap_or_default(),
+        env: args.env,
+        cwd: args.cwd,
+        name: args.name,
+        timeout: args.timeout.map(Duration::from_secs),
+        ignore_error: args.ignore_error,
+    };
+
+    execute_command(handle, command, args.ignore_error, display_name).await
+}
+
+#[op2(async)]
+#[serde]
+pub async fn op_wasm_exec(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: WasmExecArgs,
+) -> Result<ExecResult, JsErrorBox> {
+    let (handle, project_root, rust_env) = {
+        let state = state.borrow();
+        let runner_state = state.borrow::<TaskRunnerState>();
+        let wasm_state = state.borrow::<WasmCompilerState>();
+        (
+            runner_state.handle.clone(),
+            wasm_state.project_root.clone(),
+            wasm_state.rust_env.clone(),
+        )
+    };
+
+    let module_path = project_root.join(&args.module_path);
+
+    let module = crate::wasm_compiler::resolve_wasm_module(
+        &module_path,
+        rust_env.as_ref(),
+    )
+    .await
+    .map_err(|e| JsErrorBox::generic(e))?;
+
+    let display_name = args.name.clone().unwrap_or_else(|| {
+        format!("wasm:{}", args.module_path)
+    });
+
+    let command = Command::WasmExec {
+        module,
+        args: args.args.unwrap_or_default(),
+        env: args.env,
+        cwd: args.cwd,
         name: args.name,
         timeout: args.timeout.map(Duration::from_secs),
         ignore_error: args.ignore_error,
@@ -477,6 +601,18 @@ pub fn init_task_runner_state(
     state.put(TaskRunnerState { handle, cwd });
 }
 
+/// Initialize the WASM compiler state in OpState
+pub fn init_wasm_state(
+    state: &mut OpState,
+    project_root: PathBuf,
+    rust_env: Option<(PathBuf, PathBuf)>,
+) {
+    state.put(WasmCompilerState {
+        project_root,
+        rust_env,
+    });
+}
+
 /// Initialize the mutagen state in OpState
 pub fn init_mutagen_state(
     state: &mut OpState,
@@ -496,6 +632,8 @@ deno_core::extension!(
         op_shell,
         op_docker_exec,
         op_docker_run,
+        op_wasm_remote,
+        op_wasm_exec,
         op_parallel_begin,
         op_parallel_end,
         op_stage,
