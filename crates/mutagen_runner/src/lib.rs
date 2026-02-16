@@ -32,7 +32,7 @@ pub enum MutagenRunnerError {
 #[async_trait]
 pub trait MutagenBackend: Send + Sync {
     /// Listet alle aktuellen Mutagen-Sessions auf
-    async fn list_sessions(&self) -> Vec<MutagenSession>;
+    async fn list_sessions(&self) -> Result<Vec<MutagenSession>, MutagenRunnerError>;
 
     /// Erstellt eine neue Sync-Session aus einer DesiredSession
     async fn create_session_from_desired(
@@ -83,6 +83,9 @@ pub fn build_create_args(session: &state::DesiredSession, no_watch: bool) -> Vec
     };
     args.push(format!("--sync-mode={}", mode_str));
 
+    // Always exclude the .ebdev toolchain directory
+    args.push("--ignore=.ebdev".to_string());
+
     for pattern in &session.ignore {
         args.push(format!("--ignore={}", pattern));
     }
@@ -102,21 +105,27 @@ pub fn build_create_args(session: &state::DesiredSession, no_watch: bool) -> Vec
 
 #[async_trait]
 impl MutagenBackend for RealMutagen {
-    async fn list_sessions(&self) -> Vec<MutagenSession> {
+    async fn list_sessions(&self) -> Result<Vec<MutagenSession>, MutagenRunnerError> {
         let output = Command::new(&self.bin_path)
             .args(["sync", "list", "--template", "{{json .}}"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .await;
+            .await?;
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                serde_json::from_str(&stdout).unwrap_or_default()
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // "no sessions" is not an error, just means empty list
+            if stderr.contains("no sessions") || stderr.contains("unable to locate") {
+                return Ok(Vec::new());
             }
-            _ => Vec::new(),
+            return Err(MutagenRunnerError::CommandFailed(format!(
+                "Failed to list sessions: {}", stderr
+            )));
         }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(serde_json::from_str(&stdout).unwrap_or_default())
     }
 
     async fn create_session_from_desired(
@@ -220,13 +229,24 @@ pub async fn reconcile_sessions<F>(
 where
     F: FnMut(Vec<SessionStatusInfo>),
 {
+    // Validate binary exists before doing anything.
+    // If the binary is missing and we can't list/pause sessions,
+    // we must NOT proceed — existing sessions could sync empty state
+    // back to local and delete files.
+    if !mutagen_bin.exists() {
+        return Err(MutagenRunnerError::CommandFailed(format!(
+            "Mutagen binary not found at '{}'. Cannot safely manage sessions.",
+            mutagen_bin.display()
+        )));
+    }
+
     let backend = RealMutagen::new(mutagen_bin.to_path_buf());
     let desired = state::DesiredState::from_sessions(sessions, project_crc32);
+    let suffix = format!("{:08x}", project_crc32);
 
     // Empty sessions means cleanup all sessions for this project
     if desired.sessions.is_empty() {
-        let suffix = format!("{:08x}", project_crc32);
-        let current_sessions = backend.list_sessions().await;
+        let current_sessions = backend.list_sessions().await?;
         let project_sessions: Vec<_> = current_sessions
             .iter()
             .filter(|s| s.name.ends_with(&suffix))
@@ -248,10 +268,37 @@ where
         return Ok(());
     }
 
-    // Reconcile loop
+    // Run the reconcile loop, but on ANY error, pause all project sessions
+    // first to prevent data loss from syncing empty remote state.
+    match reconcile_loop(&backend, &desired, &suffix, project_crc32, &mut status_callback).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Safety: pause all project sessions before propagating error
+            eprintln!("[mutagen] Error during reconcile, pausing all sessions for safety: {}", e);
+            if let Ok(current_sessions) = backend.list_sessions().await {
+                for session in current_sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+                    let _ = backend.pause_session(&session.identifier).await;
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Internal reconcile loop, separated so errors can be caught and sessions paused.
+async fn reconcile_loop<F>(
+    backend: &RealMutagen,
+    desired: &state::DesiredState,
+    suffix: &str,
+    _project_crc32: u32,
+    status_callback: &mut F,
+) -> Result<(), MutagenRunnerError>
+where
+    F: FnMut(Vec<SessionStatusInfo>),
+{
     loop {
         // Get actual state
-        let current_sessions = backend.list_sessions().await;
+        let current_sessions = backend.list_sessions().await?;
         let actual = state::ActualState::from_mutagen_sessions(current_sessions.clone());
 
         // Build status info for callback
@@ -277,7 +324,6 @@ where
         }
 
         // Reconcile: Create missing sessions, terminate changed ones
-        let suffix = format!("{:08x}", project_crc32);
         for session in &desired.sessions {
             let prefix = format!("{}-", session.project_name);
 
@@ -285,7 +331,7 @@ where
             let existing: Vec<_> = actual
                 .sessions
                 .iter()
-                .filter(|s| s.name.starts_with(&prefix) && s.name.ends_with(&suffix))
+                .filter(|s| s.name.starts_with(&prefix) && s.name.ends_with(suffix))
                 .collect();
 
             let mut found_match = false;
@@ -386,8 +432,8 @@ pub mod test_utils {
 
     #[async_trait]
     impl MutagenBackend for MockMutagen {
-        async fn list_sessions(&self) -> Vec<MutagenSession> {
-            self.sessions.lock().unwrap().clone()
+        async fn list_sessions(&self) -> Result<Vec<MutagenSession>, MutagenRunnerError> {
+            Ok(self.sessions.lock().unwrap().clone())
         }
 
         async fn create_session_from_desired(
@@ -454,6 +500,6 @@ mod tests {
         let result = backend.terminate_session("mock-test-session").await;
         assert!(result.is_ok());
         assert_eq!(backend.terminated_sessions().len(), 1);
-        assert_eq!(backend.list_sessions().await.len(), 0);
+        assert_eq!(backend.list_sessions().await.unwrap().len(), 0);
     }
 }

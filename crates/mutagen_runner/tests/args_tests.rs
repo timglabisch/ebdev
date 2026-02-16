@@ -71,8 +71,10 @@ fn test_build_args_no_ignore_patterns() {
     let session = basic_session();
     let args = build_create_args(&session, false);
 
+    // .ebdev is always excluded by default
     let ignore_count = args.iter().filter(|a| a.starts_with("--ignore=")).count();
-    assert_eq!(ignore_count, 0);
+    assert_eq!(ignore_count, 1);
+    assert!(args.contains(&"--ignore=.ebdev".to_string()));
 }
 
 #[test]
@@ -226,6 +228,7 @@ fn test_build_args_argument_order() {
     assert_eq!(&args[0..2], &["sync", "create"]);
 
     // Alpha and beta paths should come before flags
+    // sync, create, alpha, beta, --name=..., then --sync-mode, --ignore=.ebdev, ...
     let first_flag_idx = args.iter().position(|a| a.starts_with("--")).unwrap();
-    assert_eq!(first_flag_idx, 4); // sync, create, alpha, beta, then flags
+    assert_eq!(first_flag_idx, 4);
 }

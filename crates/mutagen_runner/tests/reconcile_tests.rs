@@ -39,7 +39,7 @@ async fn test_reconcile_creates_missing_sessions() {
 
     // Simulate reconcile loop (one iteration)
     for session in &desired.sessions {
-        let existing = backend.list_sessions().await;
+        let existing = backend.list_sessions().await.unwrap();
         let found = existing.iter().any(|s| s.name == session.name);
         if !found {
             backend.create_session_from_desired(session, false).await.unwrap();
@@ -67,7 +67,7 @@ async fn test_reconcile_keeps_existing_sessions() {
 
     // Simulate reconcile
     for session in &desired.sessions {
-        let existing = backend.list_sessions().await;
+        let existing = backend.list_sessions().await.unwrap();
         let found = existing.iter().any(|s| s.name == session.name);
         if !found {
             backend.create_session_from_desired(session, false).await.unwrap();
@@ -76,7 +76,7 @@ async fn test_reconcile_keeps_existing_sessions() {
 
     // No new sessions should be created
     assert_eq!(backend.created_sessions().len(), 0);
-    assert_eq!(backend.list_sessions().await.len(), 1);
+    assert_eq!(backend.list_sessions().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn test_reconcile_terminates_changed_sessions() {
 
     // Simulate reconcile logic that terminates sessions with matching prefix/suffix
     // but different exact name (config changed)
-    let existing = backend.list_sessions().await;
+    let existing = backend.list_sessions().await.unwrap();
     for session in &desired.sessions {
         let prefix = format!("{}-", session.project_name);
 
@@ -138,7 +138,7 @@ async fn test_reconcile_empty_sessions_terminates_all() {
     backend.add_session(other);
 
     // Empty desired state = cleanup: pause first, then terminate
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     let project_sessions: Vec<_> = sessions
         .iter()
         .filter(|s| s.name.ends_with(&suffix))
@@ -163,7 +163,7 @@ async fn test_reconcile_empty_sessions_terminates_all() {
     assert!(terminated.contains(&"session-2".to_string()));
 
     // Other project session should remain
-    let remaining = backend.list_sessions().await;
+    let remaining = backend.list_sessions().await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].name, "other-aaaabbbb");
 }

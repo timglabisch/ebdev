@@ -206,6 +206,20 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<ExitCode> {
+    // Ensure our own binary is in PATH so child processes can find `ebdev`
+    // (e.g. when running ./bin/ebdev or from a non-standard location)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let mut paths = vec![exe_dir.to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(new_path) = std::env::join_paths(&paths) {
+                std::env::set_var("PATH", &new_path);
+            }
+        }
+    }
+
     let cli = Cli::parse();
 
     // RemoteBridge und Remote brauchen keine Config - direkt ausführen
@@ -253,6 +267,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             );
         }
     }
+
+    // From here on, all child processes should skip self-update
+    // (the parent already handled it above)
+    std::env::set_var("EBDEV_SKIP_SELF_UPDATE", "1");
 
     match cli.command {
         Commands::Toolchain { command } => match command {

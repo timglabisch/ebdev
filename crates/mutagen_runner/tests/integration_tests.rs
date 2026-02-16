@@ -93,7 +93,7 @@ fn remove_test_container(name: &str) {
 /// Helper to terminate all test sessions
 async fn cleanup_test_sessions(mutagen_bin: &PathBuf) {
     let backend = RealMutagen::new(mutagen_bin.clone());
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
 
     for session in sessions {
         if session.name.contains("test-") {
@@ -118,7 +118,7 @@ async fn test_real_backend_list_sessions() {
     };
 
     let backend = RealMutagen::new(mutagen_bin);
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
 
     // Should not panic, may be empty
     println!("Found {} sessions", sessions.len());
@@ -164,7 +164,7 @@ async fn test_real_backend_create_and_terminate() {
     assert!(result.is_ok(), "Failed to create session: {:?}", result);
 
     // Verify session exists
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     let found = sessions.iter().find(|s| s.name == "test-create-12345678");
     assert!(found.is_some(), "Session not found after creation");
 
@@ -174,7 +174,7 @@ async fn test_real_backend_create_and_terminate() {
     assert!(result.is_ok(), "Failed to terminate session: {:?}", result);
 
     // Verify session is gone
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     let found = sessions.iter().find(|s| s.name == "test-create-12345678");
     assert!(found.is_none(), "Session still exists after termination");
 
@@ -248,7 +248,7 @@ async fn test_real_reconcile_full_cycle() {
 
     // Verify sessions are terminated
     let backend = RealMutagen::new(mutagen_bin);
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     let found = sessions
         .iter()
         .find(|s| s.name.ends_with(&format!("{:08x}", project_crc32)));
@@ -306,7 +306,7 @@ async fn test_real_reconcile_recreates_changed_session() {
 
     let mut v1_id = String::new();
     for i in 0..10 {
-        let sessions = backend.list_sessions().await;
+        let sessions = backend.list_sessions().await.unwrap();
         println!("Attempt {}: Found {} sessions", i + 1, sessions.len());
         for s in &sessions {
             println!("  - {} ({})", s.name, s.identifier);
@@ -333,7 +333,7 @@ async fn test_real_reconcile_recreates_changed_session() {
     assert!(result.is_ok(), "Second reconcile failed: {:?}", result);
 
     // Verify old session was terminated and new one created
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     let old_exists = sessions.iter().any(|s| s.identifier == v1_id);
     assert!(!old_exists, "Old session should be terminated");
 
@@ -403,7 +403,7 @@ async fn test_real_sync_modes() {
     }
 
     // Verify all sessions created
-    let sessions = backend.list_sessions().await;
+    let sessions = backend.list_sessions().await.unwrap();
     assert!(sessions.iter().any(|s| s.name.contains("twoway")));
     assert!(sessions.iter().any(|s| s.name.contains("oneway-create")));
     assert!(sessions.iter().any(|s| s.name.contains("oneway-replica")));
