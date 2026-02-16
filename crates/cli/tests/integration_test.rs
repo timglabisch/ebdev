@@ -36,7 +36,7 @@ export default defineConfig({
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Development toolchain manager"));
+        .stdout(predicate::str::contains("Development environment tool"));
 
     ebdev()
         .current_dir(temp_dir.path())

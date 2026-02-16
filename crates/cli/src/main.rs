@@ -15,7 +15,7 @@ use ebdev_toolchain_rust::RustEnv;
 const EMBEDDED_LINUX_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ebdev-bridge-linux"));
 
 #[derive(Parser)]
-#[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "Development toolchain manager")]
+#[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "Development environment tool")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

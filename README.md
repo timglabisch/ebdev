@@ -1,6 +1,6 @@
 # ebdev
 
-Development toolchain manager. Manages Node.js, pnpm, Rust, Mutagen, runs tasks in containers, and keeps itself up to date.
+Development environment tool. Manages pinned, project-local toolchains (Node.js, pnpm, Rust, Mutagen), runs TypeScript-defined tasks with an interactive TUI, executes commands in Docker containers via an embedded bridge binary, and keeps itself up to date.
 
 ## Quick Start
 
