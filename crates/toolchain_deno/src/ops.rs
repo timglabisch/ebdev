@@ -434,6 +434,33 @@ pub async fn op_mutagen_reconcile(
     Ok(())
 }
 
+#[op2(async)]
+pub async fn op_mutagen_pause_all(
+    state: Rc<RefCell<OpState>>,
+) -> Result<u32, JsErrorBox> {
+    let (mutagen_path, config_path) = {
+        let state = state.borrow();
+        let mutagen_state = state.try_borrow::<MutagenState>().ok_or_else(|| {
+            JsErrorBox::generic("Mutagen not configured. Ensure mutagen is in toolchain config.")
+        })?;
+
+        let mutagen_path = mutagen_state.mutagen_path.clone().ok_or_else(|| {
+            JsErrorBox::generic("Mutagen binary not found. Ensure mutagen is in toolchain config.")
+        })?;
+
+        (mutagen_path, mutagen_state.config_path.clone())
+    };
+
+    let path_str = config_path.to_string_lossy();
+    let project_crc32 = crc32fast::hash(path_str.as_bytes());
+
+    let paused = ebdev_mutagen_runner::pause_project_sessions(&mutagen_path, project_crc32)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    Ok(paused as u32)
+}
+
 // =============================================================================
 // Command Execution
 // =============================================================================
@@ -513,5 +540,6 @@ deno_core::extension!(
         op_poll_task_trigger,
         op_log,
         op_mutagen_reconcile,
+        op_mutagen_pause_all,
     ],
 );

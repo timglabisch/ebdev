@@ -481,4 +481,15 @@ declare module "ebdev" {
     sessions: MutagenSession[],
     options?: MutagenReconcileOptions
   ): Promise<void>;
+
+  /**
+   * Pause all mutagen sessions belonging to this project.
+   *
+   * Call this before any operation that might destroy Docker containers/volumes
+   * to prevent mutagen from syncing empty remote state back to local (data loss).
+   * Sessions can be resumed later by calling `mutagenReconcile()` with the desired sessions.
+   *
+   * @returns Number of sessions paused
+   */
+  export function mutagenPauseAll(): Promise<number>;
 }

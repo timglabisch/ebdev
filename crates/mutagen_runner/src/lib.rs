@@ -46,6 +46,9 @@ pub trait MutagenBackend: Send + Sync {
 
     /// Pausiert eine Session (stoppt Sync sofort)
     async fn pause_session(&self, session_id: &str) -> Result<(), MutagenRunnerError>;
+
+    /// Setzt eine pausierte Session fort
+    async fn resume_session(&self, session_id: &str) -> Result<(), MutagenRunnerError>;
 }
 
 // ============================================================================
@@ -194,6 +197,27 @@ impl MutagenBackend for RealMutagen {
 
         Ok(())
     }
+
+    async fn resume_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
+        let output = Command::new(&self.bin_path)
+            .args(["sync", "resume", session_id])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("no sessions") && !stderr.contains("not found") {
+                return Err(MutagenRunnerError::CommandFailed(format!(
+                    "Failed to resume session {}: {}",
+                    session_id, stderr
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -205,6 +229,33 @@ impl MutagenBackend for RealMutagen {
 pub struct SessionStatusInfo {
     pub name: String,
     pub status: String,
+}
+
+/// Pauses all mutagen sessions belonging to a project.
+///
+/// This is a safety function that can be called independently of reconcile,
+/// e.g. on SIGINT or before any Docker operations that might remove volumes.
+/// Sessions are identified by their CRC32 suffix in the session name.
+pub async fn pause_project_sessions(
+    mutagen_bin: &Path,
+    project_crc32: u32,
+) -> Result<usize, MutagenRunnerError> {
+    if !mutagen_bin.exists() {
+        return Ok(0);
+    }
+
+    let backend = RealMutagen::new(mutagen_bin.to_path_buf());
+    let suffix = format!("{:08x}", project_crc32);
+
+    let sessions = backend.list_sessions().await?;
+    let mut paused = 0;
+    for session in sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+        if backend.pause_session(&session.identifier).await.is_ok() {
+            paused += 1;
+        }
+    }
+
+    Ok(paused)
 }
 
 /// Reconciles mutagen sessions to the desired state.
@@ -266,6 +317,20 @@ where
 
         status_callback(vec![]);
         return Ok(());
+    }
+
+    // SAFETY: Pause ALL existing project sessions immediately.
+    // This prevents data loss when:
+    // - Process was interrupted (Ctrl+C) and restarted: old sessions may still
+    //   be running while Docker containers are being recreated
+    // - Docker containers are recreated: sessions might briefly see empty remote
+    //   state and sync deletions back to local
+    // Sessions that match the desired state will be resumed in the reconcile loop.
+    {
+        let current_sessions = backend.list_sessions().await?;
+        for session in current_sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+            let _ = backend.pause_session(&session.identifier).await;
+        }
     }
 
     // Run the reconcile loop, but on ANY error, pause all project sessions
@@ -337,11 +402,11 @@ where
             let mut found_match = false;
             for existing_session in &existing {
                 if existing_session.name == session.name {
-                    // Perfect match - keep it
+                    // Perfect match - resume it (was paused at start for safety)
                     found_match = true;
+                    let _ = backend.resume_session(&existing_session.identifier).await;
                 } else {
-                    // Config changed - pause then terminate old session
-                    let _ = backend.pause_session(&existing_session.identifier).await;
+                    // Config changed - terminate old session (already paused at start)
                     let _ = backend.terminate_session(&existing_session.identifier).await;
                 }
             }
@@ -460,6 +525,12 @@ pub mod test_utils {
 
         async fn pause_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
             self.pause_calls.lock().unwrap().push(session_id.to_string());
+            Ok(())
+        }
+
+        async fn resume_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
+            // Mock: just track the call, no actual effect needed for tests
+            let _ = session_id;
             Ok(())
         }
     }

@@ -201,7 +201,7 @@ await log("message");  // preferred over console.log for TUI compatibility
 ### Mutagen Sync
 
 ```typescript
-import { mutagenReconcile, MutagenSession } from "ebdev";
+import { mutagenReconcile, mutagenPauseAll, MutagenSession } from "ebdev";
 
 const sessions: MutagenSession[] = [
   {
@@ -218,7 +218,27 @@ await mutagenReconcile(sessions);
 
 // Terminate all sessions (cleanup)
 await mutagenReconcile([]);
+
+// Pause all project sessions (returns number of sessions paused)
+await mutagenPauseAll();
 ```
+
+#### Safe shutdown pattern
+
+Always pause mutagen sessions **before** removing Docker containers/volumes.
+Otherwise mutagen may see empty remote endpoints and sync deletions back to local.
+
+```typescript
+export async function down() {
+  await mutagenPauseAll();                                          // 1. stop syncing
+  await shell("docker compose down --volumes --remove-orphans");    // 2. safe to remove
+  await mutagenReconcile([]);                                       // 3. clean up sessions
+}
+```
+
+`mutagenReconcile(sessions)` automatically resumes previously paused sessions that
+match the desired state, so calling `mutagenPauseAll()` before `mutagenReconcile(sessions)`
+is always safe (e.g. on restart after Ctrl+C).
 
 ## Self-Update
 

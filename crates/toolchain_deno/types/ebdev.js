@@ -564,3 +564,21 @@ export async function mutagenReconcile(sessions, options = {}) {
     project: options.project,
   });
 }
+
+/**
+ * Pause all mutagen sessions belonging to this project.
+ *
+ * Call this before any operation that might destroy Docker containers/volumes
+ * to prevent mutagen from syncing empty remote state back to local (data loss).
+ * Sessions can be resumed later by calling mutagenReconcile() with the desired sessions.
+ *
+ * @returns {Promise<number>} Number of sessions paused
+ *
+ * @example
+ * await mutagenPauseAll();
+ * await shell("docker compose down --volumes");
+ * await mutagenReconcile([]);
+ */
+export async function mutagenPauseAll() {
+  return await Deno.core.ops.op_mutagen_pause_all();
+}

@@ -63,6 +63,7 @@ pub trait TaskRunnerUI {
 /// Headless UI - leitet Output direkt an stdout weiter
 pub struct HeadlessUI {
     current_task: Option<(CommandId, String)>,
+    task_starts: std::collections::HashMap<CommandId, (String, std::time::Instant)>,
     current_stage: Option<String>,
     in_parallel: bool,
 }
@@ -71,6 +72,7 @@ impl HeadlessUI {
     pub fn new() -> Self {
         Self {
             current_task: None,
+            task_starts: std::collections::HashMap::new(),
             current_stage: None,
             in_parallel: false,
         }
@@ -86,24 +88,33 @@ impl Default for HeadlessUI {
 impl TaskRunnerUI for HeadlessUI {
     fn on_task_start(&mut self, id: CommandId, name: &str) {
         self.current_task = Some((id, name.to_string()));
+        self.task_starts.insert(id, (name.to_string(), std::time::Instant::now()));
         if self.in_parallel {
-            println!("[{}] Starting: {}", id, name);
+            println!("\x1b[1;34m▶ [{}] {}\x1b[0m", id, name);
+        } else {
+            println!("\x1b[1;34m▶ {}\x1b[0m", name);
         }
     }
 
     fn on_task_output(&mut self, _id: CommandId, output: &[u8]) {
-        // Direkt an stdout weiterleiten
         let _ = io::stdout().write_all(output);
         let _ = io::stdout().flush();
     }
 
     fn on_task_complete(&mut self, id: CommandId, result: &CommandResult) {
-        if self.in_parallel {
-            if result.success {
-                println!("[{}] Completed (exit code {})", id, result.exit_code);
+        let (name, duration) = self.task_starts.remove(&id)
+            .map(|(n, t)| (n, t.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| ("?".to_string(), 0.0));
+        if result.success {
+            if self.in_parallel {
+                println!("\x1b[1;32m✓ [{}] {} ({:.1}s)\x1b[0m", id, name, duration);
             } else {
-                eprintln!("[{}] Failed (exit code {})", id, result.exit_code);
+                println!("\x1b[1;32m✓ {} ({:.1}s)\x1b[0m", name, duration);
             }
+        } else if self.in_parallel {
+            eprintln!("\x1b[1;31m✗ [{}] {} failed (exit code {}, {:.1}s)\x1b[0m", id, name, result.exit_code, duration);
+        } else {
+            eprintln!("\x1b[1;31m✗ {} failed (exit code {}, {:.1}s)\x1b[0m", name, result.exit_code, duration);
         }
         if self.current_task.as_ref().map(|(i, _)| *i) == Some(id) {
             self.current_task = None;
@@ -111,7 +122,14 @@ impl TaskRunnerUI for HeadlessUI {
     }
 
     fn on_task_error(&mut self, id: CommandId, error: &str) {
-        eprintln!("[{}] Error: {}", id, error);
+        let name = self.task_starts.remove(&id)
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| "?".to_string());
+        if self.in_parallel {
+            eprintln!("\x1b[1;31m✗ [{}] {} error: {}\x1b[0m", id, name, error);
+        } else {
+            eprintln!("\x1b[1;31m✗ {} error: {}\x1b[0m", name, error);
+        }
         if self.current_task.as_ref().map(|(i, _)| *i) == Some(id) {
             self.current_task = None;
         }
@@ -242,6 +260,17 @@ impl CollapsedStage {
             success,
             failed_count,
         }
+    }
+}
+
+/// Format byte count for human display
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
     }
 }
 
@@ -698,24 +727,51 @@ impl TuiUI {
 
     fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_offset: u16) {
         let text = task.screen_text();
-        let content_height = text.lines.len();
-        let visible_height = area.height.saturating_sub(2) as usize;
 
-        let max_scroll = content_height.saturating_sub(visible_height);
-        let scroll = (scroll_offset as usize).min(max_scroll);
-
-        let visible_lines: Vec<Line> = text.lines
-            .into_iter()
-            .skip(scroll)
-            .take(visible_height)
-            .collect();
-
-        let title = format!(" Output: {} ", task.name);
         let border_style = match &task.state {
             TaskState::Running => Style::default().fg(Color::Yellow),
             TaskState::Completed { exit_code, .. } if *exit_code == 0 => Style::default().fg(Color::Green),
             TaskState::Completed { .. } | TaskState::Failed { .. } => Style::default().fg(Color::Red),
         };
+
+        // If the task name fits in the border title, show it there.
+        // Otherwise show a truncated title and prepend the full name as content lines.
+        let inner_width = area.width.saturating_sub(2) as usize; // borders
+        let title_text = format!(" {} ", task.name);
+        let title_fits = title_text.len() <= inner_width;
+
+        let mut all_lines: Vec<Line> = Vec::new();
+        let title = if title_fits {
+            title_text
+        } else {
+            // Wrap full command name into content lines at the top
+            let name = &task.name;
+            let mut pos = 0;
+            while pos < name.len() {
+                let end = (pos + inner_width).min(name.len());
+                all_lines.push(Line::from(Span::styled(
+                    &name[pos..end],
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                pos = end;
+            }
+            all_lines.push(Line::from(""));
+            " … ".to_string()
+        };
+
+        all_lines.extend(text.lines);
+
+        let content_height = all_lines.len();
+        let visible_height = area.height.saturating_sub(2) as usize;
+
+        let max_scroll = content_height.saturating_sub(visible_height);
+        let scroll = (scroll_offset as usize).min(max_scroll);
+
+        let visible_lines: Vec<Line> = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(visible_height)
+            .collect();
 
         let output = Paragraph::new(visible_lines).block(
             Block::default()
@@ -1012,6 +1068,36 @@ impl TaskRunnerUI for TuiUI {
             disable_raw_mode()?;
             self.terminal = None;
         }
+
+        // Print output of failed tasks so the user can see what went wrong
+        for task in &self.tasks {
+            if !task.state.is_failed() {
+                continue;
+            }
+
+            let raw = task.raw_output.lock().unwrap_or_else(|e| e.into_inner());
+            if raw.is_empty() {
+                continue;
+            }
+
+            // Print header
+            let duration = task.state.duration().map(|d| format!(" ({:.1}s)", d.as_secs_f64())).unwrap_or_default();
+            eprintln!("\n\x1b[1;31m--- Failed: {}{} ---\x1b[0m", task.name, duration);
+
+            // Print last portion of output (max ~8KB to avoid flooding terminal)
+            let output = if raw.len() > 8192 {
+                eprintln!("  (showing last 8KB of {} total)\n", format_bytes(raw.len()));
+                &raw[raw.len() - 8192..]
+            } else {
+                &raw
+            };
+
+            // Write raw output (preserves ANSI colors)
+            let _ = io::stderr().write_all(output);
+            let _ = io::stderr().flush();
+            eprintln!("\n\x1b[1;31m--- End: {} ---\x1b[0m", task.name);
+        }
+
         Ok(())
     }
 }
