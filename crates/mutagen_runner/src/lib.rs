@@ -43,6 +43,9 @@ pub trait MutagenBackend: Send + Sync {
 
     /// Terminiert eine Session anhand ihrer ID
     async fn terminate_session(&self, session_id: &str) -> Result<(), MutagenRunnerError>;
+
+    /// Pausiert eine Session (stoppt Sync sofort)
+    async fn pause_session(&self, session_id: &str) -> Result<(), MutagenRunnerError>;
 }
 
 // ============================================================================
@@ -161,6 +164,27 @@ impl MutagenBackend for RealMutagen {
 
         Ok(())
     }
+
+    async fn pause_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
+        let output = Command::new(&self.bin_path)
+            .args(["sync", "pause", session_id])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("no sessions") && !stderr.contains("not found") {
+                return Err(MutagenRunnerError::CommandFailed(format!(
+                    "Failed to pause session {}: {}",
+                    session_id, stderr
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -201,14 +225,25 @@ where
 
     // Empty sessions means cleanup all sessions for this project
     if desired.sessions.is_empty() {
-        // Find and terminate all sessions with this project's CRC32 suffix
         let suffix = format!("{:08x}", project_crc32);
         let current_sessions = backend.list_sessions().await;
-        for session in current_sessions {
-            if session.name.ends_with(&suffix) {
-                let _ = backend.terminate_session(&session.identifier).await;
-            }
+        let project_sessions: Vec<_> = current_sessions
+            .iter()
+            .filter(|s| s.name.ends_with(&suffix))
+            .collect();
+
+        // First: pause all sessions to stop syncing immediately.
+        // This prevents mutagen from syncing empty state back to local
+        // when containers/volumes are already gone.
+        for session in &project_sessions {
+            let _ = backend.pause_session(&session.identifier).await;
         }
+
+        // Then: terminate all paused sessions
+        for session in &project_sessions {
+            let _ = backend.terminate_session(&session.identifier).await;
+        }
+
         status_callback(vec![]);
         return Ok(());
     }
@@ -259,7 +294,8 @@ where
                     // Perfect match - keep it
                     found_match = true;
                 } else {
-                    // Config changed - terminate old session
+                    // Config changed - pause then terminate old session
+                    let _ = backend.pause_session(&existing_session.identifier).await;
                     let _ = backend.terminate_session(&existing_session.identifier).await;
                 }
             }
@@ -292,6 +328,7 @@ pub mod test_utils {
         sessions: Mutex<Vec<MutagenSession>>,
         create_calls: Mutex<Vec<(String, bool)>>,
         terminate_calls: Mutex<Vec<String>>,
+        pause_calls: Mutex<Vec<String>>,
     }
 
     impl MockMutagen {
@@ -312,6 +349,11 @@ pub mod test_utils {
         /// Prüft welche Sessions terminiert wurden
         pub fn terminated_sessions(&self) -> Vec<String> {
             self.terminate_calls.lock().unwrap().clone()
+        }
+
+        /// Prüft welche Sessions pausiert wurden
+        pub fn paused_sessions(&self) -> Vec<String> {
+            self.pause_calls.lock().unwrap().clone()
         }
     }
 
@@ -367,6 +409,11 @@ pub mod test_utils {
             self.terminate_calls.lock().unwrap().push(session_id.to_string());
             // Remove the session from the list
             self.sessions.lock().unwrap().retain(|s| s.identifier != session_id);
+            Ok(())
+        }
+
+        async fn pause_session(&self, session_id: &str) -> Result<(), MutagenRunnerError> {
+            self.pause_calls.lock().unwrap().push(session_id.to_string());
             Ok(())
         }
     }

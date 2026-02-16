@@ -20,12 +20,13 @@ pub enum BackendEvent {
 /// Execution Backend - verwaltet Command-Ausführung
 pub struct ExecutionBackend {
     runtime: Runtime,
+    embedded_linux_binary: &'static [u8],
 }
 
 impl ExecutionBackend {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(embedded_linux_binary: &'static [u8]) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-        Ok(Self { runtime })
+        Ok(Self { runtime, embedded_linux_binary })
     }
 
     /// Führt einen Command aus und sendet Events über den Callback
@@ -170,8 +171,9 @@ impl ExecutionBackend {
 
         // Connect to container via bridge and execute
         let container = container.to_string();
+        let embedded_binary = self.embedded_linux_binary;
         self.runtime.block_on(async {
-            let mut executor = match RemoteExecutor::connect(&container).await {
+            let mut executor = match RemoteExecutor::connect_with_embedded(&container, embedded_binary).await {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = event_tx.send(BackendEvent::Error(format!("Failed to connect to container: {}", e)));
@@ -365,8 +367,3 @@ impl ExecutionBackend {
     }
 }
 
-impl Default for ExecutionBackend {
-    fn default() -> Self {
-        Self::new().expect("Failed to create ExecutionBackend")
-    }
-}

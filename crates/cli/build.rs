@@ -40,7 +40,15 @@ fn main() {
     }
 
     if !found {
-        // Create empty placeholder - runtime will fall back to file loading
+        // In debug builds, create empty placeholder (docker exec won't work but local tasks will)
+        // In release builds, fail - the binary must be built via 'make build-linux' first
+        if env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "Linux bridge binary not found. Run 'make build-linux' before 'cargo build --release'.\n\
+                 Searched: {:?}",
+                source_paths
+            );
+        }
         fs::write(&dest_path, b"").expect("Failed to create placeholder");
     }
 

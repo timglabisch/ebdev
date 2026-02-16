@@ -691,6 +691,7 @@ async fn run_task_with_tui(
         task_name.to_string(),
         Some(base_path.to_string_lossy().to_string()),
         debug_log,
+        EMBEDDED_LINUX_BINARY,
     ) {
         Ok(r) => r,
         Err(ebdev_task_runner::TaskRunnerError::NotATty) => {
@@ -745,6 +746,7 @@ async fn run_task_headless(
     let (handle, runner_thread) = ebdev_task_runner::run_headless(
         Some(base_path.to_string_lossy().to_string()),
         debug_log,
+        EMBEDDED_LINUX_BINARY,
     );
 
     let handle_for_shutdown = handle.clone();

@@ -137,13 +137,25 @@ async fn test_reconcile_empty_sessions_terminates_all() {
     other.identifier = "other-session".to_string();
     backend.add_session(other);
 
-    // Empty desired state = cleanup
+    // Empty desired state = cleanup: pause first, then terminate
     let sessions = backend.list_sessions().await;
-    for session in sessions {
-        if session.name.ends_with(&suffix) {
-            backend.terminate_session(&session.identifier).await.unwrap();
-        }
+    let project_sessions: Vec<_> = sessions
+        .iter()
+        .filter(|s| s.name.ends_with(&suffix))
+        .collect();
+
+    for session in &project_sessions {
+        backend.pause_session(&session.identifier).await.unwrap();
     }
+    for session in &project_sessions {
+        backend.terminate_session(&session.identifier).await.unwrap();
+    }
+
+    // Sessions must be paused before termination to prevent sync of empty state
+    let paused = backend.paused_sessions();
+    assert_eq!(paused.len(), 2);
+    assert!(paused.contains(&"session-1".to_string()));
+    assert!(paused.contains(&"session-2".to_string()));
 
     let terminated = backend.terminated_sessions();
     assert_eq!(terminated.len(), 2);

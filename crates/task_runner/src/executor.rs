@@ -82,9 +82,10 @@ impl Executor {
         rx: mpsc::UnboundedReceiver<ExecutorMessage>,
         default_cwd: Option<String>,
         tui_event_tx: mpsc::UnboundedSender<TuiEvent>,
+        embedded_linux_binary: &'static [u8],
     ) -> Self {
         let (pty_tx, pty_rx) = std_mpsc::channel();
-        let backend = ExecutionBackend::new().expect("Failed to create ExecutionBackend");
+        let backend = ExecutionBackend::new(embedded_linux_binary).expect("Failed to create ExecutionBackend");
         Self {
             rx,
             pty_rx,

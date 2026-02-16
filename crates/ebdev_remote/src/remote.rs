@@ -8,7 +8,6 @@ use crate::{
     decode_message, encode_message, ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor,
     ExecutorError, Request, Response, MAGIC, PROTOCOL_VERSION,
 };
-use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
@@ -36,22 +35,15 @@ impl RemoteExecutor {
         &self.container
     }
 
-    /// Verbindet sich zu einem Docker-Container
-    ///
-    /// Kopiert die Bridge-Binary falls nötig und startet sie.
-    /// Verwendet `find_linux_binary()` um die Binary zu finden.
-    pub async fn connect(container: &str) -> Result<Self, ExecutorError> {
-        Self::connect_internal(container, None).await
-    }
-
     /// Verbindet sich zu einem Docker-Container mit eingebetteter Binary
     ///
     /// Verwendet die übergebene Binary statt sie aus dem Dateisystem zu laden.
     /// Die Binary wird direkt via stdin in den Container gepiped.
     pub async fn connect_with_embedded(container: &str, embedded_binary: &[u8]) -> Result<Self, ExecutorError> {
         if embedded_binary.is_empty() {
-            // Fallback to file-based if embedded is empty
-            return Self::connect(container).await;
+            return Err(ExecutorError::Spawn(
+                "No embedded Linux bridge binary. Build with 'make build' to include it.".into(),
+            ));
         }
         Self::connect_internal(container, Some(embedded_binary)).await
     }
@@ -88,9 +80,12 @@ impl RemoteExecutor {
             }
         }
 
-        // Copy binary to container - prefer embedded, fall back to file
-        if let Some(binary_data) = embedded_binary {
-            // Use embedded binary - pipe directly via stdin
+        // Copy embedded binary to container via stdin
+        let binary_data = embedded_binary.ok_or_else(|| {
+            ExecutorError::Spawn("No embedded Linux bridge binary provided".into())
+        })?;
+
+        {
             use std::process::Stdio;
 
             let mut child = Command::new("docker")
@@ -110,33 +105,6 @@ impl RemoteExecutor {
             let status = child.wait().await.map_err(ExecutorError::Io)?;
             if !status.success() {
                 return Err(ExecutorError::Spawn("Failed to copy embedded binary to container".into()));
-            }
-        } else {
-            // Fall back to file-based copy
-            let binary_path = find_linux_binary()?;
-            let cp_status = Command::new("docker")
-                .args([
-                    "cp",
-                    &binary_path.to_string_lossy(),
-                    &format!("{}:{}", container, container_binary_path),
-                ])
-                .status()
-                .await
-                .map_err(ExecutorError::Io)?;
-
-            if !cp_status.success() {
-                return Err(ExecutorError::Spawn("Failed to copy binary to container".into()));
-            }
-
-            // Make executable
-            let chmod_status = Command::new("docker")
-                .args(["exec", container, "chmod", "+x", container_binary_path])
-                .status()
-                .await
-                .map_err(ExecutorError::Io)?;
-
-            if !chmod_status.success() {
-                return Err(ExecutorError::Spawn("Failed to make binary executable".into()));
             }
         }
 
@@ -420,30 +388,4 @@ impl Executor for RemoteExecutor {
             kill_tx: Some(kill_tx),
         })
     }
-}
-
-/// Find the Linux bridge binary (built via make build-linux)
-pub fn find_linux_binary() -> Result<PathBuf, ExecutorError> {
-    // Look in target/linux relative to current dir or executable
-    let candidates = [
-        PathBuf::from("target/linux/ebdev-bridge"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("../linux/ebdev-bridge")))
-            .unwrap_or_default(),
-        // Also check relative to workspace root
-        PathBuf::from(".rust_apps/ebdev/target/linux/ebdev-bridge"),
-    ];
-
-    for path in candidates {
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err(ExecutorError::Spawn(
-        "Linux bridge binary not found. Run 'make build-linux' first.\n\
-         Expected at: target/linux/ebdev-bridge"
-            .into(),
-    ))
 }

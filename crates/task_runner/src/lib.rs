@@ -148,6 +148,7 @@ pub fn run_with_tui(
     task_name: String,
     default_cwd: Option<String>,
     debug_log: Option<PathBuf>,
+    embedded_linux_binary: &'static [u8],
 ) -> Result<(TaskRunnerHandle, std::thread::JoinHandle<std::io::Result<()>>), TaskRunnerError> {
     use std::io::IsTerminal;
 
@@ -162,7 +163,7 @@ pub fn run_with_tui(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     let thread_handle = std::thread::spawn(move || {
-        let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
+        let mut executor = Executor::new(rx, default_cwd, tui_event_tx, embedded_linux_binary);
         if let Some(log_path) = debug_log {
             executor = executor.with_debug_log(log_path);
         }
@@ -192,11 +193,12 @@ pub fn run_with_tui(
 pub fn run_headless(
     default_cwd: Option<String>,
     debug_log: Option<PathBuf>,
+    embedded_linux_binary: &'static [u8],
 ) -> (TaskRunnerHandle, std::thread::JoinHandle<std::io::Result<()>>) {
     let (handle, rx, tui_event_tx) = create_task_runner();
 
     let thread_handle = std::thread::spawn(move || {
-        let mut executor = Executor::new(rx, default_cwd, tui_event_tx);
+        let mut executor = Executor::new(rx, default_cwd, tui_event_tx, embedded_linux_binary);
         if let Some(log_path) = debug_log {
             executor = executor.with_debug_log(log_path);
         }
@@ -213,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_headless_echo() {
-        let (handle, _thread) = run_headless(None, None);
+        let (handle, _thread) = run_headless(None, None, b"");
 
         let result = handle.execute(Command::Exec {
             cmd: vec!["echo".into(), "hello".into()],
@@ -234,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_headless_parallel() {
-        let (handle, _thread) = run_headless(None, None);
+        let (handle, _thread) = run_headless(None, None, b"");
 
         handle.parallel_begin(2).unwrap();
 
