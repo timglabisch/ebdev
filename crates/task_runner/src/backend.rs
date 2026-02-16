@@ -6,6 +6,7 @@
 use crate::command::{Command, CommandResult};
 use ebdev_remote::{ExecuteEvent, ExecuteOptions, Executor, LocalExecutor, PtyConfig, RemoteExecutor};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -19,21 +20,21 @@ pub enum BackendEvent {
 
 /// Execution Backend - verwaltet Command-Ausführung
 pub struct ExecutionBackend {
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     embedded_linux_binary: &'static [u8],
 }
 
 impl ExecutionBackend {
     pub fn new(embedded_linux_binary: &'static [u8]) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-        Ok(Self { runtime, embedded_linux_binary })
+        Ok(Self { runtime: Arc::new(runtime), embedded_linux_binary })
     }
 
     /// Führt einen Command aus und sendet Events über den Callback
     ///
     /// Diese Methode blockiert bis der Command beendet ist.
     pub fn execute(
-        &mut self,
+        &self,
         command: &Command,
         default_cwd: Option<&str>,
         rows: u16,
@@ -101,7 +102,7 @@ impl ExecutionBackend {
 
     /// Führt einen lokalen Befehl aus
     fn execute_local(
-        &mut self,
+        &self,
         program: &str,
         args: &[String],
         cwd: Option<&str>,
@@ -126,7 +127,7 @@ impl ExecutionBackend {
 
     /// Führt einen Befehl in einem Docker-Container aus (über Bridge)
     fn execute_docker_exec(
-        &mut self,
+        &self,
         container: &str,
         cmd: &[String],
         user: Option<&str>,
@@ -238,7 +239,7 @@ impl ExecutionBackend {
 
     /// Führt docker run aus
     fn execute_docker_run(
-        &mut self,
+        &self,
         image: &str,
         cmd: &[String],
         volumes: Option<&Vec<String>>,
@@ -298,7 +299,7 @@ impl ExecutionBackend {
 
     /// Führt einen Executor aus und sendet Events
     fn run_executor<E: Executor + Send + 'static>(
-        &mut self,
+        &self,
         executor: &mut E,
         options: ExecuteOptions,
         timeout: Duration,

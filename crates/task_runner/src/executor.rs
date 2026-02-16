@@ -74,7 +74,7 @@ pub struct Executor {
     /// Optional debug logger
     debug_logger: Option<DebugLogger>,
     /// Execution backend (shared across threads via Arc)
-    backend: std::sync::Arc<std::sync::Mutex<ExecutionBackend>>,
+    backend: std::sync::Arc<ExecutionBackend>,
 }
 
 impl Executor {
@@ -97,7 +97,7 @@ impl Executor {
             tui_event_tx,
             registered_tasks: Vec::new(),
             debug_logger: None,
-            backend: std::sync::Arc::new(std::sync::Mutex::new(backend)),
+            backend: std::sync::Arc::new(backend),
         }
     }
 
@@ -311,8 +311,7 @@ impl Executor {
             });
 
             // Führe Command aus
-            let mut backend_guard = backend.lock().unwrap();
-            let result = backend_guard.execute(
+            let result = backend.execute(
                 &command,
                 default_cwd.as_deref(),
                 rows,
@@ -322,7 +321,6 @@ impl Executor {
             );
 
             // Warte auf Event-Forwarder
-            drop(backend_guard);
             let _ = forward_handle.join();
 
             // Falls execute() einen Fehler zurückgab (sollte nicht passieren, da Completed/Error gesendet wird)

@@ -235,6 +235,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_parallel_actually_concurrent() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        handle.parallel_begin(2).unwrap();
+
+        let start = std::time::Instant::now();
+
+        let r1 = handle.execute(Command::Shell {
+            script: "sleep 0.5".into(),
+            cwd: None,
+            env: None,
+            name: Some("Sleep 1".into()),
+            timeout: None,
+            ignore_error: false,
+        });
+
+        let r2 = handle.execute(Command::Shell {
+            script: "sleep 0.5".into(),
+            cwd: None,
+            env: None,
+            name: Some("Sleep 2".into()),
+            timeout: None,
+            ignore_error: false,
+        });
+
+        let (result1, result2) = tokio::join!(r1, r2);
+        let elapsed = start.elapsed();
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert!(result1.unwrap().success);
+        assert!(result2.unwrap().success);
+
+        // If parallel: ~0.5s. If serialized: ~1.0s. Assert < 0.9s.
+        assert!(
+            elapsed.as_secs_f64() < 0.9,
+            "Parallel tasks took {:.2}s, expected < 0.9s (tasks are serialized!)",
+            elapsed.as_secs_f64()
+        );
+
+        handle.parallel_end().unwrap();
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
     async fn test_headless_parallel() {
         let (handle, _thread) = run_headless(None, None, b"");
 
