@@ -425,6 +425,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             if let Some(ref env) = rust_env {
                 cmd.env("RUSTUP_HOME", env.rustup_home());
                 cmd.env("CARGO_HOME", env.cargo_home());
+                cmd.env("RUSTUP_TOOLCHAIN", env.version());
             }
 
             let status = cmd.status().await
