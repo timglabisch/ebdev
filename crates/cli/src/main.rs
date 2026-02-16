@@ -227,17 +227,30 @@ async fn run() -> anyhow::Result<ExitCode> {
     // Self-update check (skip if env var set to prevent loop)
     if std::env::var("EBDEV_SKIP_SELF_UPDATE").is_err() {
         let desired = &config.toolchain.ebdev.version;
-        let current = env!("CARGO_PKG_VERSION");
+        let current = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        // Strip leading 'v' prefix for comparison (git describe produces "v0.0.5")
+        let current = current.strip_prefix('v').unwrap_or(current);
         if desired != current {
-            let new_binary = ebdev_toolchain_ebdev::self_update(desired).await?;
+            let new_binary = ebdev_toolchain_ebdev::self_update(desired, current).await
+                .map_err(|e| anyhow::anyhow!(
+                    "Self-update failed (have v{current}, want v{desired}): {e}"
+                ))?;
             // Re-exec with same args
             let args: Vec<String> = std::env::args().collect();
+            eprintln!("ebdev self-update: re-executing as v{desired} ...");
+            eprintln!("  {} {}", new_binary.display(), args[1..].join(" "));
+            eprintln!("---");
             let err = std::process::Command::new(&new_binary)
                 .args(&args[1..])
                 .env("EBDEV_SKIP_SELF_UPDATE", "1")
                 .exec();
             // exec() only returns on error
-            anyhow::bail!("Failed to re-exec: {}", err);
+            anyhow::bail!(
+                "Failed to re-exec updated binary at {}: {}\n  args: {:?}",
+                new_binary.display(),
+                err,
+                &args[1..]
+            );
         }
     }
 
@@ -396,7 +409,18 @@ async fn run() -> anyhow::Result<ExitCode> {
                 cmd.env("CARGO_HOME", env.cargo_home());
             }
 
-            let status = cmd.status().await?;
+            let status = cmd.status().await
+                .map_err(|e| {
+                    let hint = if e.kind() == std::io::ErrorKind::NotFound {
+                        format!(
+                            "\n  hint: '{}' was not found in PATH. Did you mean 'ebdev task {}'?",
+                            command, command
+                        )
+                    } else {
+                        String::new()
+                    };
+                    anyhow::anyhow!("Failed to run '{}': {}{}", command, e, hint)
+                })?;
 
             return Ok(ExitCode::from(status.code().unwrap_or(1) as u8));
         }

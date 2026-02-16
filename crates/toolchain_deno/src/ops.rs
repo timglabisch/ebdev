@@ -108,7 +108,7 @@ pub async fn op_exec(
         ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command, args.ignore_error, args.name.unwrap_or_else(|| args.cmd.join(" "))).await
+    execute_command(handle, command, args.ignore_error, args.name.unwrap_or_else(|| args.cmd.join(" ")), None).await
 }
 
 #[op2(async)]
@@ -123,6 +123,7 @@ pub async fn op_shell(
         (runner_state.handle.clone(), runner_state.cwd.clone())
     };
 
+    let full_script = args.script.clone();
     let display_name = args.name.clone().unwrap_or_else(|| {
         if args.script.len() > 40 {
             format!("{}...", &args.script[..37])
@@ -130,6 +131,12 @@ pub async fn op_shell(
             args.script.clone()
         }
     });
+    // Pass full script for error messages when display_name is truncated
+    let full_command = if full_script.len() > 40 && args.name.is_none() {
+        Some(full_script)
+    } else {
+        None
+    };
 
     let command = Command::Shell {
         script: args.script,
@@ -140,7 +147,7 @@ pub async fn op_shell(
         ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command, args.ignore_error, display_name).await
+    execute_command(handle, command, args.ignore_error, display_name, full_command).await
 }
 
 #[op2(async)]
@@ -169,7 +176,7 @@ pub async fn op_docker_exec(
         ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command, args.ignore_error, display_name).await
+    execute_command(handle, command, args.ignore_error, display_name, None).await
 }
 
 #[op2(async)]
@@ -200,7 +207,7 @@ pub async fn op_docker_run(
         ignore_error: args.ignore_error,
     };
 
-    execute_command(handle, command, args.ignore_error, display_name).await
+    execute_command(handle, command, args.ignore_error, display_name, None).await
 }
 
 #[op2(async)]
@@ -436,6 +443,7 @@ async fn execute_command(
     command: Command,
     ignore_error: bool,
     display_name: String,
+    full_command: Option<String>,
 ) -> Result<ExecResult, JsErrorBox> {
     let h = handle.ok_or_else(|| {
         JsErrorBox::generic("No task runner handle. Tasks must be run via 'ebdev task'.")
@@ -446,16 +454,17 @@ async fn execute_command(
 
     // Check for failure
     if !ignore_error {
+        let error_name = full_command.as_deref().unwrap_or(&display_name);
         if result.timed_out {
             return Err(JsErrorBox::generic(format!(
                 "Command '{}' timed out",
-                display_name
+                error_name
             )));
         }
         if !result.success {
             return Err(JsErrorBox::generic(format!(
                 "Command '{}' failed with exit code {}",
-                display_name,
+                error_name,
                 result.exit_code
             )));
         }
