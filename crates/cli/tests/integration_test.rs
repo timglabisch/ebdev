@@ -296,7 +296,7 @@ export default defineConfig({
   toolchain: {
     ebdev: "0.1.0",
     node: "22.12.0",
-    rust: { version: "1.84.0" },
+    rust: "1.84.0",
   },
 });
 "#;
@@ -401,7 +401,7 @@ export default defineConfig({
   toolchain: {
     ebdev: "0.1.0",
     node: "22.12.0",
-    rust: { version: "1.84.0" },
+    rust: "1.84.0",
   },
 });
 "#;
@@ -431,7 +431,7 @@ export default defineConfig({
   toolchain: {
     ebdev: "0.1.0",
     node: "22.12.0",
-    rust: { version: "1.84.0" },
+    rust: "1.84.0",
   },
 });
 "#;
@@ -495,7 +495,7 @@ export default defineConfig({{
   toolchain: {{
     ebdev: "0.1.0",
     node: "22.12.0",
-    rust: {{ version: "{}" }},
+    rust: "{}",
   }},
 }});
 "#,
