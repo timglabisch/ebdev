@@ -1,6 +1,6 @@
 # ebdev
 
-Development toolchain manager for easybill. Manages Node.js, pnpm, Rust, Mutagen, runs tasks in containers, and keeps itself up to date.
+Development toolchain manager. Manages Node.js, pnpm, Rust, Mutagen, runs tasks in containers, and keeps itself up to date.
 
 ## Quick Start
 

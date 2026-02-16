@@ -1,4 +1,4 @@
-.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build-linux-arm64 build-linux-all build test-docker test-docker-smoke test-taskrunner test-integration test-integration-rust
+.PHONY: sync-example sync-example-init sync-example-terminate docker-up docker-down build-linux build-linux-arm64 build-linux-all build test test-docker test-docker-smoke test-taskrunner test-integration test-integration-rust
 
 # =============================================================================
 # Linux Bridge Builds (statisch gelinkt mit musl, ~1MB)
@@ -66,8 +66,14 @@ test-docker-smoke: build-linux docker-up
 	cd example && cargo run --package ebdev -- task test_docker_smoke
 
 # =============================================================================
-# Integration Tests
+# Tests
 # =============================================================================
+
+# Run all tests (unit + integration, same as CI)
+test:
+	cargo test --workspace
+
+
 
 # Run all integration tests (downloads node, pnpm, mutagen, rust)
 test-integration:
