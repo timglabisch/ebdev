@@ -50,7 +50,13 @@ pub async fn self_update(
 ) -> Result<PathBuf, InstallError> {
     let exe_path = std::env::current_exe()?;
 
-    if desired_version == current_version {
+    // Strip git describe suffix (e.g. "0.0.5-4-g6698688-dirty" → "0.0.5")
+    // so local dev builds aren't replaced by the release they're based on.
+    let current_base = current_version
+        .split('-')
+        .next()
+        .unwrap_or(current_version);
+    if desired_version == current_base {
         return Ok(exe_path);
     }
 
