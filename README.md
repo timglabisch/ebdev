@@ -1,6 +1,13 @@
 # ebdev
 
-Development environment tool. Manages pinned, project-local toolchains (Node.js, pnpm, Rust, Mutagen), runs TypeScript-defined tasks with an interactive TUI, executes commands in Docker containers via an embedded bridge binary, and keeps itself up to date.
+Reproducible dev environments from a single TypeScript config. Pin toolchain versions, define tasks, sync files into Docker containers — all managed per-project.
+
+- **Pinned toolchains** — Node.js, pnpm, Rust, Mutagen installed to `.ebdev/toolchain/`, isolated from system versions
+- **TypeScript task runner** — Define build/dev/CI workflows as async functions with parallel execution, stages, and Docker integration
+- **Interactive TUI** — Live output, collapsible stages, command palette for dynamic tasks
+- **Docker bridge** — Execute commands in running containers (with PTY support) via an embedded bridge binary
+- **Mutagen sync** — Declarative file sync sessions with safe shutdown handling
+- **Self-updating** — Binary auto-updates to the version pinned in config
 
 ## Quick Start
 
