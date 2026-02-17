@@ -233,6 +233,24 @@ impl Pty {
     }
 }
 
+/// Resolve a program name to its full path by searching PATH.
+/// If the program already contains a '/', it's returned as-is.
+fn resolve_program_path(program: &str) -> String {
+    if program.contains('/') {
+        return program.to_string();
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            let full = std::path::PathBuf::from(dir).join(program);
+            if full.exists() {
+                return full.to_string_lossy().to_string();
+            }
+        }
+    }
+    // Fallback: return as-is, execve will fail with a clear error
+    program.to_string()
+}
+
 /// Startet einen Prozess mit PTY
 async fn start_pty_process(
     options: ExecuteOptions,
@@ -248,7 +266,10 @@ async fn start_pty_process(
     // Prepare everything BEFORE fork() — after fork() in a multi-threaded process,
     // only async-signal-safe functions may be called. std::env, CString::new (allocates),
     // etc. can deadlock if another thread holds their internal locks at fork time.
-    let c_program = std::ffi::CString::new(options.program.as_str())
+
+    // Resolve program path via PATH lookup before fork (execve doesn't search PATH)
+    let resolved_program = resolve_program_path(&options.program);
+    let c_program = std::ffi::CString::new(resolved_program.as_str())
         .map_err(|e| ExecutorError::Spawn(format!("invalid program name: {}", e)))?;
 
     let c_args: Vec<std::ffi::CString> = std::iter::once(c_program.clone())
