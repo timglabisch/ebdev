@@ -245,6 +245,46 @@ async fn start_pty_process(
     let master_fd = pty.master.as_raw_fd();
     let slave_fd = pty.slave.as_raw_fd();
 
+    // Prepare everything BEFORE fork() — after fork() in a multi-threaded process,
+    // only async-signal-safe functions may be called. std::env, CString::new (allocates),
+    // etc. can deadlock if another thread holds their internal locks at fork time.
+    let c_program = std::ffi::CString::new(options.program.as_str())
+        .map_err(|e| ExecutorError::Spawn(format!("invalid program name: {}", e)))?;
+
+    let c_args: Vec<std::ffi::CString> = std::iter::once(c_program.clone())
+        .chain(
+            options
+                .args
+                .iter()
+                .filter_map(|a| std::ffi::CString::new(a.as_str()).ok()),
+        )
+        .collect();
+    let c_args_ptrs: Vec<*const libc::c_char> = c_args
+        .iter()
+        .map(|a| a.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+
+    // Build full environment for execve: inherit current env + apply overrides + ensure TERM
+    let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in &options.env {
+        env_map.insert(key.clone(), value.clone());
+    }
+    env_map.entry("TERM".to_string()).or_insert_with(|| "xterm-256color".to_string());
+
+    let c_env: Vec<std::ffi::CString> = env_map
+        .iter()
+        .filter_map(|(k, v)| std::ffi::CString::new(format!("{}={}", k, v)).ok())
+        .collect();
+    let c_env_ptrs: Vec<*const libc::c_char> = c_env
+        .iter()
+        .map(|s| s.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+
+    let c_workdir = options.workdir.as_ref()
+        .and_then(|d| std::ffi::CString::new(d.as_str()).ok());
+
     let child_pid = unsafe {
         let pid = libc::fork();
 
@@ -256,7 +296,7 @@ async fn start_pty_process(
         }
 
         if pid == 0 {
-            // Child process
+            // Child process — only async-signal-safe calls from here!
 
             // Neue Session starten
             libc::setsid();
@@ -279,38 +319,12 @@ async fn start_pty_process(
             libc::close(master_fd);
 
             // Working directory setzen
-            if let Some(ref dir) = options.workdir {
-                let c_dir = std::ffi::CString::new(dir.as_str()).unwrap();
+            if let Some(ref c_dir) = c_workdir {
                 libc::chdir(c_dir.as_ptr());
             }
 
-            // Environment setzen
-            for (key, value) in &options.env {
-                std::env::set_var(key, value);
-            }
-
-            // TERM setzen falls nicht vorhanden
-            if std::env::var("TERM").is_err() {
-                std::env::set_var("TERM", "xterm-256color");
-            }
-
-            // Programm ausführen
-            let c_program = std::ffi::CString::new(options.program.as_str()).unwrap();
-            let c_args: Vec<std::ffi::CString> = std::iter::once(c_program.clone())
-                .chain(
-                    options
-                        .args
-                        .iter()
-                        .map(|a| std::ffi::CString::new(a.as_str()).unwrap()),
-                )
-                .collect();
-            let c_args_ptrs: Vec<*const libc::c_char> = c_args
-                .iter()
-                .map(|a| a.as_ptr())
-                .chain(std::iter::once(std::ptr::null()))
-                .collect();
-
-            libc::execvp(c_program.as_ptr(), c_args_ptrs.as_ptr());
+            // execve with pre-built environment (no std::env calls after fork!)
+            libc::execve(c_program.as_ptr(), c_args_ptrs.as_ptr(), c_env_ptrs.as_ptr());
 
             // Wenn wir hier ankommen, ist execvp fehlgeschlagen
             libc::_exit(127);

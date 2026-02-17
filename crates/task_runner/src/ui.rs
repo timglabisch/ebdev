@@ -173,7 +173,8 @@ impl TaskRunnerUI for HeadlessUI {
     }
 
     fn tick(&mut self) -> io::Result<()> {
-        // Headless: nichts zu tun
+        // Yield CPU to avoid busy-loop starving execution threads
+        std::thread::sleep(std::time::Duration::from_millis(1));
         Ok(())
     }
 }
