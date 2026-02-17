@@ -75,7 +75,7 @@ async fn start_simple_process(
     }
 
     // Stdout-Reader Task
-    if let Some(mut stdout) = child_stdout {
+    let stdout_handle = child_stdout.map(|mut stdout| {
         let tx = event_tx.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -93,11 +93,11 @@ async fn start_simple_process(
                     Err(_) => break,
                 }
             }
-        });
-    }
+        })
+    });
 
     // Stderr-Reader Task
-    if let Some(mut stderr) = child_stderr {
+    let stderr_handle = child_stderr.map(|mut stderr| {
         let tx = event_tx.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -115,24 +115,27 @@ async fn start_simple_process(
                     Err(_) => break,
                 }
             }
-        });
-    }
+        })
+    });
 
-    // Wait Task with kill support
+    // Wait Task: wait for process exit, then drain readers before sending Exit
     tokio::spawn(async move {
-        tokio::select! {
+        let code = tokio::select! {
             status = child.wait() => {
-                let code = status.ok().and_then(|s| s.code());
-                let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
+                status.ok().and_then(|s| s.code())
             }
             _ = kill_rx => {
-                // Kill signal received
                 let _ = child.kill().await;
                 let status = child.wait().await;
-                let code = status.ok().and_then(|s| s.code());
-                let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
+                status.ok().and_then(|s| s.code())
             }
-        }
+        };
+
+        // Wait for readers to finish draining before sending Exit
+        if let Some(h) = stdout_handle { let _ = h.await; }
+        if let Some(h) = stderr_handle { let _ = h.await; }
+
+        let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
     });
 
     Ok(ExecuteHandle {
