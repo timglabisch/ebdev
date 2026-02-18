@@ -409,6 +409,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stdout_capture_exec() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["echo".into(), "hello world".into()],
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).await.unwrap();
+
+        assert!(result.success);
+        // PTY converts \n to \r\n
+        assert!(
+            result.stdout.contains("hello world"),
+            "stdout should contain 'hello world', got: {:?}",
+            result.stdout,
+        );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_stdout_capture_shell() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Shell {
+            script: "echo foo; echo bar".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).await.unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.stdout.contains("foo"),
+            "stdout should contain 'foo', got: {:?}",
+            result.stdout,
+        );
+        assert!(
+            result.stdout.contains("bar"),
+            "stdout should contain 'bar', got: {:?}",
+            result.stdout,
+        );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_stderr_merged_in_pty_mode() {
+        // With PTY enabled, stderr is merged into stdout
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Shell {
+            script: "echo errout >&2".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: true,
+            interactive: false,
+        }).await.unwrap();
+
+        // PTY merges stderr into stdout
+        assert!(
+            result.stdout.contains("errout"),
+            "with PTY, stderr output should appear in stdout, got: {:?}",
+            result.stdout,
+        );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_stdout_capture_on_failure() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Shell {
+            script: "echo before-fail; exit 1".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: true,
+            interactive: false,
+        }).await.unwrap();
+
+        assert!(!result.success);
+        assert_eq!(result.exit_code, 1);
+        assert!(
+            result.stdout.contains("before-fail"),
+            "stdout should contain output even on failure, got: {:?}",
+            result.stdout,
+        );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_interactive_stdout_empty() {
+        // Interactive commands inherit stdio, so stdout/stderr are empty
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let result = handle.execute(Command::Exec {
+            cmd: vec!["echo".into(), "interactive".into()],
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: true,
+        }).await.unwrap();
+
+        assert!(result.success);
+        assert!(result.stdout.is_empty(), "interactive commands should not capture stdout");
+        assert!(result.stderr.is_empty(), "interactive commands should not capture stderr");
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
     async fn test_interactive_then_normal() {
         // Verify that after an interactive command, normal PTY commands still work
         let (handle, _thread) = run_headless(None, None, b"");

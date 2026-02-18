@@ -138,7 +138,28 @@ await shell("echo hello | tr a-z A-Z");
 // try* variants return ExecResult instead of throwing
 const result = await tryExec(["false"]);
 // result.exitCode, result.success, result.timedOut
+
+// stdout and stderr are captured and returned
+const ver = await shell("node -v");
+console.log(ver.stdout); // "v22.12.0\r\n"
+
+// Capture output from Docker containers
+const hostname = await docker.exec("app", ["hostname"]);
+console.log(hostname.stdout.trim());
 ```
+
+**ExecResult:**
+```typescript
+{
+  exitCode: number,    // process exit code
+  success: boolean,    // true if exit code is 0
+  timedOut: boolean,   // true if the command was killed by timeout
+  stdout: string,      // captured stdout (with PTY: combined stdout+stderr)
+  stderr: string,      // captured stderr (with PTY: empty, since PTY merges streams)
+}
+```
+
+> **Note:** Commands run through a PTY by default (for TUI rendering). In PTY mode, stdout and stderr are merged into `stdout` and `stderr` will be empty. Interactive commands (`interactive: true`) inherit the terminal directly and return empty `stdout`/`stderr`.
 
 **ExecOptions:**
 ```typescript

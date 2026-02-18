@@ -245,6 +245,8 @@ impl Executor {
                                 exit_code: -1,
                                 success: false,
                                 timed_out: false,
+                                stdout: String::new(),
+                                stderr: String::new(),
                             });
                         }
                     }
@@ -355,6 +357,8 @@ impl Executor {
                 exit_code: status.code().unwrap_or(-1),
                 success: status.success(),
                 timed_out: false,
+                stdout: String::new(),
+                stderr: String::new(),
             },
             Err(e) => {
                 eprintln!("Failed to run interactive command: {}", e);
@@ -362,6 +366,8 @@ impl Executor {
                     exit_code: -1,
                     success: false,
                     timed_out: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
                 }
             }
         };

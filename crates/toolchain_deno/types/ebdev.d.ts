@@ -218,6 +218,10 @@ declare module "ebdev" {
     success: boolean;
     /** Whether the command timed out */
     timedOut: boolean;
+    /** Captured stdout output (with PTY: combined stdout+stderr) */
+    stdout: string;
+    /** Captured stderr output (with PTY: empty, since PTY merges streams) */
+    stderr: string;
   }
 
   /**

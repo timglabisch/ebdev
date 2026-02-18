@@ -4,7 +4,7 @@
 //! die intern die async Executoren aus ebdev_remote verwendet.
 
 use crate::command::{Command, CommandResult};
-use ebdev_remote::{ExecuteEvent, ExecuteOptions, Executor, LocalExecutor, PtyConfig, RemoteExecutor};
+use ebdev_remote::{ExecuteEvent, ExecuteOptions, Executor, LocalExecutor, OutputStream, PtyConfig, RemoteExecutor};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -197,12 +197,18 @@ impl ExecutionBackend {
             let timeout_at = tokio::time::Instant::now() + timeout;
             let mut exit_code = None;
             let mut timed_out = false;
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
             loop {
                 tokio::select! {
                     event = rx.recv() => {
                         match event {
-                            Some(ExecuteEvent::Output { stream: _, data }) => {
+                            Some(ExecuteEvent::Output { stream, data }) => {
+                                match stream {
+                                    OutputStream::Stdout => stdout_buf.extend_from_slice(&data),
+                                    OutputStream::Stderr => stderr_buf.extend_from_slice(&data),
+                                }
                                 let _ = event_tx.send(BackendEvent::Output(data));
                             }
                             Some(ExecuteEvent::Exit { code }) => {
@@ -230,6 +236,8 @@ impl ExecutionBackend {
                 exit_code: exit_code.unwrap_or(-1),
                 success: exit_code == Some(0),
                 timed_out,
+                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
             };
 
             let _ = event_tx.send(BackendEvent::Completed(result));
@@ -325,12 +333,18 @@ impl ExecutionBackend {
             let timeout_at = tokio::time::Instant::now() + timeout;
             let mut exit_code = None;
             let mut timed_out = false;
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
             loop {
                 tokio::select! {
                     event = rx.recv() => {
                         match event {
-                            Some(ExecuteEvent::Output { stream: _, data }) => {
+                            Some(ExecuteEvent::Output { stream, data }) => {
+                                match stream {
+                                    OutputStream::Stdout => stdout_buf.extend_from_slice(&data),
+                                    OutputStream::Stderr => stderr_buf.extend_from_slice(&data),
+                                }
                                 let _ = event_tx.send(BackendEvent::Output(data));
                             }
                             Some(ExecuteEvent::Exit { code }) => {
@@ -358,6 +372,8 @@ impl ExecutionBackend {
                 exit_code: exit_code.unwrap_or(-1),
                 success: exit_code == Some(0),
                 timed_out,
+                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
             };
 
             let _ = event_tx.send(BackendEvent::Completed(result.clone()));

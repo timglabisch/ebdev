@@ -124,6 +124,10 @@ pub struct CommandResult {
     pub exit_code: i32,
     pub success: bool,
     pub timed_out: bool,
+    /// Captured stdout output (with PTY: combined stdout+stderr)
+    pub stdout: String,
+    /// Captured stderr output (with PTY: empty, since PTY merges streams)
+    pub stderr: String,
 }
 
 /// A request to execute a command, with a channel to send the result back

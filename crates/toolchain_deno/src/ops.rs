@@ -95,6 +95,8 @@ pub struct ExecResult {
     success: bool,
     #[serde(rename = "timedOut")]
     timed_out: bool,
+    stdout: String,
+    stderr: String,
 }
 
 #[op2(async)]
@@ -515,6 +517,8 @@ async fn execute_command(
         exit_code: result.exit_code,
         success: result.success,
         timed_out: result.timed_out,
+        stdout: result.stdout,
+        stderr: result.stderr,
     })
 }
 
