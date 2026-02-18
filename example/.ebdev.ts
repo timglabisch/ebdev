@@ -554,6 +554,150 @@ export async function test_docker() {
     console.log("╚══════════════════════════════════════════════════════════════╝");
 }
 
+// Test multiline content via docker.exec (heredoc, special chars, etc.)
+export async function test_docker_multiline() {
+    const container = "example-sync-target-1";
+
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║          DOCKER MULTILINE CONTENT TEST                       ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+    console.log("");
+
+    // -------------------------------------------------------------------------
+    // Test 1: Simple multiline string via bash -c
+    // -------------------------------------------------------------------------
+    await stage("1. Simple multiline echo");
+    const r1 = await docker.exec(container, ["bash", "-c", "echo 'line1\nline2\nline3'"], {
+        name: "Simple multiline",
+    });
+    if (!r1.stdout.includes("line1") || !r1.stdout.includes("line2") || !r1.stdout.includes("line3")) {
+        throw new Error("Simple multiline failed: missing lines in output");
+    }
+    console.log("Simple multiline passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 2: Heredoc - write multiline file and read it back
+    // -------------------------------------------------------------------------
+    await stage("2. Heredoc write + read");
+    const yamlContent = `name: my-task
+source-id: "replica-1"
+target-database: "my_db"
+block-allow-list:
+  do-dbs:
+    - "schema_a"
+    - "schema_b"
+  do-tables:
+    - db-name: "schema_a"
+      tbl-name: "users"`;
+
+    await docker.exec(container, ["bash", "-c", `cat > /tmp/test_multiline.yaml << 'YAML'\n${yamlContent}\nYAML`], {
+        name: "Write YAML via heredoc",
+    });
+
+    const r2 = await docker.exec(container, ["cat", "/tmp/test_multiline.yaml"], {
+        name: "Read back YAML",
+    });
+    if (!r2.stdout.includes("my-task")) throw new Error("Missing 'my-task'");
+    if (!r2.stdout.includes("replica-1")) throw new Error("Missing 'replica-1'");
+    if (!r2.stdout.includes("schema_a")) throw new Error("Missing 'schema_a'");
+    if (!r2.stdout.includes("schema_b")) throw new Error("Missing 'schema_b'");
+    console.log("Heredoc write + read passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 3: Content with special characters (quotes, $, backticks)
+    // -------------------------------------------------------------------------
+    await stage("3. Special characters in heredoc");
+    const specialContent = `password: "p@ss\\"word"
+command: \`echo $HOME\`
+path: /usr/local/bin
+regex: ^[a-z]+\\d{3}$
+backslash: C:\\\\Users\\\\test`;
+
+    await docker.exec(container, ["bash", "-c", `cat > /tmp/test_special.txt << 'EOF'\n${specialContent}\nEOF`], {
+        name: "Write special chars",
+    });
+
+    const r3 = await docker.exec(container, ["cat", "/tmp/test_special.txt"], {
+        name: "Read back special chars",
+    });
+    if (!r3.stdout.includes("p@ss")) throw new Error("Missing special chars in output");
+    if (!r3.stdout.includes("$HOME")) throw new Error("Heredoc should not expand $HOME (quoted delimiter)");
+    console.log("Special characters passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 4: Large multiline content
+    // -------------------------------------------------------------------------
+    await stage("4. Large multiline content");
+    const lines: string[] = [];
+    for (let i = 0; i < 100; i++) {
+        lines.push(`line_${i}: value_${i}_${"x".repeat(50)}`);
+    }
+    const largeContent = lines.join("\n");
+
+    await docker.exec(container, ["bash", "-c", `cat > /tmp/test_large.txt << 'ENDLARGE'\n${largeContent}\nENDLARGE`], {
+        name: "Write large content",
+    });
+
+    const r4 = await docker.exec(container, ["wc", "-l", "/tmp/test_large.txt"], {
+        name: "Count lines",
+    });
+    console.log(`Line count output: ${r4.stdout.trim()}`);
+    // wc -l should show 100 lines
+    if (!r4.stdout.includes("100")) {
+        throw new Error(`Expected 100 lines, got: ${r4.stdout.trim()}`);
+    }
+
+    const r4b = await docker.exec(container, ["bash", "-c", "head -1 /tmp/test_large.txt && tail -1 /tmp/test_large.txt"], {
+        name: "Check first and last line",
+    });
+    console.log(`First+last: ${r4b.stdout.trim()}`);
+    if (!r4b.stdout.includes("line_0:")) throw new Error("Missing first line");
+    if (!r4b.stdout.includes("line_99:")) throw new Error("Missing last line");
+    console.log("Large multiline content passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Test 5: Multiline with empty lines and whitespace
+    // -------------------------------------------------------------------------
+    await stage("5. Empty lines and whitespace");
+    const whitespaceContent = `first line
+
+third line (after empty)
+    indented line
+\ttab indented
+
+last line after whitespace-only line`;
+
+    await docker.exec(container, ["bash", "-c", `cat > /tmp/test_ws.txt << 'WS'\n${whitespaceContent}\nWS`], {
+        name: "Write whitespace content",
+    });
+
+    const r5 = await docker.exec(container, ["cat", "/tmp/test_ws.txt"], {
+        name: "Read whitespace content",
+    });
+    console.log(`Whitespace content:\n${r5.stdout}`);
+    if (!r5.stdout.includes("first line")) throw new Error("Missing first line");
+    if (!r5.stdout.includes("third line (after empty)")) throw new Error("Missing third line");
+    if (!r5.stdout.includes("indented line")) throw new Error("Missing indented line");
+    console.log("Empty lines and whitespace passed ✓");
+
+    // -------------------------------------------------------------------------
+    // Cleanup
+    // -------------------------------------------------------------------------
+    await stage("Cleanup");
+    await docker.tryExec(container, ["rm", "-f", "/tmp/test_multiline.yaml", "/tmp/test_special.txt", "/tmp/test_large.txt", "/tmp/test_ws.txt"]);
+
+    console.log("");
+    console.log("╔══════════════════════════════════════════════════════════════╗");
+    console.log("║  DOCKER MULTILINE TESTS COMPLETED SUCCESSFULLY               ║");
+    console.log("╠══════════════════════════════════════════════════════════════╣");
+    console.log("║  ✓ Simple multiline                                          ║");
+    console.log("║  ✓ Heredoc write + read                                      ║");
+    console.log("║  ✓ Special characters                                        ║");
+    console.log("║  ✓ Large multiline content (100 lines)                       ║");
+    console.log("║  ✓ Empty lines and whitespace                                ║");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+}
+
 // Quick docker smoke test
 export async function test_docker_smoke() {
     const container = "example-sync-target-1";

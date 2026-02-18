@@ -374,7 +374,7 @@ async fn start_pty_process(
 
     // PTY I/O Task
     let event_tx_clone = event_tx.clone();
-    tokio::spawn(async move {
+    let reader_handle = tokio::spawn(async move {
         use tokio::io::unix::AsyncFd;
 
         let async_fd = match AsyncFd::new(master_fd_owned) {
@@ -479,7 +479,7 @@ async fn start_pty_process(
 
     // Wait für Child-Prozess mit Kill-Support
     tokio::spawn(async move {
-        loop {
+        let code = loop {
             // Check for kill signal
             if kill_rx.try_recv().is_ok() {
                 // Kill the process
@@ -492,20 +492,22 @@ async fn start_pty_process(
             let result = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
 
             if result == child_pid {
-                let code = if libc::WIFEXITED(status) {
+                break if libc::WIFEXITED(status) {
                     Some(libc::WEXITSTATUS(status))
                 } else {
                     None
                 };
-                let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
-                break;
             } else if result < 0 {
-                let _ = event_tx.send(ExecuteEvent::Exit { code: None }).await;
-                break;
+                break None;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
+        };
+
+        // Wait for PTY reader to drain all remaining output before sending Exit
+        let _ = reader_handle.await;
+
+        let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
     });
 
     Ok(ExecuteHandle {

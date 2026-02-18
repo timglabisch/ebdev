@@ -65,6 +65,11 @@ test-docker-smoke: build-linux docker-up
 	@sleep 1
 	cd example && cargo run --package ebdev -- task test_docker_smoke
 
+# Docker multiline content test
+test-docker-multiline: build-linux docker-up
+	@sleep 1
+	cd example && cargo run --package ebdev -- task test_docker_multiline
+
 # =============================================================================
 # Tests
 # =============================================================================
