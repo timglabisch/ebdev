@@ -1,7 +1,8 @@
+use ebdev_remote::OutputStream;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 /// Unique ID for commands
 pub type CommandId = u64;
@@ -130,11 +131,21 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Event sent to streaming output channel
+pub enum OutputEvent {
+    /// Output chunk with stream type
+    Output { stream: OutputStream, data: Vec<u8> },
+    /// Command finished
+    Done(CommandResult),
+}
+
 /// A request to execute a command, with a channel to send the result back
 pub struct CommandRequest {
     pub id: CommandId,
     pub command: Command,
     pub result_tx: oneshot::Sender<CommandResult>,
+    /// Optional channel for streaming output events (used by onOutput/onStdout/onStderr callbacks)
+    pub output_tx: Option<mpsc::UnboundedSender<OutputEvent>>,
 }
 
 /// A registered task that can be triggered from the TUI

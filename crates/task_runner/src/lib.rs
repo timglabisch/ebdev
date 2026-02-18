@@ -13,8 +13,10 @@ use tokio::sync::{mpsc, oneshot};
 // Re-exports
 pub use command::Command;
 pub use command::CommandResult;
+pub use command::OutputEvent;
 pub use command::RegisteredTask;
 pub use command::TuiEvent;
+pub use ebdev_remote::OutputStream;
 pub use ui::{HeadlessUI, TaskRunnerUI, TuiUI};
 
 #[derive(Debug, Error)]
@@ -55,6 +57,7 @@ impl TaskRunnerHandle {
             id: next_command_id(),
             command,
             result_tx,
+            output_tx: None,
         };
 
         self.tx
@@ -62,6 +65,28 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)?;
 
         result_rx.await.map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Execute a command with streaming output events.
+    /// Returns a receiver for OutputEvent (Output chunks + final Done).
+    pub fn execute_streaming(
+        &self,
+        command: Command,
+    ) -> Result<mpsc::UnboundedReceiver<command::OutputEvent>, TaskRunnerError> {
+        let (result_tx, _result_rx) = oneshot::channel(); // result comes via OutputEvent::Done
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let request = CommandRequest {
+            id: next_command_id(),
+            command,
+            result_tx,
+            output_tx: Some(output_tx),
+        };
+
+        self.tx
+            .send(ExecutorMessage::Execute(request))
+            .map_err(|_| TaskRunnerError::ChannelClosed)?;
+
+        Ok(output_rx)
     }
 
     /// Signal the start of a parallel group
@@ -562,6 +587,156 @@ mod tests {
         }).await;
         assert!(result.is_ok());
         assert!(result.unwrap().success);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_output_events() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let mut output_rx = handle.execute_streaming(Command::Shell {
+            script: "echo streaming-test".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).unwrap();
+
+        let mut collected_output = String::new();
+        let mut got_done = false;
+
+        while let Some(event) = output_rx.recv().await {
+            match event {
+                OutputEvent::Output { stream: _, data } => {
+                    collected_output.push_str(&String::from_utf8_lossy(&data));
+                }
+                OutputEvent::Done(result) => {
+                    assert!(result.success);
+                    assert_eq!(result.exit_code, 0);
+                    got_done = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(got_done, "should receive Done event");
+        assert!(
+            collected_output.contains("streaming-test"),
+            "streamed output should contain 'streaming-test', got: {:?}",
+            collected_output,
+        );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_multiple_lines() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let mut output_rx = handle.execute_streaming(Command::Shell {
+            script: "echo line1; echo line2; echo line3".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).unwrap();
+
+        let mut chunks = Vec::new();
+        while let Some(event) = output_rx.recv().await {
+            match event {
+                OutputEvent::Output { stream: _, data } => {
+                    chunks.push(String::from_utf8_lossy(&data).into_owned());
+                }
+                OutputEvent::Done(result) => {
+                    assert!(result.success);
+                    break;
+                }
+            }
+        }
+
+        let full_output = chunks.join("");
+        assert!(full_output.contains("line1"), "missing line1 in: {:?}", full_output);
+        assert!(full_output.contains("line2"), "missing line2 in: {:?}", full_output);
+        assert!(full_output.contains("line3"), "missing line3 in: {:?}", full_output);
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_failure() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let mut output_rx = handle.execute_streaming(Command::Shell {
+            script: "echo before-error; exit 42".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: true,
+            interactive: false,
+        }).unwrap();
+
+        let mut output = String::new();
+        let mut final_result = None;
+
+        while let Some(event) = output_rx.recv().await {
+            match event {
+                OutputEvent::Output { stream: _, data } => {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+                OutputEvent::Done(result) => {
+                    final_result = Some(result);
+                    break;
+                }
+            }
+        }
+
+        let result = final_result.expect("should receive Done event");
+        assert!(!result.success);
+        assert_eq!(result.exit_code, 42);
+        assert!(output.contains("before-error"), "output before failure should be streamed");
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_and_stdout_capture_both_work() {
+        // Verify that streaming doesn't break stdout capture in the result
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let mut output_rx = handle.execute_streaming(Command::Shell {
+            script: "echo captured-too".into(),
+            cwd: None,
+            env: None,
+            name: None,
+            timeout: None,
+            ignore_error: false,
+            interactive: false,
+        }).unwrap();
+
+        let mut final_result = None;
+        while let Some(event) = output_rx.recv().await {
+            match event {
+                OutputEvent::Output { .. } => {}
+                OutputEvent::Done(result) => {
+                    final_result = Some(result);
+                    break;
+                }
+            }
+        }
+
+        let result = final_result.unwrap();
+        assert!(result.success);
+        assert!(
+            result.stdout.contains("captured-too"),
+            "stdout should still be captured in result, got: {:?}",
+            result.stdout,
+        );
 
         let _ = handle.shutdown();
     }

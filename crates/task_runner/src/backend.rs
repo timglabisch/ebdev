@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 /// Event vom Backend an den Executor
 pub enum BackendEvent {
-    Output(Vec<u8>),
+    Output { stream: OutputStream, data: Vec<u8> },
     Completed(CommandResult),
     Error(String),
 }
@@ -209,7 +209,7 @@ impl ExecutionBackend {
                                     OutputStream::Stdout => stdout_buf.extend_from_slice(&data),
                                     OutputStream::Stderr => stderr_buf.extend_from_slice(&data),
                                 }
-                                let _ = event_tx.send(BackendEvent::Output(data));
+                                let _ = event_tx.send(BackendEvent::Output { stream, data });
                             }
                             Some(ExecuteEvent::Exit { code }) => {
                                 exit_code = code;
@@ -345,7 +345,7 @@ impl ExecutionBackend {
                                     OutputStream::Stdout => stdout_buf.extend_from_slice(&data),
                                     OutputStream::Stderr => stderr_buf.extend_from_slice(&data),
                                 }
-                                let _ = event_tx.send(BackendEvent::Output(data));
+                                let _ = event_tx.send(BackendEvent::Output { stream, data });
                             }
                             Some(ExecuteEvent::Exit { code }) => {
                                 exit_code = code;

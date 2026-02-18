@@ -1,5 +1,5 @@
 use crate::backend::{BackendEvent, ExecutionBackend};
-use crate::command::{CommandId, CommandRequest, CommandResult, DebugMessage, ExecutorMessage, RegisteredTask, TuiEvent};
+use crate::command::{CommandId, CommandRequest, CommandResult, DebugMessage, ExecutorMessage, OutputEvent, RegisteredTask, TuiEvent};
 use crate::ui::TaskRunnerUI;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 /// Event vom PTY-Thread zurück zum Executor
 pub enum PtyEvent {
-    Output { id: CommandId, data: Vec<u8> },
+    Output { id: CommandId, stream: ebdev_remote::OutputStream, data: Vec<u8> },
     Completed { id: CommandId, result: CommandResult },
     Error { id: CommandId, error: String },
 }
@@ -75,6 +75,8 @@ pub struct Executor {
     debug_logger: Option<DebugLogger>,
     /// Execution backend (shared across threads via Arc)
     backend: std::sync::Arc<ExecutionBackend>,
+    /// Streaming output channels (for onOutput/onStdout/onStderr callbacks)
+    streaming_outputs: HashMap<CommandId, tokio::sync::mpsc::UnboundedSender<OutputEvent>>,
 }
 
 impl Executor {
@@ -98,6 +100,7 @@ impl Executor {
             registered_tasks: Vec::new(),
             debug_logger: None,
             backend: std::sync::Arc::new(backend),
+            streaming_outputs: HashMap::new(),
         }
     }
 
@@ -214,13 +217,17 @@ impl Executor {
             // 2. Verarbeite ausstehende PTY-Events (non-blocking)
             while let Ok(event) = self.pty_rx.try_recv() {
                 match event {
-                    PtyEvent::Output { id, data } => {
+                    PtyEvent::Output { id, stream, data } => {
                         self.log_debug(DebugMessage::PtyOutput {
                             id,
                             data_utf8: String::from_utf8(data.clone()).ok(),
                             data_len: data.len(),
                         });
                         ui.on_task_output(id, &data);
+                        // Forward to streaming channel if present
+                        if let Some(tx) = self.streaming_outputs.get(&id) {
+                            let _ = tx.send(OutputEvent::Output { stream, data });
+                        }
                     }
                     PtyEvent::Completed { id, result } => {
                         self.log_debug(DebugMessage::PtyCompleted {
@@ -228,6 +235,10 @@ impl Executor {
                             result: result.clone(),
                         });
                         ui.on_task_complete(id, &result);
+                        // Send Done to streaming channel if present
+                        if let Some(tx) = self.streaming_outputs.remove(&id) {
+                            let _ = tx.send(OutputEvent::Done(result.clone()));
+                        }
                         // Sende Result zurück an Deno
                         if let Some(tx) = self.pending_results.remove(&id) {
                             let _ = tx.send(result);
@@ -239,15 +250,20 @@ impl Executor {
                             error: error.clone(),
                         });
                         ui.on_task_error(id, &error);
+                        let error_result = CommandResult {
+                            exit_code: -1,
+                            success: false,
+                            timed_out: false,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        };
+                        // Send Done to streaming channel if present
+                        if let Some(tx) = self.streaming_outputs.remove(&id) {
+                            let _ = tx.send(OutputEvent::Done(error_result.clone()));
+                        }
                         // Sende Fehler-Result zurück an Deno
                         if let Some(tx) = self.pending_results.remove(&id) {
-                            let _ = tx.send(CommandResult {
-                                exit_code: -1,
-                                success: false,
-                                timed_out: false,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
+                            let _ = tx.send(error_result);
                         }
                     }
                 }
@@ -274,7 +290,12 @@ impl Executor {
 
     /// Führt einen Command im PTY aus
     fn execute<UI: TaskRunnerUI>(&mut self, request: CommandRequest, ui: &mut UI) {
-        let CommandRequest { id, command, result_tx } = request;
+        let CommandRequest { id, command, result_tx, output_tx } = request;
+
+        // Store streaming output channel if present
+        if let Some(tx) = output_tx {
+            self.streaming_outputs.insert(id, tx);
+        }
 
         if command.interactive() {
             self.execute_interactive(id, command, result_tx, ui);
@@ -305,8 +326,8 @@ impl Executor {
             let forward_handle = thread::spawn(move || {
                 for event in event_rx {
                     match event {
-                        BackendEvent::Output(data) => {
-                            let _ = pty_tx_clone.send(PtyEvent::Output { id, data });
+                        BackendEvent::Output { stream, data } => {
+                            let _ = pty_tx_clone.send(PtyEvent::Output { id, stream, data });
                         }
                         BackendEvent::Completed(result) => {
                             let _ = pty_tx_clone.send(PtyEvent::Completed { id, result });
@@ -375,6 +396,10 @@ impl Executor {
         let _ = ui.resume();
 
         ui.on_task_complete(id, &result);
+        // Send Done to streaming channel if present
+        if let Some(tx) = self.streaming_outputs.remove(&id) {
+            let _ = tx.send(OutputEvent::Done(result.clone()));
+        }
         let _ = result_tx.send(result);
     }
 }

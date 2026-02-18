@@ -1,13 +1,15 @@
 use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
 use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, SessionStatusInfo, SyncMode};
-use ebdev_task_runner::{Command, TaskRunnerHandle};
+use ebdev_task_runner::{Command, OutputEvent, OutputStream, TaskRunnerHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 /// State stored in Deno runtime for task runner ops
 #[derive(Default)]
@@ -26,6 +28,61 @@ pub struct MutagenState {
     pub mutagen_path: Option<PathBuf>,
     /// Path to the .ebdev.ts config file (for computing project CRC32)
     pub config_path: PathBuf,
+}
+
+/// State for streaming executions
+#[derive(Default)]
+pub struct StreamingState {
+    streams: HashMap<u32, Arc<TokioMutex<mpsc::UnboundedReceiver<OutputEvent>>>>,
+    next_id: u32,
+}
+
+impl StreamingState {
+    fn insert(&mut self, rx: mpsc::UnboundedReceiver<OutputEvent>) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.streams.insert(id, Arc::new(TokioMutex::new(rx)));
+        id
+    }
+}
+
+/// Event returned by op_stream_next to JavaScript
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    #[serde(rename = "output")]
+    Output {
+        stream: String,
+        data: String,
+    },
+    #[serde(rename = "done")]
+    Done {
+        result: ExecResult,
+    },
+}
+
+/// Args for op_start_stream (supports all command types)
+#[derive(Debug, Deserialize)]
+pub struct StreamStartArgs {
+    #[serde(rename = "type")]
+    command_type: String,
+    cmd: Option<Vec<String>>,
+    script: Option<String>,
+    container: Option<String>,
+    image: Option<String>,
+    user: Option<String>,
+    volumes: Option<Vec<String>>,
+    workdir: Option<String>,
+    network: Option<String>,
+    cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
+    name: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    ignore_error: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,6 +579,136 @@ async fn execute_command(
     })
 }
 
+// =============================================================================
+// Streaming Execution Ops
+// =============================================================================
+
+#[op2(async)]
+pub async fn op_start_stream(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: StreamStartArgs,
+) -> Result<u32, JsErrorBox> {
+    let (handle, state_cwd, state_env) = {
+        let state = state.borrow();
+        let runner_state = state.borrow::<TaskRunnerState>();
+        (runner_state.handle.clone(), runner_state.cwd.clone(), runner_state.env.clone())
+    };
+
+    let h = handle.ok_or_else(|| {
+        JsErrorBox::generic("No task runner handle. Tasks must be run via 'ebdev task'.")
+    })?;
+
+    let command = match args.command_type.as_str() {
+        "exec" => Command::Exec {
+            cmd: args.cmd.ok_or_else(|| JsErrorBox::generic("cmd required for exec"))?,
+            cwd: args.cwd.or(state_cwd),
+            env: Some(merge_env(&state_env, args.env)),
+            name: args.name,
+            timeout: args.timeout.map(Duration::from_secs),
+            ignore_error: args.ignore_error,
+            interactive: args.interactive,
+        },
+        "shell" => Command::Shell {
+            script: args.script.ok_or_else(|| JsErrorBox::generic("script required for shell"))?,
+            cwd: args.cwd.or(state_cwd),
+            env: Some(merge_env(&state_env, args.env)),
+            name: args.name,
+            timeout: args.timeout.map(Duration::from_secs),
+            ignore_error: args.ignore_error,
+            interactive: args.interactive,
+        },
+        "docker_exec" => Command::DockerExec {
+            container: args.container.ok_or_else(|| JsErrorBox::generic("container required"))?,
+            cmd: args.cmd.ok_or_else(|| JsErrorBox::generic("cmd required"))?,
+            user: args.user,
+            env: args.env,
+            name: args.name,
+            timeout: args.timeout.map(Duration::from_secs),
+            ignore_error: args.ignore_error,
+            interactive: args.interactive,
+        },
+        "docker_run" => Command::DockerRun {
+            image: args.image.ok_or_else(|| JsErrorBox::generic("image required"))?,
+            cmd: args.cmd.ok_or_else(|| JsErrorBox::generic("cmd required"))?,
+            volumes: args.volumes,
+            workdir: args.workdir,
+            network: args.network,
+            env: args.env,
+            name: args.name,
+            timeout: args.timeout.map(Duration::from_secs),
+            ignore_error: args.ignore_error,
+            interactive: args.interactive,
+        },
+        other => return Err(JsErrorBox::generic(format!("Unknown command type: {}", other))),
+    };
+
+    let output_rx = h.execute_streaming(command)
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    let stream_id = {
+        let mut op_state = state.borrow_mut();
+        let streaming = op_state.borrow_mut::<StreamingState>();
+        streaming.insert(output_rx)
+    };
+
+    Ok(stream_id)
+}
+
+#[op2(async)]
+#[serde]
+pub async fn op_stream_next(
+    state: Rc<RefCell<OpState>>,
+    stream_id: u32,
+) -> Result<StreamEvent, JsErrorBox> {
+    let rx_arc = {
+        let op_state = state.borrow();
+        let streaming = op_state.borrow::<StreamingState>();
+        streaming.streams.get(&stream_id)
+            .cloned()
+            .ok_or_else(|| JsErrorBox::generic(format!("Invalid stream ID: {}", stream_id)))?
+    };
+
+    let mut rx = rx_arc.lock().await;
+    match rx.recv().await {
+        Some(OutputEvent::Output { stream, data }) => {
+            Ok(StreamEvent::Output {
+                stream: match stream {
+                    OutputStream::Stdout => "stdout".to_string(),
+                    OutputStream::Stderr => "stderr".to_string(),
+                },
+                data: String::from_utf8_lossy(&data).into_owned(),
+            })
+        }
+        Some(OutputEvent::Done(result)) => {
+            drop(rx);
+            // Clean up the stream
+            {
+                let mut op_state = state.borrow_mut();
+                let streaming = op_state.borrow_mut::<StreamingState>();
+                streaming.streams.remove(&stream_id);
+            }
+            Ok(StreamEvent::Done {
+                result: ExecResult {
+                    exit_code: result.exit_code,
+                    success: result.success,
+                    timed_out: result.timed_out,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                },
+            })
+        }
+        None => {
+            // Channel closed unexpectedly
+            {
+                let mut op_state = state.borrow_mut();
+                let streaming = op_state.borrow_mut::<StreamingState>();
+                streaming.streams.remove(&stream_id);
+            }
+            Err(JsErrorBox::generic("Stream closed unexpectedly"))
+        }
+    }
+}
+
 /// Merge base env vars with command-specific env vars (command wins on conflict)
 fn merge_env(base: &HashMap<String, String>, command_env: Option<HashMap<String, String>>) -> HashMap<String, String> {
     let mut merged = base.clone();
@@ -539,6 +726,7 @@ pub fn init_task_runner_state(
     env: HashMap<String, String>,
 ) {
     state.put(TaskRunnerState { handle, cwd, env });
+    state.put(StreamingState::default());
 }
 
 /// Initialize the mutagen state in OpState
@@ -569,5 +757,7 @@ deno_core::extension!(
         op_log,
         op_mutagen_reconcile,
         op_mutagen_pause_all,
+        op_start_stream,
+        op_stream_next,
     ],
 );

@@ -225,9 +225,23 @@ declare module "ebdev" {
   }
 
   /**
+   * Streaming callback options (available on all exec/shell/docker commands)
+   */
+  export interface StreamingOptions {
+    /** Callback for each output chunk (combined stdout+stderr) */
+    onOutput?: (data: string) => void;
+    /** Callback for each stdout chunk */
+    onStdout?: (data: string) => void;
+    /** Callback for each stderr chunk */
+    onStderr?: (data: string) => void;
+    /** When true, callbacks receive complete lines instead of raw chunks (strips \\r\\n) */
+    lineBuffered?: boolean;
+  }
+
+  /**
    * Options for exec and shell commands
    */
-  export interface ExecOptions {
+  export interface ExecOptions extends StreamingOptions {
     /** Working directory */
     cwd?: string;
     /** Environment variables */
@@ -243,7 +257,7 @@ declare module "ebdev" {
   /**
    * Options for docker.exec command
    */
-  export interface DockerExecOptions {
+  export interface DockerExecOptions extends StreamingOptions {
     /** User to run as */
     user?: string;
     /** Environment variables */
@@ -259,7 +273,7 @@ declare module "ebdev" {
   /**
    * Options for docker.run command
    */
-  export interface DockerRunOptions {
+  export interface DockerRunOptions extends StreamingOptions {
     /** Volume mounts */
     volumes?: string[];
     /** Working directory in container */

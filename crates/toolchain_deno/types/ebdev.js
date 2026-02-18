@@ -69,6 +69,79 @@ export function enableInteractive() { interactiveMode = true; }
 export function disableInteractive() { interactiveMode = false; }
 
 // =============================================================================
+// Streaming Helpers
+// =============================================================================
+
+function createLineBuffer() {
+  let buffer = "";
+  return {
+    push(chunk) {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep incomplete line in buffer
+      return lines.map(l => l.endsWith("\r") ? l.slice(0, -1) : l);
+    },
+    flush() {
+      const remaining = buffer;
+      buffer = "";
+      if (remaining.length > 0) {
+        return [remaining.endsWith("\r") ? remaining.slice(0, -1) : remaining];
+      }
+      return [];
+    },
+  };
+}
+
+function hasStreamingCallbacks(options) {
+  return !!(options.onOutput || options.onStdout || options.onStderr);
+}
+
+async function readStream(streamId, options) {
+  const lineBuffered = options.lineBuffered || false;
+  const stdoutBuf = lineBuffered ? createLineBuffer() : null;
+  const stderrBuf = lineBuffered ? createLineBuffer() : null;
+  const combinedBuf = lineBuffered ? createLineBuffer() : null;
+
+  while (true) {
+    const event = await Deno.core.ops.op_stream_next(streamId);
+
+    if (event.type === "done") {
+      // Flush remaining line buffers
+      if (lineBuffered) {
+        if (options.onOutput) {
+          for (const line of combinedBuf.flush()) options.onOutput(line);
+        }
+        if (options.onStdout) {
+          for (const line of stdoutBuf.flush()) options.onStdout(line);
+        }
+        if (options.onStderr) {
+          for (const line of stderrBuf.flush()) options.onStderr(line);
+        }
+      }
+      return event.result;
+    }
+
+    if (event.type === "output") {
+      if (lineBuffered) {
+        if (options.onOutput) {
+          for (const line of combinedBuf.push(event.data)) options.onOutput(line);
+        }
+        if (event.stream === "stdout" && options.onStdout) {
+          for (const line of stdoutBuf.push(event.data)) options.onStdout(line);
+        }
+        if (event.stream === "stderr" && options.onStderr) {
+          for (const line of stderrBuf.push(event.data)) options.onStderr(line);
+        }
+      } else {
+        if (options.onOutput) options.onOutput(event.data);
+        if (event.stream === "stdout" && options.onStdout) options.onStdout(event.data);
+        if (event.stream === "stderr" && options.onStderr) options.onStderr(event.data);
+      }
+    }
+  }
+}
+
+// =============================================================================
 // Task Runner API
 // =============================================================================
 
@@ -76,17 +149,31 @@ export function disableInteractive() { interactiveMode = false; }
  * Execute a local command
  * @param {string[]} cmd - Command and arguments as array
  * @param {Object} [options] - Options
- * @param {string} [options.cwd] - Working directory
- * @param {Record<string, string>} [options.env] - Environment variables
- * @param {string} [options.name] - Display name for TUI
- * @param {number} [options.timeout] - Timeout in seconds (default: 300)
- * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+ * @returns {Promise<ExecResult>}
  * @throws {Error} If command fails or times out
  */
 export async function exec(cmd, options = {}) {
   if (!Array.isArray(cmd) || cmd.length === 0) {
     throw new Error("exec: cmd must be a non-empty array");
   }
+
+  if (hasStreamingCallbacks(options)) {
+    const streamId = await Deno.core.ops.op_start_stream({
+      type: "exec",
+      cmd,
+      cwd: options.cwd,
+      env: options.env,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: false,
+      interactive: options.interactive || interactiveMode,
+    });
+    const result = await readStream(streamId, options);
+    if (result.timedOut) throw new Error(`Command '${cmd.join(" ")}' timed out`);
+    if (!result.success) throw new Error(`Command '${cmd.join(" ")}' failed with exit code ${result.exitCode}`);
+    return result;
+  }
+
   return await Deno.core.ops.op_exec({
     cmd,
     cwd: options.cwd,
@@ -102,16 +189,27 @@ export async function exec(cmd, options = {}) {
  * Execute a local command, ignoring errors (returns result instead of throwing)
  * @param {string[]} cmd - Command and arguments as array
  * @param {Object} [options] - Options
- * @param {string} [options.cwd] - Working directory
- * @param {Record<string, string>} [options.env] - Environment variables
- * @param {string} [options.name] - Display name for TUI
- * @param {number} [options.timeout] - Timeout in seconds (default: 300)
- * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+ * @returns {Promise<ExecResult>}
  */
 export async function tryExec(cmd, options = {}) {
   if (!Array.isArray(cmd) || cmd.length === 0) {
     throw new Error("tryExec: cmd must be a non-empty array");
   }
+
+  if (hasStreamingCallbacks(options)) {
+    const streamId = await Deno.core.ops.op_start_stream({
+      type: "exec",
+      cmd,
+      cwd: options.cwd,
+      env: options.env,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: true,
+      interactive: options.interactive || interactiveMode,
+    });
+    return await readStream(streamId, options);
+  }
+
   return await Deno.core.ops.op_exec({
     cmd,
     cwd: options.cwd,
@@ -127,17 +225,32 @@ export async function tryExec(cmd, options = {}) {
  * Execute a shell script (supports pipes, redirects, etc.)
  * @param {string} script - Shell script to execute
  * @param {Object} [options] - Options
- * @param {string} [options.cwd] - Working directory
- * @param {Record<string, string>} [options.env] - Environment variables
- * @param {string} [options.name] - Display name for TUI
- * @param {number} [options.timeout] - Timeout in seconds (default: 300)
- * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+ * @returns {Promise<ExecResult>}
  * @throws {Error} If command fails or times out
  */
 export async function shell(script, options = {}) {
   if (typeof script !== "string") {
     throw new Error("shell: script must be a string");
   }
+
+  if (hasStreamingCallbacks(options)) {
+    const streamId = await Deno.core.ops.op_start_stream({
+      type: "shell",
+      script,
+      cwd: options.cwd,
+      env: options.env,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: false,
+      interactive: options.interactive || interactiveMode,
+    });
+    const displayName = options.name || (script.length > 40 ? script.slice(0, 37) + "..." : script);
+    const result = await readStream(streamId, options);
+    if (result.timedOut) throw new Error(`Command '${displayName}' timed out`);
+    if (!result.success) throw new Error(`Command '${displayName}' failed with exit code ${result.exitCode}`);
+    return result;
+  }
+
   return await Deno.core.ops.op_shell({
     script,
     cwd: options.cwd,
@@ -153,16 +266,27 @@ export async function shell(script, options = {}) {
  * Execute a shell script, ignoring errors (returns result instead of throwing)
  * @param {string} script - Shell script to execute
  * @param {Object} [options] - Options
- * @param {string} [options.cwd] - Working directory
- * @param {Record<string, string>} [options.env] - Environment variables
- * @param {string} [options.name] - Display name for TUI
- * @param {number} [options.timeout] - Timeout in seconds (default: 300)
- * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
+ * @returns {Promise<ExecResult>}
  */
 export async function tryShell(script, options = {}) {
   if (typeof script !== "string") {
     throw new Error("tryShell: script must be a string");
   }
+
+  if (hasStreamingCallbacks(options)) {
+    const streamId = await Deno.core.ops.op_start_stream({
+      type: "shell",
+      script,
+      cwd: options.cwd,
+      env: options.env,
+      name: options.name,
+      timeout: options.timeout,
+      ignore_error: true,
+      interactive: options.interactive || interactiveMode,
+    });
+    return await readStream(streamId, options);
+  }
+
   return await Deno.core.ops.op_shell({
     script,
     cwd: options.cwd,
@@ -229,6 +353,26 @@ export const docker = {
     if (!Array.isArray(cmd) || cmd.length === 0) {
       throw new Error("docker.exec: cmd must be a non-empty array");
     }
+
+    if (hasStreamingCallbacks(options)) {
+      const streamId = await Deno.core.ops.op_start_stream({
+        type: "docker_exec",
+        container,
+        cmd,
+        user: options.user,
+        env: options.env,
+        name: options.name,
+        timeout: options.timeout,
+        ignore_error: false,
+        interactive: options.interactive || interactiveMode,
+      });
+      const displayName = options.name || `docker exec ${container} ${cmd.join(" ")}`;
+      const result = await readStream(streamId, options);
+      if (result.timedOut) throw new Error(`Command '${displayName}' timed out`);
+      if (!result.success) throw new Error(`Command '${displayName}' failed with exit code ${result.exitCode}`);
+      return result;
+    }
+
     return await Deno.core.ops.op_docker_exec({
       container,
       cmd,
@@ -241,17 +385,6 @@ export const docker = {
     });
   },
 
-  /**
-   * Execute a command in a running container, ignoring errors
-   * @param {string} container - Container name or ID
-   * @param {string[]} cmd - Command and arguments as array
-   * @param {Object} [options] - Options
-   * @param {string} [options.user] - User to run as
-   * @param {Record<string, string>} [options.env] - Environment variables
-   * @param {string} [options.name] - Display name for TUI
-   * @param {number} [options.timeout] - Timeout in seconds (default: 300)
-   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
-   */
   async tryExec(container, cmd, options = {}) {
     if (typeof container !== "string") {
       throw new Error("docker.tryExec: container must be a string");
@@ -259,6 +392,22 @@ export const docker = {
     if (!Array.isArray(cmd) || cmd.length === 0) {
       throw new Error("docker.tryExec: cmd must be a non-empty array");
     }
+
+    if (hasStreamingCallbacks(options)) {
+      const streamId = await Deno.core.ops.op_start_stream({
+        type: "docker_exec",
+        container,
+        cmd,
+        user: options.user,
+        env: options.env,
+        name: options.name,
+        timeout: options.timeout,
+        ignore_error: true,
+        interactive: options.interactive || interactiveMode,
+      });
+      return await readStream(streamId, options);
+    }
+
     return await Deno.core.ops.op_docker_exec({
       container,
       cmd,
@@ -271,20 +420,6 @@ export const docker = {
     });
   },
 
-  /**
-   * Run a command in a new container
-   * @param {string} image - Docker image
-   * @param {string[]} cmd - Command and arguments as array
-   * @param {Object} [options] - Options
-   * @param {string[]} [options.volumes] - Volume mounts
-   * @param {string} [options.workdir] - Working directory in container
-   * @param {string} [options.network] - Network mode
-   * @param {Record<string, string>} [options.env] - Environment variables
-   * @param {string} [options.name] - Display name for TUI
-   * @param {number} [options.timeout] - Timeout in seconds (default: 300)
-   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
-   * @throws {Error} If command fails or times out
-   */
   async run(image, cmd, options = {}) {
     if (typeof image !== "string") {
       throw new Error("docker.run: image must be a string");
@@ -292,6 +427,28 @@ export const docker = {
     if (!Array.isArray(cmd) || cmd.length === 0) {
       throw new Error("docker.run: cmd must be a non-empty array");
     }
+
+    if (hasStreamingCallbacks(options)) {
+      const streamId = await Deno.core.ops.op_start_stream({
+        type: "docker_run",
+        image,
+        cmd,
+        volumes: options.volumes,
+        workdir: options.workdir,
+        network: options.network,
+        env: options.env,
+        name: options.name,
+        timeout: options.timeout,
+        ignore_error: false,
+        interactive: options.interactive || interactiveMode,
+      });
+      const displayName = options.name || `docker run ${image} ${cmd.join(" ")}`;
+      const result = await readStream(streamId, options);
+      if (result.timedOut) throw new Error(`Command '${displayName}' timed out`);
+      if (!result.success) throw new Error(`Command '${displayName}' failed with exit code ${result.exitCode}`);
+      return result;
+    }
+
     return await Deno.core.ops.op_docker_run({
       image,
       cmd,
@@ -306,19 +463,6 @@ export const docker = {
     });
   },
 
-  /**
-   * Run a command in a new container, ignoring errors
-   * @param {string} image - Docker image
-   * @param {string[]} cmd - Command and arguments as array
-   * @param {Object} [options] - Options
-   * @param {string[]} [options.volumes] - Volume mounts
-   * @param {string} [options.workdir] - Working directory in container
-   * @param {string} [options.network] - Network mode
-   * @param {Record<string, string>} [options.env] - Environment variables
-   * @param {string} [options.name] - Display name for TUI
-   * @param {number} [options.timeout] - Timeout in seconds (default: 300)
-   * @returns {Promise<{exitCode: number, success: boolean, timedOut: boolean}>}
-   */
   async tryRun(image, cmd, options = {}) {
     if (typeof image !== "string") {
       throw new Error("docker.tryRun: image must be a string");
@@ -326,6 +470,24 @@ export const docker = {
     if (!Array.isArray(cmd) || cmd.length === 0) {
       throw new Error("docker.tryRun: cmd must be a non-empty array");
     }
+
+    if (hasStreamingCallbacks(options)) {
+      const streamId = await Deno.core.ops.op_start_stream({
+        type: "docker_run",
+        image,
+        cmd,
+        volumes: options.volumes,
+        workdir: options.workdir,
+        network: options.network,
+        env: options.env,
+        name: options.name,
+        timeout: options.timeout,
+        ignore_error: true,
+        interactive: options.interactive || interactiveMode,
+      });
+      return await readStream(streamId, options);
+    }
+
     return await Deno.core.ops.op_docker_run({
       image,
       cmd,

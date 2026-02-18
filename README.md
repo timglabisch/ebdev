@@ -169,7 +169,38 @@ console.log(hostname.stdout.trim());
   name?: string,                   // display name in TUI
   timeout?: number,                // seconds, default: 300
   interactive?: boolean,           // run with real terminal (suspends TUI)
+  onOutput?: (data: string) => void,   // streaming callback (combined)
+  onStdout?: (data: string) => void,   // streaming callback (stdout only)
+  onStderr?: (data: string) => void,   // streaming callback (stderr only)
+  lineBuffered?: boolean,              // deliver complete lines to callbacks
 }
+```
+
+#### Streaming Output
+
+All exec/shell/docker commands support streaming callbacks via `onOutput`, `onStdout`, and `onStderr`. Output is still captured in `result.stdout`/`result.stderr` as before.
+
+```typescript
+// React to output as it arrives
+await shell("npm install", {
+  onOutput: (chunk) => {
+    if (chunk.includes("added")) log("Dependencies ready!");
+  },
+});
+
+// Line-buffered mode: callbacks receive complete lines (no \r\n)
+await shell("npm test", {
+  lineBuffered: true,
+  onStdout: (line) => {
+    if (line.includes("FAIL")) log(`Failed: ${line}`);
+  },
+});
+
+// Works with docker too
+await docker.exec("app", ["php", "artisan", "migrate"], {
+  lineBuffered: true,
+  onOutput: (line) => log(`migrate: ${line}`),
+});
 ```
 
 #### Docker
