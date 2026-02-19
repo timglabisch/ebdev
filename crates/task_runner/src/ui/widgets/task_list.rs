@@ -1,6 +1,7 @@
 use crate::ui::types::{CollapsedStage, TaskInfo, truncate_string, MAX_STAGE_NAME_LEN, MAX_TASK_NAME_LEN};
+use ratatui::layout::Margin;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 /// Draw task list. Returns the number of non-task lines at the top (for mouse click mapping).
 pub fn draw_task_list(
@@ -11,6 +12,7 @@ pub fn draw_task_list(
     current_stage: Option<&str>,
     focused_task: usize,
     pinned_task: Option<usize>,
+    scroll_offset: usize,
 ) -> usize {
     let mut lines: Vec<Line> = Vec::new();
     let mut non_task_lines: usize = 0;
@@ -82,9 +84,26 @@ pub fn draw_task_list(
         ]));
     }
 
+    let content_height = lines.len();
+    let visible_height = area.height.saturating_sub(2) as usize; // borders
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let scroll = scroll_offset.min(max_scroll);
+
     let task_list = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Tasks "));
+        .block(Block::default().borders(Borders::ALL).title(" Tasks "))
+        .scroll((scroll as u16, 0));
     frame.render_widget(task_list, area);
+
+    // Scrollbar
+    if content_height > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll);
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin::new(0, 1)),
+            &mut scrollbar_state,
+        );
+    }
 
     non_task_lines
 }

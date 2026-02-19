@@ -62,7 +62,10 @@ pub struct TuiUI {
     tasks: Vec<TaskInfo>,
     task_map: HashMap<CommandId, usize>,
     focused_task: usize,
-    scroll: ScrollState,
+    /// Scroll state for the output panel (pinned mode)
+    output_scroll: ScrollState,
+    /// Scroll offset for the task list panel
+    task_list_scroll: usize,
     should_quit: bool,
     rows: u16,
     cols: u16,
@@ -82,6 +85,8 @@ pub struct TuiUI {
     pinned_task: Option<usize>,
     /// Stored geometry of the left task list panel (for mouse hit-testing)
     task_list_area: Rc<Cell<Rect>>,
+    /// Stored geometry of the output panel (for mouse hit-testing)
+    output_area: Rc<Cell<Rect>>,
     /// Number of non-task lines at top of task list (collapsed stages + stage header) for click mapping
     task_list_offset: Rc<Cell<usize>>,
 }
@@ -103,7 +108,8 @@ impl TuiUI {
             tasks: Vec::new(),
             task_map: HashMap::new(),
             focused_task: 0,
-            scroll: ScrollState::new(),
+            output_scroll: ScrollState::new(),
+            task_list_scroll: 0,
             should_quit: false,
             rows,
             cols,
@@ -115,14 +121,49 @@ impl TuiUI {
             auto_quit: true,
             pinned_task: None,
             task_list_area: Rc::new(Cell::new(Rect::default())),
+            output_area: Rc::new(Cell::new(Rect::default())),
             task_list_offset: Rc::new(Cell::new(0)),
         })
     }
 
-    /// Focus a task by index and reset scroll state
+    /// Focus a task by index and reset output scroll state
     fn focus_task(&mut self, idx: usize) {
         self.focused_task = idx;
-        self.scroll.reset();
+        self.output_scroll.reset();
+        self.ensure_focused_visible();
+    }
+
+    /// Count non-task lines at top of the task list (collapsed stages + headers)
+    fn non_task_line_count(&self) -> usize {
+        let mut count = self.collapsed_stages.len();
+        if self.current_stage.is_some() {
+            if !self.collapsed_stages.is_empty() {
+                count += 1; // empty separator
+            }
+            count += 2; // header + empty line after
+        }
+        count
+    }
+
+    /// Ensure the focused task is visible in the task list by adjusting scroll
+    fn ensure_focused_visible(&mut self) {
+        let area = self.task_list_area.get();
+        let visible_height = area.height.saturating_sub(2) as usize; // borders
+        if visible_height == 0 {
+            return;
+        }
+
+        let focused_line = self.non_task_line_count() + self.focused_task;
+
+        // Scroll up if focused is above viewport
+        if focused_line < self.task_list_scroll {
+            self.task_list_scroll = focused_line;
+        }
+
+        // Scroll down if focused is below viewport
+        if focused_line >= self.task_list_scroll + visible_height {
+            self.task_list_scroll = focused_line - visible_height + 1;
+        }
     }
 
     /// Toggle pin on a task index. If already pinned, unpin.
@@ -132,7 +173,33 @@ impl TuiUI {
         } else {
             self.pinned_task = Some(idx);
         }
-        self.scroll.reset();
+        self.output_scroll.reset();
+    }
+
+    /// Check if a mouse position is over the task list panel
+    fn is_over_task_list(&self, col: u16, row: u16) -> bool {
+        let area = self.task_list_area.get();
+        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+    }
+
+    /// Check if a mouse position is over the output panel
+    fn is_over_output(&self, col: u16, row: u16) -> bool {
+        let area = self.output_area.get();
+        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+    }
+
+    /// Scroll the task list by delta lines, clamped to valid range
+    fn scroll_task_list(&mut self, delta: i32) {
+        let total_lines = self.non_task_line_count() + self.tasks.len();
+        let area = self.task_list_area.get();
+        let visible_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = total_lines.saturating_sub(visible_height);
+
+        if delta < 0 {
+            self.task_list_scroll = self.task_list_scroll.saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.task_list_scroll = (self.task_list_scroll + delta as usize).min(max_scroll);
+        }
     }
 
     fn draw(&mut self) -> io::Result<()> {
@@ -160,26 +227,28 @@ impl TuiUI {
             let max_scroll = content_height.saturating_sub(visible_height);
 
             // Apply auto-scroll: jump to bottom
-            if self.scroll.auto_scroll {
-                self.scroll.offset = max_scroll as u16;
+            if self.output_scroll.auto_scroll {
+                self.output_scroll.offset = max_scroll as u16;
             }
 
             // Clamp scroll_offset to valid range
-            self.scroll.offset = (self.scroll.offset as usize).min(max_scroll) as u16;
+            self.output_scroll.offset = (self.output_scroll.offset as usize).min(max_scroll) as u16;
 
             // Re-enable auto_scroll if we're at the bottom
-            if self.scroll.offset as usize >= max_scroll && max_scroll > 0 {
-                self.scroll.auto_scroll = true;
+            if self.output_scroll.offset as usize >= max_scroll && max_scroll > 0 {
+                self.output_scroll.auto_scroll = true;
             }
         }
 
         let tasks = &self.tasks;
         let task_name = &self.task_name;
         let focused_task = self.focused_task;
-        let scroll_offset = self.scroll.offset;
+        let output_scroll_offset = self.output_scroll.offset;
+        let task_list_scroll = self.task_list_scroll;
         let collapsed_stages = &self.collapsed_stages;
         let current_stage = &self.current_stage;
         let task_list_area_rc = self.task_list_area.clone();
+        let output_area_rc = self.output_area.clone();
         let task_list_offset_rc = self.task_list_offset.clone();
         let palette = &self.palette;
 
@@ -216,17 +285,18 @@ impl TuiUI {
                     ])
                     .split(chunks[1]);
 
-                // Store task list area for mouse hit-testing
+                // Store areas for mouse hit-testing
                 task_list_area_rc.set(task_chunks[0]);
+                output_area_rc.set(task_chunks[1]);
 
                 // Task list with collapsed stages
-                let offset = task_list::draw_task_list(frame, task_chunks[0], tasks, collapsed_stages, current_stage.as_deref(), focused_task, pinned_task);
+                let offset = task_list::draw_task_list(frame, task_chunks[0], tasks, collapsed_stages, current_stage.as_deref(), focused_task, pinned_task, task_list_scroll);
                 task_list_offset_rc.set(offset);
 
                 // Right panel: pinned mode vs stacked mode
                 if let Some(pin_idx) = pinned_task {
                     if pin_idx < tasks.len() {
-                        task_output::draw_task_output(frame, task_chunks[1], &tasks[pin_idx], scroll_offset);
+                        task_output::draw_task_output(frame, task_chunks[1], &tasks[pin_idx], output_scroll_offset);
                     }
                 } else {
                     task_output::draw_stacked_outputs(frame, task_chunks[1], tasks);
@@ -297,32 +367,32 @@ impl TuiUI {
             }
             KeyCode::Up => {
                 if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(-1);
+                    self.output_scroll.scroll_by(-1);
                 }
             }
             KeyCode::Down => {
                 if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(1);
+                    self.output_scroll.scroll_by(1);
                 }
             }
             KeyCode::PageUp => {
                 if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(-10);
+                    self.output_scroll.scroll_by(-10);
                 }
             }
             KeyCode::PageDown => {
                 if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(10);
+                    self.output_scroll.scroll_by(10);
                 }
             }
             KeyCode::End => {
                 if self.pinned_task.is_some() {
-                    self.scroll.jump_to_end();
+                    self.output_scroll.jump_to_end();
                 }
             }
             KeyCode::Home => {
                 if self.pinned_task.is_some() {
-                    self.scroll.jump_to_start();
+                    self.output_scroll.jump_to_start();
                 }
             }
             _ => {}
@@ -331,21 +401,28 @@ impl TuiUI {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        let col = mouse.column;
+        let row = mouse.row;
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(task_idx) = self.task_index_from_click(mouse.column, mouse.row) {
+                if let Some(task_idx) = self.task_index_from_click(col, row) {
                     self.focus_task(task_idx);
                     self.toggle_pin(task_idx);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(-3);
+                if self.is_over_task_list(col, row) {
+                    self.scroll_task_list(-3);
+                } else if self.is_over_output(col, row) && self.pinned_task.is_some() {
+                    self.output_scroll.scroll_by(-3);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.pinned_task.is_some() {
-                    self.scroll.scroll_by(3);
+                if self.is_over_task_list(col, row) {
+                    self.scroll_task_list(3);
+                } else if self.is_over_output(col, row) && self.pinned_task.is_some() {
+                    self.output_scroll.scroll_by(3);
                 }
             }
             _ => {}
@@ -354,12 +431,12 @@ impl TuiUI {
 
     /// Map a mouse click position to a task index, if it falls on a task row in the task list.
     fn task_index_from_click(&self, col: u16, row: u16) -> Option<usize> {
-        let area = self.task_list_area.get();
-        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+        if !self.is_over_task_list(col, row) {
             return None;
         }
-        // Subtract area y, border (1 row), and non-task offset lines
-        let row_in_list = row.saturating_sub(area.y + 1) as usize;
+        let area = self.task_list_area.get();
+        // Row within the inner area (after border), plus scroll offset
+        let row_in_list = row.saturating_sub(area.y + 1) as usize + self.task_list_scroll;
         let offset = self.task_list_offset.get();
         if row_in_list < offset {
             return None;
@@ -467,6 +544,7 @@ impl TaskRunnerUI for TuiUI {
             self.task_map.clear();
             self.focused_task = 0;
             self.pinned_task = None;
+            self.task_list_scroll = 0;
         }
 
         // Set new stage name
