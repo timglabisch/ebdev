@@ -40,20 +40,19 @@ impl TaskState {
     }
 }
 
-/// Collapsed stage info for TUI
-#[derive(Debug, Clone)]
-pub struct CollapsedStage {
+/// Completed stage with preserved tasks for TUI
+pub struct CompletedStage {
     pub name: String,
-    pub task_count: usize,
+    pub tasks: Vec<TaskInfo>,
     pub total_duration: Duration,
     pub success: bool,
     pub failed_count: usize,
+    pub expanded: bool,
 }
 
-impl CollapsedStage {
-    /// Create a collapsed stage summary from a list of tasks
-    pub fn from_tasks(name: String, tasks: &[TaskInfo]) -> Self {
-        let task_count = tasks.len();
+impl CompletedStage {
+    /// Create a completed stage from owned tasks
+    pub fn from_tasks(name: String, tasks: Vec<TaskInfo>) -> Self {
         let failed_count = tasks.iter().filter(|t| t.state.is_failed()).count();
         let success = failed_count == 0;
         let total_duration: Duration = tasks.iter()
@@ -62,10 +61,49 @@ impl CollapsedStage {
 
         Self {
             name,
-            task_count,
+            tasks,
             total_duration,
             success,
             failed_count,
+            expanded: false,
+        }
+    }
+
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+    }
+}
+
+/// Focus target for unified navigation across completed stages and current tasks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    CompletedStage(usize),
+    CompletedTask { stage: usize, task: usize },
+    CurrentTask(usize),
+}
+
+/// Pin target for the output panel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinTarget {
+    CompletedTask { stage: usize, task: usize },
+    CurrentTask(usize),
+}
+
+impl PinTarget {
+    pub fn resolve_task<'a>(
+        &self,
+        completed_stages: &'a [CompletedStage],
+        current_tasks: &'a [TaskInfo],
+    ) -> Option<&'a TaskInfo> {
+        match self {
+            PinTarget::CompletedTask { stage, task } => {
+                completed_stages.get(*stage).and_then(|s| s.tasks.get(*task))
+            }
+            PinTarget::CurrentTask(idx) => current_tasks.get(*idx),
         }
     }
 }

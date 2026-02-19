@@ -15,9 +15,9 @@ pub fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto
 
     // Help text
     let help_text = if has_registered_tasks {
-        "j/k: select | Enter: pin | ↑↓: scroll | /: run task | q: quit"
+        "j/k: navigate | Enter: expand/pin | ↑↓: scroll | /: run task | q: quit"
     } else {
-        "j/k: select | Enter: pin | ↑↓: scroll | q: quit"
+        "j/k: navigate | Enter: expand/pin | ↑↓: scroll | q: quit"
     };
     spans.push(Span::styled(help_text, Style::default().fg(Color::DarkGray)));
 

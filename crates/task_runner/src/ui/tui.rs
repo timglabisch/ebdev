@@ -1,5 +1,5 @@
 use super::TaskRunnerUI;
-use super::types::{CollapsedStage, TaskInfo, TaskState, format_bytes};
+use super::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, TaskState, format_bytes};
 use super::widgets::command_palette::{self, CommandPaletteState};
 use super::widgets::{header, help, task_list, task_output};
 use crate::command::{CommandId, CommandResult, RegisteredTask};
@@ -61,7 +61,7 @@ pub struct TuiUI {
     task_name: String,
     tasks: Vec<TaskInfo>,
     task_map: HashMap<CommandId, usize>,
-    focused_task: usize,
+    focus: FocusTarget,
     /// Scroll state for the output panel (pinned mode)
     output_scroll: ScrollState,
     /// Scroll offset for the task list panel
@@ -69,8 +69,8 @@ pub struct TuiUI {
     should_quit: bool,
     rows: u16,
     cols: u16,
-    /// Collapsed stages from previous stage transitions
-    collapsed_stages: Vec<CollapsedStage>,
+    /// Completed stages from previous stage transitions (tasks preserved)
+    completed_stages: Vec<CompletedStage>,
     /// Current stage name (None = default stage)
     current_stage: Option<String>,
     /// Registered tasks for Command Palette
@@ -81,14 +81,12 @@ pub struct TuiUI {
     triggered_task: Option<String>,
     /// Auto-quit when tasks complete (disabled when user interacts with Command Palette)
     auto_quit: bool,
-    /// Pinned task index: None = stacked mode (default), Some(idx) = show only that task
-    pinned_task: Option<usize>,
+    /// Pinned task: None = stacked mode (default), Some = show only that task's output
+    pinned_task: Option<PinTarget>,
     /// Stored geometry of the left task list panel (for mouse hit-testing)
     task_list_area: Rc<Cell<Rect>>,
     /// Stored geometry of the output panel (for mouse hit-testing)
     output_area: Rc<Cell<Rect>>,
-    /// Number of non-task lines at top of task list (collapsed stages + stage header) for click mapping
-    task_list_offset: Rc<Cell<usize>>,
 }
 
 impl TuiUI {
@@ -107,13 +105,13 @@ impl TuiUI {
             task_name,
             tasks: Vec::new(),
             task_map: HashMap::new(),
-            focused_task: 0,
+            focus: FocusTarget::CurrentTask(0),
             output_scroll: ScrollState::new(),
             task_list_scroll: 0,
             should_quit: false,
             rows,
             cols,
-            collapsed_stages: Vec::new(),
+            completed_stages: Vec::new(),
             current_stage: None,
             registered_tasks: Vec::new(),
             palette: CommandPaletteState::new(),
@@ -122,30 +120,79 @@ impl TuiUI {
             pinned_task: None,
             task_list_area: Rc::new(Cell::new(Rect::default())),
             output_area: Rc::new(Cell::new(Rect::default())),
-            task_list_offset: Rc::new(Cell::new(0)),
         })
     }
 
-    /// Focus a task by index and reset output scroll state
-    fn focus_task(&mut self, idx: usize) {
-        self.focused_task = idx;
+    /// Build a visual row map: each entry is one rendered line in the task list.
+    /// `Some(target)` = focusable row, `None` = non-focusable (separator, stage header).
+    fn build_visual_rows(&self) -> Vec<Option<FocusTarget>> {
+        let mut rows = Vec::new();
+        for (si, stage) in self.completed_stages.iter().enumerate() {
+            rows.push(Some(FocusTarget::CompletedStage(si)));
+            if stage.expanded {
+                for ti in 0..stage.tasks.len() {
+                    rows.push(Some(FocusTarget::CompletedTask { stage: si, task: ti }));
+                }
+            }
+        }
+        if self.current_stage.is_some() {
+            if !self.completed_stages.is_empty() {
+                rows.push(None); // separator
+            }
+            rows.push(None); // header
+            rows.push(None); // empty line
+        }
+        for ti in 0..self.tasks.len() {
+            rows.push(Some(FocusTarget::CurrentTask(ti)));
+        }
+        rows
+    }
+
+    /// Move focus by delta steps through focusable items
+    fn move_focus(&mut self, delta: i32) {
+        let focusable: Vec<FocusTarget> = self.build_visual_rows().into_iter().flatten().collect();
+        if focusable.is_empty() {
+            return;
+        }
+        let current = focusable.iter().position(|i| *i == self.focus).unwrap_or(0);
+        let new_idx = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (current + delta as usize).min(focusable.len() - 1)
+        };
+        self.focus = focusable[new_idx];
         self.output_scroll.reset();
         self.ensure_focused_visible();
     }
 
-    /// Count non-task lines at top of the task list (collapsed stages + headers)
-    fn non_task_line_count(&self) -> usize {
-        let mut count = self.collapsed_stages.len();
-        if self.current_stage.is_some() {
-            if !self.collapsed_stages.is_empty() {
-                count += 1; // empty separator
-            }
-            count += 2; // header + empty line after
+    /// Toggle pin on a target. If already pinned to the same target, unpin.
+    fn toggle_pin(&mut self, pin: PinTarget) {
+        if self.pinned_task == Some(pin) {
+            self.pinned_task = None;
+        } else {
+            self.pinned_task = Some(pin);
         }
-        count
+        self.output_scroll.reset();
     }
 
-    /// Ensure the focused task is visible in the task list by adjusting scroll
+    /// Handle Enter key: toggle expand on stage headers, toggle pin on tasks
+    fn handle_enter(&mut self) {
+        match self.focus {
+            FocusTarget::CompletedStage(idx) => {
+                if let Some(stage) = self.completed_stages.get_mut(idx) {
+                    stage.toggle_expanded();
+                }
+            }
+            FocusTarget::CompletedTask { stage, task } => {
+                self.toggle_pin(PinTarget::CompletedTask { stage, task });
+            }
+            FocusTarget::CurrentTask(idx) => {
+                self.toggle_pin(PinTarget::CurrentTask(idx));
+            }
+        }
+    }
+
+    /// Ensure the focused item is visible in the task list by adjusting scroll
     fn ensure_focused_visible(&mut self) {
         let area = self.task_list_area.get();
         let visible_height = area.height.saturating_sub(2) as usize; // borders
@@ -153,27 +200,26 @@ impl TuiUI {
             return;
         }
 
-        let focused_line = self.non_task_line_count() + self.focused_task;
+        let focused_line = self.build_visual_rows().iter()
+            .position(|r| *r == Some(self.focus))
+            .unwrap_or(0);
 
-        // Scroll up if focused is above viewport
         if focused_line < self.task_list_scroll {
             self.task_list_scroll = focused_line;
         }
-
-        // Scroll down if focused is below viewport
         if focused_line >= self.task_list_scroll + visible_height {
             self.task_list_scroll = focused_line - visible_height + 1;
         }
     }
 
-    /// Toggle pin on a task index. If already pinned, unpin.
-    fn toggle_pin(&mut self, idx: usize) {
-        if self.pinned_task == Some(idx) {
-            self.pinned_task = None;
-        } else {
-            self.pinned_task = Some(idx);
+    /// Map a mouse click position to a FocusTarget
+    fn focus_target_from_click(&self, col: u16, row: u16) -> Option<FocusTarget> {
+        if !self.is_over_task_list(col, row) {
+            return None;
         }
-        self.output_scroll.reset();
+        let area = self.task_list_area.get();
+        let row_in_list = row.saturating_sub(area.y + 1) as usize + self.task_list_scroll;
+        self.build_visual_rows().get(row_in_list).copied().flatten()
     }
 
     /// Check if a mouse position is over the task list panel
@@ -190,7 +236,7 @@ impl TuiUI {
 
     /// Scroll the task list by delta lines, clamped to valid range
     fn scroll_task_list(&mut self, delta: i32) {
-        let total_lines = self.non_task_line_count() + self.tasks.len();
+        let total_lines = self.build_visual_rows().len();
         let area = self.task_list_area.get();
         let visible_height = area.height.saturating_sub(2) as usize;
         let max_scroll = total_lines.saturating_sub(visible_height);
@@ -200,6 +246,11 @@ impl TuiUI {
         } else {
             self.task_list_scroll = (self.task_list_scroll + delta as usize).min(max_scroll);
         }
+    }
+
+    /// Resolve the pinned task to a &TaskInfo reference (if valid)
+    fn resolve_pinned_task(&self) -> Option<&TaskInfo> {
+        self.pinned_task.as_ref()?.resolve_task(&self.completed_stages, &self.tasks)
     }
 
     fn draw(&mut self) -> io::Result<()> {
@@ -218,12 +269,10 @@ impl TuiUI {
             let terminal = self.terminal.as_mut().unwrap();
             let visible_height = terminal.size()?.height.saturating_sub(10) as usize;
 
-            // Get content height for focused task
-            let content_height = if self.focused_task < self.tasks.len() {
-                self.tasks[self.focused_task].screen_text().lines.len()
-            } else {
-                0
-            };
+            // Get content height for pinned task
+            let content_height = self.resolve_pinned_task()
+                .map(|t| t.screen_text().lines.len())
+                .unwrap_or(0);
             let max_scroll = content_height.saturating_sub(visible_height);
 
             // Apply auto-scroll: jump to bottom
@@ -242,14 +291,13 @@ impl TuiUI {
 
         let tasks = &self.tasks;
         let task_name = &self.task_name;
-        let focused_task = self.focused_task;
+        let focus = self.focus;
         let output_scroll_offset = self.output_scroll.offset;
         let task_list_scroll = self.task_list_scroll;
-        let collapsed_stages = &self.collapsed_stages;
+        let completed_stages = &self.completed_stages;
         let current_stage = &self.current_stage;
         let task_list_area_rc = self.task_list_area.clone();
         let output_area_rc = self.output_area.clone();
-        let task_list_offset_rc = self.task_list_offset.clone();
         let palette = &self.palette;
 
         let terminal = self.terminal.as_mut().unwrap();
@@ -267,10 +315,10 @@ impl TuiUI {
                 .split(area);
 
             // Header
-            header::draw_header(frame, chunks[0], task_name, tasks, collapsed_stages);
+            header::draw_header(frame, chunks[0], task_name, tasks, completed_stages);
 
             // Tasks area
-            if tasks.is_empty() && collapsed_stages.is_empty() {
+            if tasks.is_empty() && completed_stages.is_empty() {
                 let waiting = Paragraph::new("Waiting for tasks...")
                     .style(Style::default().fg(Color::DarkGray))
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
@@ -289,14 +337,13 @@ impl TuiUI {
                 task_list_area_rc.set(task_chunks[0]);
                 output_area_rc.set(task_chunks[1]);
 
-                // Task list with collapsed stages
-                let offset = task_list::draw_task_list(frame, task_chunks[0], tasks, collapsed_stages, current_stage.as_deref(), focused_task, pinned_task, task_list_scroll);
-                task_list_offset_rc.set(offset);
+                // Task list with completed stages
+                task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
 
                 // Right panel: pinned mode vs stacked mode
-                if let Some(pin_idx) = pinned_task {
-                    if pin_idx < tasks.len() {
-                        task_output::draw_task_output(frame, task_chunks[1], &tasks[pin_idx], output_scroll_offset);
+                if let Some(ref pin) = pinned_task {
+                    if let Some(task) = pin.resolve_task(completed_stages, tasks) {
+                        task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
                     }
                 } else {
                     task_output::draw_stacked_outputs(frame, task_chunks[1], tasks);
@@ -335,8 +382,6 @@ impl TuiUI {
     }
 
     fn handle_key(&mut self, code: KeyCode) -> io::Result<()> {
-        let task_count = self.tasks.len();
-
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
@@ -347,23 +392,17 @@ impl TuiUI {
                     self.auto_quit = false;
                 }
             }
-            // j / Tab: next task
+            // j / Tab: next item
             KeyCode::Char('j') | KeyCode::Tab => {
-                if task_count > 0 {
-                    self.focus_task((self.focused_task + 1) % task_count);
-                }
+                self.move_focus(1);
             }
-            // k / Shift+Tab: previous task
+            // k / Shift+Tab: previous item
             KeyCode::Char('k') | KeyCode::BackTab => {
-                if task_count > 0 {
-                    self.focus_task((self.focused_task + task_count - 1) % task_count);
-                }
+                self.move_focus(-1);
             }
-            // Enter: toggle pin on focused task
+            // Enter: expand/collapse stage or toggle pin on task
             KeyCode::Enter => {
-                if task_count > 0 {
-                    self.toggle_pin(self.focused_task);
-                }
+                self.handle_enter();
             }
             KeyCode::Up => {
                 if self.pinned_task.is_some() {
@@ -406,9 +445,9 @@ impl TuiUI {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(task_idx) = self.task_index_from_click(col, row) {
-                    self.focus_task(task_idx);
-                    self.toggle_pin(task_idx);
+                if let Some(target) = self.focus_target_from_click(col, row) {
+                    self.focus = target;
+                    self.handle_enter();
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -427,22 +466,6 @@ impl TuiUI {
             }
             _ => {}
         }
-    }
-
-    /// Map a mouse click position to a task index, if it falls on a task row in the task list.
-    fn task_index_from_click(&self, col: u16, row: u16) -> Option<usize> {
-        if !self.is_over_task_list(col, row) {
-            return None;
-        }
-        let area = self.task_list_area.get();
-        // Row within the inner area (after border), plus scroll offset
-        let row_in_list = row.saturating_sub(area.y + 1) as usize + self.task_list_scroll;
-        let offset = self.task_list_offset.get();
-        if row_in_list < offset {
-            return None;
-        }
-        let task_idx = row_in_list - offset;
-        if task_idx < self.tasks.len() { Some(task_idx) } else { None }
     }
 
     fn handle_command_palette_input(&mut self, key: KeyCode) -> io::Result<bool> {
@@ -493,7 +516,7 @@ impl TaskRunnerUI for TuiUI {
 
         // Auto-focus on new task only when not pinned
         if self.pinned_task.is_none() {
-            self.focused_task = idx;
+            self.focus = FocusTarget::CurrentTask(idx);
         }
     }
 
@@ -534,21 +557,23 @@ impl TaskRunnerUI for TuiUI {
     fn on_parallel_end(&mut self) {}
 
     fn on_stage_begin(&mut self, name: &str) {
-        // Collapse current tasks into a stage summary if there are any
+        // Move current tasks into a completed stage (preserving task data)
         if !self.tasks.is_empty() {
-            let stage_name = self.current_stage.clone().unwrap_or_else(|| "Default".to_string());
-            self.collapsed_stages.push(CollapsedStage::from_tasks(stage_name, &self.tasks));
-
-            // Clear current tasks
-            self.tasks.clear();
+            let stage_name = self.current_stage.take().unwrap_or_else(|| "Default".to_string());
+            let tasks = std::mem::take(&mut self.tasks);
+            self.completed_stages.push(CompletedStage::from_tasks(stage_name, tasks));
             self.task_map.clear();
-            self.focused_task = 0;
-            self.pinned_task = None;
-            self.task_list_scroll = 0;
+
+            // Convert pin: CurrentTask → CompletedTask in the new completed stage
+            if let Some(PinTarget::CurrentTask(idx)) = self.pinned_task {
+                let stage_idx = self.completed_stages.len() - 1;
+                self.pinned_task = Some(PinTarget::CompletedTask { stage: stage_idx, task: idx });
+            }
         }
 
-        // Set new stage name
         self.current_stage = Some(name.to_string());
+        self.task_list_scroll = 0;
+        self.focus = FocusTarget::CurrentTask(0);
     }
 
     fn on_task_registered(&mut self, name: &str, description: &str) {
@@ -568,10 +593,13 @@ impl TaskRunnerUI for TuiUI {
     }
 
     fn on_log(&mut self, message: &str) {
-        if let Some(task) = self.tasks.get(self.focused_task) {
-            if let Ok(mut parser) = task.parser.lock() {
-                let formatted = format!("{}\r\n", message);
-                parser.process(formatted.as_bytes());
+        // Route logs to the focused current task (not completed tasks)
+        if let FocusTarget::CurrentTask(idx) = self.focus {
+            if let Some(task) = self.tasks.get(idx) {
+                if let Ok(mut parser) = task.parser.lock() {
+                    let formatted = format!("{}\r\n", message);
+                    parser.process(formatted.as_bytes());
+                }
             }
         }
     }
@@ -591,7 +619,7 @@ impl TaskRunnerUI for TuiUI {
         // Auto-focus on running task only when not pinned
         if self.pinned_task.is_none() {
             if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
-                self.focused_task = idx;
+                self.focus = FocusTarget::CurrentTask(idx);
             }
         }
 
@@ -630,8 +658,12 @@ impl TaskRunnerUI for TuiUI {
             self.terminal = None;
         }
 
-        // Print output of failed tasks so the user can see what went wrong
-        for task in &self.tasks {
+        // Print output of failed tasks from all stages + current tasks
+        let all_tasks = self.completed_stages.iter()
+            .flat_map(|s| s.tasks.iter())
+            .chain(self.tasks.iter());
+
+        for task in all_tasks {
             if !task.state.is_failed() {
                 continue;
             }
