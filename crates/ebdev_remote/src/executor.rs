@@ -67,6 +67,6 @@ pub trait Executor {
     fn execute(
         &mut self,
         options: ExecuteOptions,
-        event_tx: mpsc::Sender<ExecuteEvent>,
+        event_tx: mpsc::UnboundedSender<ExecuteEvent>,
     ) -> impl std::future::Future<Output = Result<ExecuteHandle, ExecutorError>> + Send;
 }

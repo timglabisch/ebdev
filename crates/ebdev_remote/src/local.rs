@@ -22,7 +22,7 @@ impl Executor for LocalExecutor {
     async fn execute(
         &mut self,
         options: ExecuteOptions,
-        event_tx: mpsc::Sender<ExecuteEvent>,
+        event_tx: mpsc::UnboundedSender<ExecuteEvent>,
     ) -> Result<ExecuteHandle, ExecutorError> {
         if options.pty.is_some() {
             start_pty_process(options, event_tx).await
@@ -35,7 +35,7 @@ impl Executor for LocalExecutor {
 /// Startet einen einfachen Prozess ohne PTY
 async fn start_simple_process(
     options: ExecuteOptions,
-    event_tx: mpsc::Sender<ExecuteEvent>,
+    event_tx: mpsc::UnboundedSender<ExecuteEvent>,
 ) -> Result<ExecuteHandle, ExecutorError> {
     let mut cmd = Command::new(&options.program);
     cmd.args(&options.args);
@@ -83,12 +83,10 @@ async fn start_simple_process(
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = tx
-                            .send(ExecuteEvent::Output {
-                                stream: OutputStream::Stdout,
-                                data: buf[..n].to_vec(),
-                            })
-                            .await;
+                        let _ = tx.send(ExecuteEvent::Output {
+                            stream: OutputStream::Stdout,
+                            data: buf[..n].to_vec(),
+                        });
                     }
                     Err(_) => break,
                 }
@@ -105,12 +103,10 @@ async fn start_simple_process(
                 match stderr.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = tx
-                            .send(ExecuteEvent::Output {
-                                stream: OutputStream::Stderr,
-                                data: buf[..n].to_vec(),
-                            })
-                            .await;
+                        let _ = tx.send(ExecuteEvent::Output {
+                            stream: OutputStream::Stderr,
+                            data: buf[..n].to_vec(),
+                        });
                     }
                     Err(_) => break,
                 }
@@ -135,7 +131,7 @@ async fn start_simple_process(
         if let Some(h) = stdout_handle { let _ = h.await; }
         if let Some(h) = stderr_handle { let _ = h.await; }
 
-        let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
+        let _ = event_tx.send(ExecuteEvent::Exit { code });
     });
 
     Ok(ExecuteHandle {
@@ -257,7 +253,7 @@ fn resolve_program_path(program: &str) -> String {
 /// Startet einen Prozess mit PTY
 async fn start_pty_process(
     options: ExecuteOptions,
-    event_tx: mpsc::Sender<ExecuteEvent>,
+    event_tx: mpsc::UnboundedSender<ExecuteEvent>,
 ) -> Result<ExecuteHandle, ExecutorError> {
     let pty_config = options.pty.unwrap_or(PtyConfig { cols: 80, rows: 24 });
     let pty = Pty::new()?;
@@ -372,6 +368,11 @@ async fn start_pty_process(
 
     let master_fd_owned = pty.master;
 
+    // Notify used by wait task to signal the reader that the child has exited.
+    // The reader then drains remaining PTY buffer data and exits.
+    let child_exited = std::sync::Arc::new(tokio::sync::Notify::new());
+    let child_exited_reader = child_exited.clone();
+
     // PTY I/O Task
     let event_tx_clone = event_tx.clone();
     let reader_handle = tokio::spawn(async move {
@@ -380,20 +381,23 @@ async fn start_pty_process(
         let async_fd = match AsyncFd::new(master_fd_owned) {
             Ok(fd) => fd,
             Err(e) => {
-                let _ = event_tx_clone.send(ExecuteEvent::Exit { code: Some(1) }).await;
+                let _ = event_tx_clone.send(ExecuteEvent::Exit { code: Some(1) });
                 eprintln!("Failed to create AsyncFd: {}", e);
                 return;
             }
         };
 
         let mut buf = [0u8; 4096];
+        let child_done = child_exited_reader.notified();
+        tokio::pin!(child_done);
+        let mut draining = false;
 
         loop {
             tokio::select! {
                 biased;
 
                 // Schreibe stdin zum PTY
-                Some(data) = stdin_rx.recv() => {
+                Some(data) = stdin_rx.recv(), if !draining => {
                     let fd = async_fd.as_raw_fd();
                     let mut written = 0;
                     while written < data.len() {
@@ -425,7 +429,7 @@ async fn start_pty_process(
                 }
 
                 // Handle resize
-                Some((cols, rows)) = resize_rx.recv() => {
+                Some((cols, rows)) = resize_rx.recv(), if !draining => {
                     let size = libc::winsize {
                         ws_row: rows,
                         ws_col: cols,
@@ -440,22 +444,38 @@ async fn start_pty_process(
                     }
                 }
 
-                // Lese vom PTY
-                readable = async_fd.readable() => {
-                    match readable {
-                        Ok(mut guard) => {
+                // Child exited — switch to drain mode
+                _ = &mut child_done, if !draining => {
+                    draining = true;
+                    // Continue loop to drain remaining PTY buffer
+                }
+
+                // Lese vom PTY (in drain mode: with timeout)
+                result = async {
+                    if draining {
+                        // Short timeout: just drain what's buffered, don't wait forever
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            async_fd.readable(),
+                        ).await
+                            .ok()
+                            .and_then(|r| r.ok())
+                    } else {
+                        async_fd.readable().await.ok()
+                    }
+                } => {
+                    match result {
+                        Some(mut guard) => {
                             let fd = async_fd.as_raw_fd();
                             let n = unsafe {
                                 libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                             };
 
                             if n > 0 {
-                                let _ = event_tx_clone
-                                    .send(ExecuteEvent::Output {
-                                        stream: OutputStream::Stdout,
-                                        data: buf[..n as usize].to_vec(),
-                                    })
-                                    .await;
+                                let _ = event_tx_clone.send(ExecuteEvent::Output {
+                                    stream: OutputStream::Stdout,
+                                    data: buf[..n as usize].to_vec(),
+                                });
                                 guard.clear_ready();
                             } else if n == 0 {
                                 break;
@@ -463,14 +483,20 @@ async fn start_pty_process(
                                 let err = std::io::Error::last_os_error();
                                 if err.kind() == std::io::ErrorKind::WouldBlock {
                                     guard.clear_ready();
-                                } else if err.raw_os_error() == Some(libc::EIO) {
-                                    break;
+                                    if draining {
+                                        // No more data and child is dead — we're done
+                                        break;
+                                    }
                                 } else {
+                                    // EIO or other error — PTY closed
                                     break;
                                 }
                             }
                         }
-                        Err(_) => break,
+                        None => {
+                            // Timeout in drain mode — no more data coming
+                            break;
+                        }
                     }
                 }
             }
@@ -504,10 +530,13 @@ async fn start_pty_process(
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         };
 
-        // Wait for PTY reader to drain all remaining output before sending Exit
+        // Signal reader that child is dead so it switches to drain mode
+        child_exited.notify_one();
+
+        // Wait for reader to finish draining (should be fast now)
         let _ = reader_handle.await;
 
-        let _ = event_tx.send(ExecuteEvent::Exit { code }).await;
+        let _ = event_tx.send(ExecuteEvent::Exit { code });
     });
 
     Ok(ExecuteHandle {

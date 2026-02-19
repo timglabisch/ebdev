@@ -65,8 +65,8 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
     let mut sessions: HashMap<u32, Session> = HashMap::new();
     let mut executor = LocalExecutor::new();
 
-    // Gemeinsamer Event-Channel für alle Prozesse
-    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(256);
+    // Gemeinsamer Event-Channel für alle Prozesse (unbounded to avoid backpressure)
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
 
     loop {
         tokio::select! {
@@ -126,14 +126,14 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
                                 continue;
                             }
 
-                            // Event-Channel für diese Session
-                            let (session_event_tx, mut session_event_rx) = mpsc::channel(64);
+                            // Event-Channel für diese Session (unbounded to avoid backpressure)
+                            let (session_event_tx, mut session_event_rx) = mpsc::unbounded_channel();
 
                             // Forward events to main channel
                             let main_tx = event_tx.clone();
                             tokio::spawn(async move {
                                 while let Some(event) = session_event_rx.recv().await {
-                                    if main_tx.send(SessionEvent::Event { session_id, event }).await.is_err() {
+                                    if main_tx.send(SessionEvent::Event { session_id, event }).is_err() {
                                         break;
                                     }
                                 }

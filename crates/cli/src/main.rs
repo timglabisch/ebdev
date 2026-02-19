@@ -563,7 +563,7 @@ async fn run_with_executor<E: ebdev_remote::Executor>(
 ) -> anyhow::Result<ExitCode> {
     use ebdev_remote::ExecuteOptions;
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let options = ExecuteOptions {
         program: program.to_string(),
@@ -587,7 +587,7 @@ async fn run_with_executor<E: ebdev_remote::Executor>(
 
 /// Einfache Ausführung: Output streamen bis Exit
 async fn run_simple_loop(
-    event_rx: &mut tokio::sync::mpsc::Receiver<ebdev_remote::ExecuteEvent>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ebdev_remote::ExecuteEvent>,
 ) -> anyhow::Result<ExitCode> {
     use ebdev_remote::{ExecuteEvent, OutputStream};
     use tokio::io::AsyncWriteExt;
@@ -615,7 +615,7 @@ async fn run_simple_loop(
 /// Interaktive Ausführung: stdin/stdout/resize multiplexen
 async fn run_interactive_loop(
     handle: ebdev_remote::ExecuteHandle,
-    event_rx: &mut tokio::sync::mpsc::Receiver<ebdev_remote::ExecuteEvent>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ebdev_remote::ExecuteEvent>,
 ) -> anyhow::Result<ExitCode> {
     use ebdev_remote::ExecuteEvent;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

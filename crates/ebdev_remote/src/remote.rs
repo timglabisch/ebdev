@@ -200,7 +200,7 @@ impl Executor for RemoteExecutor {
     async fn execute(
         &mut self,
         options: ExecuteOptions,
-        event_tx: mpsc::Sender<ExecuteEvent>,
+        event_tx: mpsc::UnboundedSender<ExecuteEvent>,
     ) -> Result<ExecuteHandle, ExecutorError> {
         self.session_counter += 1;
         let session_id = self.session_counter;
@@ -368,7 +368,7 @@ impl Executor for RemoteExecutor {
 
                             if let Some(evt) = event {
                                 let is_exit = matches!(evt, ExecuteEvent::Exit { .. });
-                                if event_tx.send(evt).await.is_err() {
+                                if event_tx.send(evt).is_err() {
                                     return;
                                 }
                                 if is_exit {

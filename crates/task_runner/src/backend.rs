@@ -182,7 +182,7 @@ impl ExecutionBackend {
                 }
             };
 
-            let (tx, mut rx) = mpsc::channel::<ExecuteEvent>(64);
+            let (tx, mut rx) = mpsc::unbounded_channel::<ExecuteEvent>();
 
             // Start the process
             let handle = match executor.execute(options, tx).await {
@@ -318,7 +318,7 @@ impl ExecutionBackend {
     {
         // Wir müssen die Runtime blockend verwenden
         let result = self.runtime.block_on(async {
-            let (tx, mut rx) = mpsc::channel::<ExecuteEvent>(64);
+            let (tx, mut rx) = mpsc::unbounded_channel::<ExecuteEvent>();
 
             // Starte den Prozess
             let handle = match executor.execute(options, tx).await {
