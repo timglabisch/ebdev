@@ -17,7 +17,7 @@ path = "src/bin/bridge.rs"
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "process", "sync", "time", "macros", "net", "fs"] }
 libc = "0.2"
 
 [dev-dependencies]

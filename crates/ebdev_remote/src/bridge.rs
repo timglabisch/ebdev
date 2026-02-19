@@ -193,6 +193,126 @@ pub async fn run_bridge() -> Result<(), BridgeError> {
                                 }
                             }
                         }
+                        Request::WriteFile { session_id, path, data } => {
+                            let response = match tokio::fs::write(&path, &data).await {
+                                Ok(()) => Response::FileWritten { session_id },
+                                Err(e) => Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("WriteFile '{}': {}", path, e),
+                                },
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::ReadFile { session_id, path } => {
+                            let response = match tokio::fs::read(&path).await {
+                                Ok(data) => Response::FileContent { session_id, data },
+                                Err(e) => Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("ReadFile '{}': {}", path, e),
+                                },
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::AppendFile { session_id, path, data } => {
+                            let response = match tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                                .await
+                            {
+                                Ok(mut file) => {
+                                    use tokio::io::AsyncWriteExt;
+                                    match file.write_all(&data).await {
+                                        Ok(()) => Response::FileWritten { session_id },
+                                        Err(e) => Response::Error {
+                                            session_id: Some(session_id),
+                                            message: format!("AppendFile '{}': {}", path, e),
+                                        },
+                                    }
+                                }
+                                Err(e) => Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("AppendFile '{}': {}", path, e),
+                                },
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::MkDir { session_id, path, recursive } => {
+                            let result = if recursive {
+                                tokio::fs::create_dir_all(&path).await
+                            } else {
+                                tokio::fs::create_dir(&path).await
+                            };
+                            let response = match result {
+                                Ok(()) => Response::DirCreated { session_id },
+                                Err(e) => Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("MkDir '{}': {}", path, e),
+                                },
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::Remove { session_id, path, recursive } => {
+                            let response = if recursive {
+                                match tokio::fs::remove_dir_all(&path).await {
+                                    Ok(()) => Response::Removed { session_id },
+                                    Err(e) => Response::Error {
+                                        session_id: Some(session_id),
+                                        message: format!("Remove '{}': {}", path, e),
+                                    },
+                                }
+                            } else {
+                                // Try file first, then empty dir
+                                match tokio::fs::remove_file(&path).await {
+                                    Ok(()) => Response::Removed { session_id },
+                                    Err(_) => match tokio::fs::remove_dir(&path).await {
+                                        Ok(()) => Response::Removed { session_id },
+                                        Err(e) => Response::Error {
+                                            session_id: Some(session_id),
+                                            message: format!("Remove '{}': {}", path, e),
+                                        },
+                                    },
+                                }
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
+                        Request::Stat { session_id, path } => {
+                            let response = match tokio::fs::metadata(&path).await {
+                                Ok(meta) => Response::FileStat {
+                                    session_id,
+                                    exists: true,
+                                    is_file: meta.is_file(),
+                                    is_dir: meta.is_dir(),
+                                    size: meta.len(),
+                                },
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    Response::FileStat {
+                                        session_id,
+                                        exists: false,
+                                        is_file: false,
+                                        is_dir: false,
+                                        size: 0,
+                                    }
+                                }
+                                Err(e) => Response::Error {
+                                    session_id: Some(session_id),
+                                    message: format!("Stat '{}': {}", path, e),
+                                },
+                            };
+                            let encoded = encode_message(&response)?;
+                            stdout.write_all(&encoded).await?;
+                            stdout.flush().await?;
+                        }
                         Request::Ping => {
                             let pong = Response::Pong;
                             let encoded = encode_message(&pong)?;

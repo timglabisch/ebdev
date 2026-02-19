@@ -195,6 +195,37 @@ declare module "ebdev" {
   export function mergeIgnore(...lists: (string[] | undefined)[]): string[];
 
   // =============================================================================
+  // Filesystem API
+  // =============================================================================
+
+  export interface StatResult {
+    exists: boolean;
+    isFile: boolean;
+    isDir: boolean;
+    size: number;
+  }
+
+  export interface MkdirOptions {
+    /** Create parent directories as needed (default: true) */
+    recursive?: boolean;
+  }
+
+  export interface RemoveOptions {
+    /** Remove directories and their contents recursively (default: false) */
+    recursive?: boolean;
+  }
+
+  export const fs: {
+    writeFile(path: string, content: string): Promise<void>;
+    readFile(path: string): Promise<string>;
+    appendFile(path: string, content: string): Promise<void>;
+    mkdir(path: string, options?: MkdirOptions): Promise<void>;
+    rm(path: string, options?: RemoveOptions): Promise<void>;
+    exists(path: string): Promise<boolean>;
+    stat(path: string): Promise<StatResult>;
+  };
+
+  // =============================================================================
   // Interactive Mode
   // =============================================================================
 
@@ -373,6 +404,19 @@ declare module "ebdev" {
      * @param options - Options
      */
     tryRun(image: string, cmd: string[], options?: DockerRunOptions): Promise<ExecResult>;
+
+    /**
+     * Filesystem operations inside Docker containers (via bridge protocol)
+     */
+    fs: {
+      writeFile(container: string, path: string, content: string): Promise<void>;
+      readFile(container: string, path: string): Promise<string>;
+      appendFile(container: string, path: string, content: string): Promise<void>;
+      mkdir(container: string, path: string, options?: MkdirOptions): Promise<void>;
+      rm(container: string, path: string, options?: RemoveOptions): Promise<void>;
+      exists(container: string, path: string): Promise<boolean>;
+      stat(container: string, path: string): Promise<StatResult>;
+    };
   };
 
   // =============================================================================

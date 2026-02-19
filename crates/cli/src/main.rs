@@ -748,7 +748,7 @@ async fn run_task_with_tui(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, EMBEDDED_LINUX_BINARY).await;
 
     // Signal shutdown to TUI
     if let Err(e) = handle_for_shutdown.shutdown() {
@@ -793,7 +793,7 @@ async fn run_task_headless(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, EMBEDDED_LINUX_BINARY).await;
 
     // Signal shutdown
     let _ = handle_for_shutdown.shutdown();

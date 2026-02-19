@@ -1106,6 +1106,7 @@ dependencies = [
  "deno_error",
  "ebdev-mutagen-runner",
  "ebdev-task-runner",
+ "ebdev_remote",
  "serde",
  "serde_json",
  "tempfile",

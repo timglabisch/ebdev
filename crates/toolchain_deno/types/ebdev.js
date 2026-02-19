@@ -501,6 +501,30 @@ export const docker = {
       interactive: options.interactive || interactiveMode,
     });
   },
+
+  fs: {
+    async writeFile(container, path, content) {
+      return await Deno.core.ops.op_docker_fs_write_file({ container, path, content });
+    },
+    async readFile(container, path) {
+      return await Deno.core.ops.op_docker_fs_read_file({ container, path });
+    },
+    async appendFile(container, path, content) {
+      return await Deno.core.ops.op_docker_fs_append_file({ container, path, content });
+    },
+    async mkdir(container, path, options = {}) {
+      return await Deno.core.ops.op_docker_fs_mkdir({ container, path, recursive: options.recursive !== false });
+    },
+    async rm(container, path, options = {}) {
+      return await Deno.core.ops.op_docker_fs_remove({ container, path, recursive: options.recursive || false });
+    },
+    async exists(container, path) {
+      return await Deno.core.ops.op_docker_fs_exists({ container, path });
+    },
+    async stat(container, path) {
+      return await Deno.core.ops.op_docker_fs_stat({ container, path });
+    },
+  },
 };
 
 // =============================================================================
@@ -691,6 +715,34 @@ console.error = (...args) => {
   Deno.core.ops.op_log(`[ERROR] ${message}`).catch(() => {
     originalConsoleError.apply(console, args);
   });
+};
+
+// =============================================================================
+// Local Filesystem API
+// =============================================================================
+
+export const fs = {
+  async writeFile(path, content) {
+    return await Deno.core.ops.op_fs_write_file({ path, content });
+  },
+  async readFile(path) {
+    return await Deno.core.ops.op_fs_read_file({ path });
+  },
+  async appendFile(path, content) {
+    return await Deno.core.ops.op_fs_append_file({ path, content });
+  },
+  async mkdir(path, options = {}) {
+    return await Deno.core.ops.op_fs_mkdir({ path, recursive: options.recursive !== false });
+  },
+  async rm(path, options = {}) {
+    return await Deno.core.ops.op_fs_remove({ path, recursive: options.recursive || false });
+  },
+  async exists(path) {
+    return await Deno.core.ops.op_fs_exists({ path });
+  },
+  async stat(path) {
+    return await Deno.core.ops.op_fs_stat({ path });
+  },
 };
 
 // =============================================================================

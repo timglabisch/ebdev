@@ -5,7 +5,8 @@ Reproducible dev environments from a single TypeScript config. Pin toolchain ver
 - **Pinned toolchains** — Node.js, pnpm, Rust, Mutagen installed to `.ebdev/toolchain/`, isolated from system versions
 - **TypeScript task runner** — Define build/dev/CI workflows as async functions with parallel execution, stages, and Docker integration
 - **Interactive TUI** — Live output, collapsible stages, command palette for dynamic tasks
-- **Docker bridge** — Execute commands in running containers (with PTY support) via an embedded bridge binary
+- **Docker bridge** — Execute commands and file operations in running containers (with PTY support) via an embedded bridge binary
+- **Filesystem API** — Read/write files locally or inside Docker containers without shell escaping
 - **Mutagen sync** — Declarative file sync sessions with safe shutdown handling
 - **Self-updating** — Binary auto-updates to the version pinned in config
 
@@ -201,6 +202,52 @@ await docker.exec("app", ["php", "artisan", "migrate"], {
   lineBuffered: true,
   onOutput: (line) => log(`migrate: ${line}`),
 });
+```
+
+#### Filesystem
+
+Read and write files locally or inside Docker containers — no shell escaping needed, binary-safe via the bridge protocol.
+
+```typescript
+// Local filesystem
+await fs.writeFile("/tmp/config.yaml", yamlContent);
+const data = await fs.readFile("/tmp/config.yaml");
+await fs.appendFile("/tmp/log.txt", "new line\n");
+await fs.mkdir("/tmp/nested/dirs");                     // recursive by default
+await fs.mkdir("/tmp/single", { recursive: false });    // only create leaf dir
+await fs.rm("/tmp/config.yaml");                        // single file
+await fs.rm("/tmp/nested", { recursive: true });        // directory tree
+const exists = await fs.exists("/tmp/config.yaml");     // boolean
+const stat = await fs.stat("/tmp/config.yaml");         // { exists, isFile, isDir, size }
+
+// Docker containers (via bridge protocol)
+await docker.fs.writeFile("container", "/tmp/task.yaml", yamlContent);
+const content = await docker.fs.readFile("container", "/tmp/task.yaml");
+await docker.fs.appendFile("container", "/var/log/app.log", "entry\n");
+await docker.fs.mkdir("container", "/tmp/work/sub");
+await docker.fs.rm("container", "/tmp/work", { recursive: true });
+const exists = await docker.fs.exists("container", "/tmp/task.yaml");
+const stat = await docker.fs.stat("container", "/tmp/task.yaml");
+```
+
+All operations throw on error (e.g. writing to a non-existent directory, reading a missing file). Use try/catch to handle errors:
+
+```typescript
+try {
+  await docker.fs.writeFile("container", "/readonly/file.txt", "data");
+} catch (e) {
+  console.error("Write failed:", e.message);
+}
+```
+
+**StatResult:**
+```typescript
+{
+  exists: boolean,   // true if path exists
+  isFile: boolean,   // true if regular file
+  isDir: boolean,    // true if directory
+  size: number,      // file size in bytes (0 if not exists)
+}
 ```
 
 #### Docker

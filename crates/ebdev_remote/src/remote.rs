@@ -130,7 +130,7 @@ impl RemoteExecutor {
     }
 
     /// Try to start the bridge and get version
-    async fn try_start_bridge(
+    pub(crate) async fn try_start_bridge(
         container: &str,
         binary_path: &str,
     ) -> Result<(Child, ChildStdin, ChildStdout, Vec<u8>, u32), ExecutorError> {

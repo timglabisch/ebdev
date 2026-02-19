@@ -22,6 +22,11 @@ pub struct TaskRunnerState {
     pub env: HashMap<String, String>,
 }
 
+/// State for bridge filesystem operations (holds embedded binary)
+pub struct BridgeState {
+    pub embedded_linux_binary: &'static [u8],
+}
+
 /// State stored in Deno runtime for mutagen ops
 pub struct MutagenState {
     /// Path to the mutagen binary
@@ -709,6 +714,295 @@ pub async fn op_stream_next(
     }
 }
 
+// =============================================================================
+// Local Filesystem Ops
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct FsPathArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsWriteArgs {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsMkdirArgs {
+    path: String,
+    #[serde(default = "default_true")]
+    recursive: bool,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Deserialize)]
+pub struct FsRemoveArgs {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatResult {
+    exists: bool,
+    #[serde(rename = "isFile")]
+    is_file: bool,
+    #[serde(rename = "isDir")]
+    is_dir: bool,
+    size: u64,
+}
+
+#[op2(async)]
+pub async fn op_fs_write_file(
+    #[serde] args: FsWriteArgs,
+) -> Result<(), JsErrorBox> {
+    tokio::fs::write(&args.path, args.content.as_bytes())
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs.writeFile '{}': {}", args.path, e)))
+}
+
+#[op2(async)]
+#[string]
+pub async fn op_fs_read_file(
+    #[serde] args: FsPathArgs,
+) -> Result<String, JsErrorBox> {
+    tokio::fs::read_to_string(&args.path)
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs.readFile '{}': {}", args.path, e)))
+}
+
+#[op2(async)]
+pub async fn op_fs_append_file(
+    #[serde] args: FsWriteArgs,
+) -> Result<(), JsErrorBox> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&args.path)
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs.appendFile '{}': {}", args.path, e)))?;
+    file.write_all(args.content.as_bytes())
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs.appendFile '{}': {}", args.path, e)))
+}
+
+#[op2(async)]
+pub async fn op_fs_mkdir(
+    #[serde] args: FsMkdirArgs,
+) -> Result<(), JsErrorBox> {
+    if args.recursive {
+        tokio::fs::create_dir_all(&args.path)
+            .await
+            .map_err(|e| JsErrorBox::generic(format!("fs.mkdir '{}': {}", args.path, e)))
+    } else {
+        tokio::fs::create_dir(&args.path)
+            .await
+            .map_err(|e| JsErrorBox::generic(format!("fs.mkdir '{}': {}", args.path, e)))
+    }
+}
+
+#[op2(async)]
+pub async fn op_fs_remove(
+    #[serde] args: FsRemoveArgs,
+) -> Result<(), JsErrorBox> {
+    if args.recursive {
+        tokio::fs::remove_dir_all(&args.path)
+            .await
+            .map_err(|e| JsErrorBox::generic(format!("fs.rm '{}': {}", args.path, e)))
+    } else {
+        match tokio::fs::remove_file(&args.path).await {
+            Ok(()) => Ok(()),
+            Err(_) => tokio::fs::remove_dir(&args.path)
+                .await
+                .map_err(|e| JsErrorBox::generic(format!("fs.rm '{}': {}", args.path, e))),
+        }
+    }
+}
+
+#[op2(async)]
+pub async fn op_fs_exists(
+    #[serde] args: FsPathArgs,
+) -> Result<bool, JsErrorBox> {
+    Ok(tokio::fs::try_exists(&args.path)
+        .await
+        .unwrap_or(false))
+}
+
+#[op2(async)]
+#[serde]
+pub async fn op_fs_stat(
+    #[serde] args: FsPathArgs,
+) -> Result<StatResult, JsErrorBox> {
+    match tokio::fs::metadata(&args.path).await {
+        Ok(meta) => Ok(StatResult {
+            exists: true,
+            is_file: meta.is_file(),
+            is_dir: meta.is_dir(),
+            size: meta.len(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StatResult {
+            exists: false,
+            is_file: false,
+            is_dir: false,
+            size: 0,
+        }),
+        Err(e) => Err(JsErrorBox::generic(format!("fs.stat '{}': {}", args.path, e))),
+    }
+}
+
+// =============================================================================
+// Docker Filesystem Ops
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct DockerFsPathArgs {
+    container: String,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockerFsWriteArgs {
+    container: String,
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockerFsMkdirArgs {
+    container: String,
+    path: String,
+    #[serde(default = "default_true")]
+    recursive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockerFsRemoveArgs {
+    container: String,
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+#[op2(async)]
+pub async fn op_docker_fs_write_file(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsWriteArgs,
+) -> Result<(), JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    ebdev_remote::remote_write_file(&args.container, binary, &args.path, args.content.as_bytes())
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
+#[op2(async)]
+#[string]
+pub async fn op_docker_fs_read_file(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsPathArgs,
+) -> Result<String, JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    let data = ebdev_remote::remote_read_file(&args.container, binary, &args.path)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    String::from_utf8(data)
+        .map_err(|e| JsErrorBox::generic(format!("docker.fs.readFile: invalid UTF-8: {}", e)))
+}
+
+#[op2(async)]
+pub async fn op_docker_fs_append_file(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsWriteArgs,
+) -> Result<(), JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    ebdev_remote::remote_append_file(&args.container, binary, &args.path, args.content.as_bytes())
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
+#[op2(async)]
+pub async fn op_docker_fs_mkdir(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsMkdirArgs,
+) -> Result<(), JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    ebdev_remote::remote_mkdir(&args.container, binary, &args.path, args.recursive)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
+#[op2(async)]
+pub async fn op_docker_fs_remove(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsRemoveArgs,
+) -> Result<(), JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    ebdev_remote::remote_remove(&args.container, binary, &args.path, args.recursive)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
+#[op2(async)]
+pub async fn op_docker_fs_exists(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsPathArgs,
+) -> Result<bool, JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    let stat = ebdev_remote::remote_stat(&args.container, binary, &args.path)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    Ok(stat.exists)
+}
+
+#[op2(async)]
+#[serde]
+pub async fn op_docker_fs_stat(
+    state: Rc<RefCell<OpState>>,
+    #[serde] args: DockerFsPathArgs,
+) -> Result<StatResult, JsErrorBox> {
+    let binary = {
+        let state = state.borrow();
+        let bridge = state.borrow::<BridgeState>();
+        bridge.embedded_linux_binary
+    };
+    let stat = ebdev_remote::remote_stat(&args.container, binary, &args.path)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    Ok(StatResult {
+        exists: stat.exists,
+        is_file: stat.is_file,
+        is_dir: stat.is_dir,
+        size: stat.size,
+    })
+}
+
 /// Merge base env vars with command-specific env vars (command wins on conflict)
 fn merge_env(base: &HashMap<String, String>, command_env: Option<HashMap<String, String>>) -> HashMap<String, String> {
     let mut merged = base.clone();
@@ -727,6 +1021,14 @@ pub fn init_task_runner_state(
 ) {
     state.put(TaskRunnerState { handle, cwd, env });
     state.put(StreamingState::default());
+}
+
+/// Initialize the bridge state in OpState
+pub fn init_bridge_state(
+    state: &mut OpState,
+    embedded_linux_binary: &'static [u8],
+) {
+    state.put(BridgeState { embedded_linux_binary });
 }
 
 /// Initialize the mutagen state in OpState
@@ -759,5 +1061,21 @@ deno_core::extension!(
         op_mutagen_pause_all,
         op_start_stream,
         op_stream_next,
+        // Local filesystem ops
+        op_fs_write_file,
+        op_fs_read_file,
+        op_fs_append_file,
+        op_fs_mkdir,
+        op_fs_remove,
+        op_fs_exists,
+        op_fs_stat,
+        // Docker filesystem ops
+        op_docker_fs_write_file,
+        op_docker_fs_read_file,
+        op_docker_fs_append_file,
+        op_docker_fs_mkdir,
+        op_docker_fs_remove,
+        op_docker_fs_exists,
+        op_docker_fs_stat,
     ],
 );

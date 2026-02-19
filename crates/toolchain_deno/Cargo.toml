@@ -9,6 +9,7 @@ deno_ast = { version = "0.52", features = ["transpiling"] }
 deno_error = "0.7"
 ebdev-task-runner = { path = "../task_runner" }
 ebdev-mutagen-runner = { path = "../mutagen_runner" }
+ebdev_remote = { path = "../ebdev_remote" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

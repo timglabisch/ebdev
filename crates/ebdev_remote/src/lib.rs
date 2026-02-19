@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod bridge;
 pub mod executor;
+pub mod file_ops;
 pub mod local;
 pub mod remote;
 
 pub use bridge::run_bridge;
 pub use executor::{ExecuteEvent, ExecuteHandle, ExecuteOptions, Executor, ExecutorError};
+pub use file_ops::{FileStat, remote_write_file, remote_read_file, remote_append_file, remote_mkdir, remote_remove, remote_stat};
 pub use local::LocalExecutor;
 pub use remote::RemoteExecutor;
 
@@ -71,6 +73,40 @@ pub enum Request {
         /// Session-ID des zu beendenden Prozesses
         session_id: u32,
     },
+    /// Datei schreiben (überschreibt)
+    WriteFile {
+        session_id: u32,
+        path: String,
+        data: Vec<u8>,
+    },
+    /// Datei lesen
+    ReadFile {
+        session_id: u32,
+        path: String,
+    },
+    /// An Datei anhängen
+    AppendFile {
+        session_id: u32,
+        path: String,
+        data: Vec<u8>,
+    },
+    /// Verzeichnis anlegen
+    MkDir {
+        session_id: u32,
+        path: String,
+        recursive: bool,
+    },
+    /// Datei/Verzeichnis löschen
+    Remove {
+        session_id: u32,
+        path: String,
+        recursive: bool,
+    },
+    /// File-Info abfragen
+    Stat {
+        session_id: u32,
+        path: String,
+    },
     /// Keep-alive Ping
     Ping,
     /// Beende die Remote-Binary (killt auch alle laufenden Prozesse)
@@ -108,6 +144,31 @@ pub enum Response {
         /// Fehlermeldung
         message: String,
     },
+    /// Datei wurde geschrieben
+    FileWritten {
+        session_id: u32,
+    },
+    /// Datei-Inhalt
+    FileContent {
+        session_id: u32,
+        data: Vec<u8>,
+    },
+    /// Verzeichnis wurde angelegt
+    DirCreated {
+        session_id: u32,
+    },
+    /// Datei/Verzeichnis wurde gelöscht
+    Removed {
+        session_id: u32,
+    },
+    /// File-Info
+    FileStat {
+        session_id: u32,
+        exists: bool,
+        is_file: bool,
+        is_dir: bool,
+        size: u64,
+    },
     /// Keep-alive Pong (Antwort auf Ping)
     Pong,
     /// Bestätigung dass die Binary bereit ist (mit Protokoll-Version)
@@ -126,7 +187,8 @@ pub enum OutputStream {
 
 /// Protokoll-Version für Kompatibilitätsprüfung
 /// v4: Ready enthält jetzt protocol_version für Kompatibilitätsprüfung
-pub const PROTOCOL_VERSION: u32 = 4;
+/// v5: Filesystem-Operationen (WriteFile, ReadFile, AppendFile, MkDir, Remove, Stat)
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Magic-Bytes für Protokoll-Identifikation
 pub const MAGIC: &[u8; 4] = b"EBDV";

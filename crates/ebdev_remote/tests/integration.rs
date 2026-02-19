@@ -835,3 +835,613 @@ async fn test_shutdown_kills_running_processes() {
 
     assert!(status.is_ok(), "Bridge should exit cleanly");
 }
+
+// =============================================================================
+// Filesystem Operation Tests (Bridge-level, local via bridge binary)
+// =============================================================================
+
+#[tokio::test]
+async fn test_fs_write_and_read_file() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-write-read.txt", std::process::id());
+    let test_content = b"Hello, filesystem API!\nLine 2\n";
+
+    // Write file
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: test_content.to_vec(),
+    }).await;
+
+    let response = client.read_response().await;
+    match response {
+        Response::FileWritten { session_id: 1 } => {}
+        other => panic!("Expected FileWritten, got {:?}", other),
+    }
+
+    // Read file back
+    client.send(&Request::ReadFile {
+        session_id: 2,
+        path: test_path.clone(),
+    }).await;
+
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 2, data } => {
+            assert_eq!(data, test_content, "File content mismatch");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove {
+        session_id: 3,
+        path: test_path,
+        recursive: false,
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Removed { session_id: 3 }));
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_write_overwrites_existing() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-overwrite.txt", std::process::id());
+
+    // Write initial content
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: b"original content".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 1 }));
+
+    // Overwrite with new content
+    client.send(&Request::WriteFile {
+        session_id: 2,
+        path: test_path.clone(),
+        data: b"new content".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 2 }));
+
+    // Read back — should be the new content
+    client.send(&Request::ReadFile {
+        session_id: 3,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 3, data } => {
+            assert_eq!(data, b"new content");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 4, path: test_path, recursive: false }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_append_file() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-append.txt", std::process::id());
+
+    // Write initial content
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: b"line1\n".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 1 }));
+
+    // Append more content
+    client.send(&Request::AppendFile {
+        session_id: 2,
+        path: test_path.clone(),
+        data: b"line2\n".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 2 }));
+
+    // Append again
+    client.send(&Request::AppendFile {
+        session_id: 3,
+        path: test_path.clone(),
+        data: b"line3\n".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 3 }));
+
+    // Read back
+    client.send(&Request::ReadFile {
+        session_id: 4,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 4, data } => {
+            assert_eq!(data, b"line1\nline2\nline3\n");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 5, path: test_path, recursive: false }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_append_creates_file() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-append-create.txt", std::process::id());
+
+    // Append to non-existing file — should create it
+    client.send(&Request::AppendFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: b"created via append\n".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 1 }));
+
+    // Read back
+    client.send(&Request::ReadFile {
+        session_id: 2,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 2, data } => {
+            assert_eq!(data, b"created via append\n");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 3, path: test_path, recursive: false }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_mkdir_recursive() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_dir = format!("/tmp/ebdev-test-{}-mkdir/nested/deep", std::process::id());
+    let parent_dir = format!("/tmp/ebdev-test-{}-mkdir", std::process::id());
+
+    // Create nested directories recursively
+    client.send(&Request::MkDir {
+        session_id: 1,
+        path: test_dir.clone(),
+        recursive: true,
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::DirCreated { session_id: 1 }));
+
+    // Stat the directory
+    client.send(&Request::Stat {
+        session_id: 2,
+        path: test_dir.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 2, exists, is_dir, is_file, .. } => {
+            assert!(exists, "Directory should exist");
+            assert!(is_dir, "Should be a directory");
+            assert!(!is_file, "Should not be a file");
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 3, path: parent_dir, recursive: true }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_mkdir_non_recursive_fails_without_parent() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_dir = format!("/tmp/ebdev-test-{}-mkdir-norecurse/does/not/exist", std::process::id());
+
+    // Non-recursive mkdir should fail if parent doesn't exist
+    client.send(&Request::MkDir {
+        session_id: 1,
+        path: test_dir.clone(),
+        recursive: false,
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::Error { session_id: Some(1), message } => {
+            assert!(message.contains("MkDir"), "Error should mention MkDir: {}", message);
+        }
+        other => panic!("Expected Error, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_remove_file() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-remove.txt", std::process::id());
+
+    // Create file
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: b"to be removed".to_vec(),
+    }).await;
+    client.read_response().await;
+
+    // Remove it
+    client.send(&Request::Remove {
+        session_id: 2,
+        path: test_path.clone(),
+        recursive: false,
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Removed { session_id: 2 }));
+
+    // Stat — should not exist
+    client.send(&Request::Stat {
+        session_id: 3,
+        path: test_path,
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 3, exists, .. } => {
+            assert!(!exists, "File should not exist after removal");
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_remove_directory_recursive() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let parent_dir = format!("/tmp/ebdev-test-{}-rmdir", std::process::id());
+    let nested_file = format!("{}/sub/file.txt", parent_dir);
+
+    // Create nested dir
+    client.send(&Request::MkDir {
+        session_id: 1,
+        path: format!("{}/sub", parent_dir),
+        recursive: true,
+    }).await;
+    client.read_response().await;
+
+    // Write a file in it
+    client.send(&Request::WriteFile {
+        session_id: 2,
+        path: nested_file,
+        data: b"nested content".to_vec(),
+    }).await;
+    client.read_response().await;
+
+    // Remove whole tree
+    client.send(&Request::Remove {
+        session_id: 3,
+        path: parent_dir.clone(),
+        recursive: true,
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Removed { session_id: 3 }));
+
+    // Verify gone
+    client.send(&Request::Stat {
+        session_id: 4,
+        path: parent_dir,
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 4, exists, .. } => {
+            assert!(!exists, "Directory should not exist after recursive removal");
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_stat_file_and_dir() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_dir = format!("/tmp/ebdev-test-{}-stat", std::process::id());
+    let test_file = format!("{}/test.txt", test_dir);
+
+    // Create dir and file
+    client.send(&Request::MkDir {
+        session_id: 1,
+        path: test_dir.clone(),
+        recursive: true,
+    }).await;
+    client.read_response().await;
+
+    client.send(&Request::WriteFile {
+        session_id: 2,
+        path: test_file.clone(),
+        data: b"12345".to_vec(),
+    }).await;
+    client.read_response().await;
+
+    // Stat the file
+    client.send(&Request::Stat {
+        session_id: 3,
+        path: test_file.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 3, exists, is_file, is_dir, size } => {
+            assert!(exists);
+            assert!(is_file);
+            assert!(!is_dir);
+            assert_eq!(size, 5);
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    // Stat the directory
+    client.send(&Request::Stat {
+        session_id: 4,
+        path: test_dir.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 4, exists, is_file, is_dir, .. } => {
+            assert!(exists);
+            assert!(!is_file);
+            assert!(is_dir);
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 5, path: test_dir, recursive: true }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_stat_nonexistent() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    client.send(&Request::Stat {
+        session_id: 1,
+        path: "/tmp/ebdev-this-does-not-exist-12345".to_string(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 1, exists, is_file, is_dir, size } => {
+            assert!(!exists);
+            assert!(!is_file);
+            assert!(!is_dir);
+            assert_eq!(size, 0);
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_read_nonexistent_returns_error() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    client.send(&Request::ReadFile {
+        session_id: 1,
+        path: "/tmp/ebdev-this-does-not-exist-12345.txt".to_string(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::Error { session_id: Some(1), message } => {
+            assert!(message.contains("ReadFile"), "Error should mention ReadFile: {}", message);
+            assert!(
+                message.contains("No such file") || message.contains("not found") || message.contains("not exist"),
+                "Error should mention file not found: {}", message
+            );
+        }
+        other => panic!("Expected Error for non-existent file, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_write_to_nonexistent_dir_returns_error() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: "/tmp/ebdev-nonexistent-dir-12345/file.txt".to_string(),
+        data: b"should fail".to_vec(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::Error { session_id: Some(1), message } => {
+            assert!(message.contains("WriteFile"), "Error should mention WriteFile: {}", message);
+        }
+        other => panic!("Expected Error for write to non-existent dir, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_remove_nonexistent_returns_error() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    client.send(&Request::Remove {
+        session_id: 1,
+        path: "/tmp/ebdev-this-does-not-exist-12345.txt".to_string(),
+        recursive: false,
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::Error { session_id: Some(1), message } => {
+            assert!(message.contains("Remove"), "Error should mention Remove: {}", message);
+        }
+        other => panic!("Expected Error for removing non-existent file, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_binary_content() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-binary.bin", std::process::id());
+
+    // Write binary content (all byte values 0-255)
+    let binary_data: Vec<u8> = (0..=255u8).collect();
+
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: binary_data.clone(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 1 }));
+
+    // Read back
+    client.send(&Request::ReadFile {
+        session_id: 2,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 2, data } => {
+            assert_eq!(data, binary_data, "Binary content should be preserved exactly");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 3, path: test_path, recursive: false }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_large_file() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let test_path = format!("/tmp/ebdev-test-{}-large.bin", std::process::id());
+
+    // Write a 1MB file
+    let large_data: Vec<u8> = (0..1_048_576).map(|i| (i % 256) as u8).collect();
+
+    client.send(&Request::WriteFile {
+        session_id: 1,
+        path: test_path.clone(),
+        data: large_data.clone(),
+    }).await;
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::FileWritten { session_id: 1 }));
+
+    // Read back
+    client.send(&Request::ReadFile {
+        session_id: 2,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileContent { session_id: 2, data } => {
+            assert_eq!(data.len(), large_data.len(), "Large file size mismatch");
+            assert_eq!(data, large_data, "Large file content mismatch");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // Stat should show correct size
+    client.send(&Request::Stat {
+        session_id: 3,
+        path: test_path.clone(),
+    }).await;
+    let response = client.read_response().await;
+    match response {
+        Response::FileStat { session_id: 3, size, .. } => {
+            assert_eq!(size, 1_048_576, "Stat size mismatch for large file");
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    // Cleanup
+    client.send(&Request::Remove { session_id: 4, path: test_path, recursive: false }).await;
+    client.read_response().await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fs_mixed_operations_sequence() {
+    let mut client = BridgeTestClient::spawn().await;
+
+    let base = format!("/tmp/ebdev-test-{}-mixed", std::process::id());
+
+    // 1. mkdir recursive
+    client.send(&Request::MkDir { session_id: 1, path: format!("{}/a/b", base), recursive: true }).await;
+    assert!(matches!(client.read_response().await, Response::DirCreated { session_id: 1 }));
+
+    // 2. write file
+    client.send(&Request::WriteFile { session_id: 2, path: format!("{}/a/b/config.yaml", base), data: b"key: value\n".to_vec() }).await;
+    assert!(matches!(client.read_response().await, Response::FileWritten { session_id: 2 }));
+
+    // 3. append to same file
+    client.send(&Request::AppendFile { session_id: 3, path: format!("{}/a/b/config.yaml", base), data: b"key2: value2\n".to_vec() }).await;
+    assert!(matches!(client.read_response().await, Response::FileWritten { session_id: 3 }));
+
+    // 4. read to verify
+    client.send(&Request::ReadFile { session_id: 4, path: format!("{}/a/b/config.yaml", base) }).await;
+    match client.read_response().await {
+        Response::FileContent { session_id: 4, data } => {
+            assert_eq!(String::from_utf8_lossy(&data), "key: value\nkey2: value2\n");
+        }
+        other => panic!("Expected FileContent, got {:?}", other),
+    }
+
+    // 5. stat the file
+    client.send(&Request::Stat { session_id: 5, path: format!("{}/a/b/config.yaml", base) }).await;
+    match client.read_response().await {
+        Response::FileStat { session_id: 5, exists, is_file, size, .. } => {
+            assert!(exists);
+            assert!(is_file);
+            assert_eq!(size, 24); // "key: value\nkey2: value2\n" = 24 bytes
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    // 6. remove all recursively
+    client.send(&Request::Remove { session_id: 6, path: base.clone(), recursive: true }).await;
+    assert!(matches!(client.read_response().await, Response::Removed { session_id: 6 }));
+
+    // 7. stat should show not exists
+    client.send(&Request::Stat { session_id: 7, path: base }).await;
+    match client.read_response().await {
+        Response::FileStat { session_id: 7, exists, .. } => {
+            assert!(!exists);
+        }
+        other => panic!("Expected FileStat, got {:?}", other),
+    }
+
+    client.shutdown().await;
+}
