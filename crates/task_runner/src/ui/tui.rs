@@ -248,9 +248,12 @@ impl TuiUI {
         }
     }
 
-    /// Resolve the pinned task to a &TaskInfo reference (if valid)
-    fn resolve_pinned_task(&self) -> Option<&TaskInfo> {
-        self.pinned_task.as_ref()?.resolve_task(&self.completed_stages, &self.tasks)
+    /// Resolve the task shown in the output panel: pinned > focused > None
+    fn resolve_output_task(&self) -> Option<&TaskInfo> {
+        if let Some(ref pin) = self.pinned_task {
+            return pin.resolve_task(&self.completed_stages, &self.tasks);
+        }
+        self.focus.resolve_task(&self.completed_stages, &self.tasks)
     }
 
     fn draw(&mut self) -> io::Result<()> {
@@ -264,26 +267,20 @@ impl TuiUI {
         let auto_quit = self.auto_quit;
         let pinned_task = self.pinned_task;
 
-        // Only compute auto-scroll for pinned mode (stacked mode always auto-scrolls)
-        if pinned_task.is_some() {
+        // Compute auto-scroll when showing single task output (pinned or focused)
+        let output_content_height = self.resolve_output_task()
+            .map(|t| t.screen_text().lines.len());
+        if let Some(content_height) = output_content_height {
             let terminal = self.terminal.as_mut().unwrap();
             let visible_height = terminal.size()?.height.saturating_sub(10) as usize;
-
-            // Get content height for pinned task
-            let content_height = self.resolve_pinned_task()
-                .map(|t| t.screen_text().lines.len())
-                .unwrap_or(0);
             let max_scroll = content_height.saturating_sub(visible_height);
 
-            // Apply auto-scroll: jump to bottom
             if self.output_scroll.auto_scroll {
                 self.output_scroll.offset = max_scroll as u16;
             }
 
-            // Clamp scroll_offset to valid range
             self.output_scroll.offset = (self.output_scroll.offset as usize).min(max_scroll) as u16;
 
-            // Re-enable auto_scroll if we're at the bottom
             if self.output_scroll.offset as usize >= max_scroll && max_scroll > 0 {
                 self.output_scroll.auto_scroll = true;
             }
@@ -340,11 +337,13 @@ impl TuiUI {
                 // Task list with completed stages
                 task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
 
-                // Right panel: pinned mode vs stacked mode
+                // Right panel: pinned > focused task > stacked mode
                 if let Some(ref pin) = pinned_task {
                     if let Some(task) = pin.resolve_task(completed_stages, tasks) {
                         task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
                     }
+                } else if let Some(task) = focus.resolve_task(completed_stages, tasks) {
+                    task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
                 } else {
                     task_output::draw_stacked_outputs(frame, task_chunks[1], tasks);
                 }
@@ -405,32 +404,32 @@ impl TuiUI {
                 self.handle_enter();
             }
             KeyCode::Up => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(-1);
                 }
             }
             KeyCode::Down => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(1);
                 }
             }
             KeyCode::PageUp => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(-10);
                 }
             }
             KeyCode::PageDown => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(10);
                 }
             }
             KeyCode::End => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.jump_to_end();
                 }
             }
             KeyCode::Home => {
-                if self.pinned_task.is_some() {
+                if self.resolve_output_task().is_some() {
                     self.output_scroll.jump_to_start();
                 }
             }
@@ -453,14 +452,14 @@ impl TuiUI {
             MouseEventKind::ScrollUp => {
                 if self.is_over_task_list(col, row) {
                     self.scroll_task_list(-3);
-                } else if self.is_over_output(col, row) && self.pinned_task.is_some() {
+                } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(-3);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if self.is_over_task_list(col, row) {
                     self.scroll_task_list(3);
-                } else if self.is_over_output(col, row) && self.pinned_task.is_some() {
+                } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(3);
                 }
             }
@@ -616,8 +615,9 @@ impl TaskRunnerUI for TuiUI {
         self.draw()?;
         self.handle_input()?;
 
-        // Auto-focus on running task only when not pinned
-        if self.pinned_task.is_none() {
+        // Auto-focus on running task only when not pinned and focus is on current tasks
+        // (don't override user navigation to completed stages)
+        if self.pinned_task.is_none() && matches!(self.focus, FocusTarget::CurrentTask(_)) {
             if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
                 self.focus = FocusTarget::CurrentTask(idx);
             }

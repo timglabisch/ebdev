@@ -65,7 +65,7 @@ impl CompletedStage {
             total_duration,
             success,
             failed_count,
-            expanded: false,
+            expanded: !success,
         }
     }
 
@@ -84,6 +84,23 @@ pub enum FocusTarget {
     CompletedStage(usize),
     CompletedTask { stage: usize, task: usize },
     CurrentTask(usize),
+}
+
+impl FocusTarget {
+    /// Resolve to a TaskInfo reference (None for stage headers)
+    pub fn resolve_task<'a>(
+        &self,
+        completed_stages: &'a [CompletedStage],
+        current_tasks: &'a [TaskInfo],
+    ) -> Option<&'a TaskInfo> {
+        match self {
+            FocusTarget::CompletedTask { stage, task } => {
+                completed_stages.get(*stage).and_then(|s| s.tasks.get(*task))
+            }
+            FocusTarget::CurrentTask(idx) => current_tasks.get(*idx),
+            FocusTarget::CompletedStage(_) => None,
+        }
+    }
 }
 
 /// Pin target for the output panel
