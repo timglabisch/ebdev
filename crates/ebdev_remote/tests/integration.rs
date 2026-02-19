@@ -1445,3 +1445,190 @@ async fn test_fs_mixed_operations_sequence() {
 
     client.shutdown().await;
 }
+
+// =============================================================================
+// PTY Exit / Backpressure Regression Tests
+//
+// These tests verify that PTY processes reliably deliver their Exit event,
+// even under conditions that previously caused hangs:
+// - no trailing newline (like turbo progress bars)
+// - large output bursts (backpressure on channels)
+// - rapid exit after output
+// =============================================================================
+
+#[tokio::test]
+async fn test_pty_exit_no_trailing_newline() {
+    // Simulates turbo-style output that doesn't end with \n
+    let mut client = BridgeTestClient::spawn().await;
+
+    client.send(&Request::Execute {
+        session_id: 1,
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), "printf 'no-newline-at-end'".to_string()],
+        working_dir: None,
+        env: vec![],
+        pty: Some(PtyConfig { cols: 80, rows: 24 }),
+    }).await;
+
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Started { session_id: 1 }));
+
+    let (outputs, exit_code) = client.collect_until_exit(1).await;
+
+    let stdout: Vec<u8> = outputs.iter()
+        .flat_map(|(_, d)| d.clone())
+        .collect();
+    let output = String::from_utf8_lossy(&stdout);
+    assert!(output.contains("no-newline-at-end"), "Expected output, got: {}", output);
+    assert_eq!(exit_code, Some(0));
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_pty_exit_large_burst_output() {
+    // Generates ~200KB of output quickly, then exits.
+    // This stresses the channel pipeline and verifies no backpressure deadlock.
+    let mut client = BridgeTestClient::spawn().await;
+
+    // Generate many lines of output rapidly
+    let script = "seq 1 5000 | while read i; do echo \"line-$i-padding-to-make-it-longer-for-backpressure-testing-purposes\"; done";
+
+    client.send(&Request::Execute {
+        session_id: 1,
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), script.to_string()],
+        working_dir: None,
+        env: vec![],
+        pty: Some(PtyConfig { cols: 200, rows: 50 }),
+    }).await;
+
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Started { session_id: 1 }));
+
+    // Must complete within 10 seconds (would hang forever without the fix)
+    let timeout = tokio::time::Duration::from_secs(10);
+    let result = tokio::time::timeout(timeout, client.collect_until_exit(1)).await;
+
+    let (outputs, exit_code) = result.expect("HANG DETECTED: PTY process with large output didn't exit in time");
+
+    let total_bytes: usize = outputs.iter().map(|(_, d)| d.len()).sum();
+    assert!(total_bytes > 10_000, "Expected significant output, got {} bytes", total_bytes);
+    assert_eq!(exit_code, Some(0));
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_pty_exit_rapid_exit_after_output() {
+    // Process prints output and exits immediately — tests the drain-after-exit path.
+    // Run multiple times sequentially to catch intermittent issues.
+    let mut client = BridgeTestClient::spawn().await;
+
+    for i in 0..5 {
+        let session_id = i + 1;
+
+        client.send(&Request::Execute {
+            session_id,
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), format!("echo 'rapid-{}'", i)],
+            working_dir: None,
+            env: vec![],
+            pty: Some(PtyConfig { cols: 80, rows: 24 }),
+        }).await;
+
+        let response = client.read_response().await;
+        assert!(matches!(response, Response::Started { .. }));
+
+        let timeout = tokio::time::Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, client.collect_until_exit(session_id)).await;
+
+        let (_, exit_code) = result.expect(&format!("HANG DETECTED: rapid exit iteration {}", i));
+        assert_eq!(exit_code, Some(0));
+    }
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_pty_exit_ansi_escape_output() {
+    // Simulates turbo-like output with ANSI escape codes, cursor movement, no final newline
+    let mut client = BridgeTestClient::spawn().await;
+
+    // ANSI: colors, cursor movement, carriage returns (like a progress bar)
+    let script = r#"printf '\033[1;32m✓\033[0m Building...\r'; printf '\033[1;32m✓\033[0m Built 42 packages\033[K'"#;
+
+    client.send(&Request::Execute {
+        session_id: 1,
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), script.to_string()],
+        working_dir: None,
+        env: vec![],
+        pty: Some(PtyConfig { cols: 120, rows: 40 }),
+    }).await;
+
+    let response = client.read_response().await;
+    assert!(matches!(response, Response::Started { session_id: 1 }));
+
+    let timeout = tokio::time::Duration::from_secs(5);
+    let result = tokio::time::timeout(timeout, client.collect_until_exit(1)).await;
+
+    let (outputs, exit_code) = result.expect("HANG DETECTED: ANSI escape output didn't exit in time");
+
+    let stdout: Vec<u8> = outputs.iter()
+        .flat_map(|(_, d)| d.clone())
+        .collect();
+    let output = String::from_utf8_lossy(&stdout);
+    assert!(output.contains("Built 42 packages"), "Expected turbo-like output, got: {}", output);
+    assert_eq!(exit_code, Some(0));
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_pty_exit_parallel_heavy_output() {
+    // Run multiple PTY sessions with heavy output concurrently.
+    // This is the most aggressive backpressure test.
+    let mut client = BridgeTestClient::spawn().await;
+
+    let script = "for i in $(seq 1 1000); do echo \"parallel-output-line-$i\"; done";
+
+    // Start 3 parallel sessions
+    for sid in 1..=3u32 {
+        client.send(&Request::Execute {
+            session_id: sid,
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            working_dir: None,
+            env: vec![],
+            pty: Some(PtyConfig { cols: 120, rows: 40 }),
+        }).await;
+
+        let response = client.read_response().await;
+        assert!(matches!(response, Response::Started { .. }));
+    }
+
+    // Collect all exits (order may vary)
+    let mut exited = std::collections::HashSet::new();
+    let timeout = tokio::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    while exited.len() < 3 {
+        let remaining = deadline - tokio::time::Instant::now();
+        let response = tokio::time::timeout(remaining, client.read_response())
+            .await
+            .expect("HANG DETECTED: parallel PTY sessions didn't all exit in time");
+
+        match response {
+            Response::Output { .. } => {} // consume output
+            Response::Exit { session_id, code } => {
+                assert_eq!(code, Some(0), "Session {} failed", session_id);
+                exited.insert(session_id);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+    }
+
+    assert_eq!(exited.len(), 3);
+    client.shutdown().await;
+}
