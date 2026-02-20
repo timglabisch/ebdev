@@ -248,12 +248,16 @@ impl TuiUI {
         }
     }
 
-    /// Resolve the task shown in the output panel: pinned > focused > None
+    /// Resolve the task shown in the output panel: pinned > focused completed task > None
+    /// (Current tasks use stacked mode unless pinned)
     fn resolve_output_task(&self) -> Option<&TaskInfo> {
         if let Some(ref pin) = self.pinned_task {
             return pin.resolve_task(&self.completed_stages, &self.tasks);
         }
-        self.focus.resolve_task(&self.completed_stages, &self.tasks)
+        if let FocusTarget::CompletedTask { stage, task } = self.focus {
+            return self.completed_stages.get(stage).and_then(|s| s.tasks.get(task));
+        }
+        None
     }
 
     fn draw(&mut self) -> io::Result<()> {
@@ -337,12 +341,16 @@ impl TuiUI {
                 // Task list with completed stages
                 task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
 
-                // Right panel: pinned > focused task > stacked mode
-                if let Some(ref pin) = pinned_task {
-                    if let Some(task) = pin.resolve_task(completed_stages, tasks) {
-                        task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
-                    }
-                } else if let Some(task) = focus.resolve_task(completed_stages, tasks) {
+                // Right panel: pinned > focused completed task > stacked mode
+                let output_task: Option<&TaskInfo> = if let Some(ref pin) = pinned_task {
+                    pin.resolve_task(completed_stages, tasks)
+                } else if let FocusTarget::CompletedTask { stage: si, task: ti } = focus {
+                    completed_stages.get(si).and_then(|s| s.tasks.get(ti))
+                } else {
+                    None
+                };
+
+                if let Some(task) = output_task {
                     task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
                 } else {
                     task_output::draw_stacked_outputs(frame, task_chunks[1], tasks);
