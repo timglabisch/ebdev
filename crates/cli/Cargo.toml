@@ -13,6 +13,7 @@ ebdev-toolchain-node = { path = "../toolchain_node" }
 ebdev-toolchain-mutagen = { path = "../toolchain_mutagen" }
 ebdev-toolchain-rust = { path = "../toolchain_rust" }
 ebdev-toolchain-ebdev = { path = "../toolchain_ebdev" }
+ebdev-toolchain-binary = { path = "../toolchain_binary" }
 ebdev-toolchain-deno = { path = "../toolchain_deno" }
 ebdev-task-runner = { path = "../task_runner" }
 ebdev-config = { path = "../ebdev_config" }
@@ -29,3 +30,5 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 crc32fast.workspace = true
+tar.workspace = true
+flate2.workspace = true

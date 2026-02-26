@@ -2,7 +2,7 @@
 
 Reproducible dev environments from a single TypeScript config. Pin toolchain versions, define tasks, sync files into Docker containers — all managed per-project.
 
-- **Pinned toolchains** — Node.js, pnpm, Rust, Mutagen installed to `.ebdev/toolchain/`, isolated from system versions
+- **Pinned toolchains** — Node.js, pnpm, Rust, Mutagen, and arbitrary binaries installed to `.ebdev/toolchain/`, isolated from system versions
 - **TypeScript task runner** — Define build/dev/CI workflows as async functions with parallel execution, stages, and Docker integration
 - **Interactive TUI** — Live output, collapsible stages, command palette for dynamic tasks
 - **Docker bridge** — Execute commands and file operations in running containers (with PTY support) via an embedded bridge binary
@@ -40,11 +40,46 @@ export default defineConfig({
     pnpm: "9.15.0",       // optional
     rust: "1.84.0",       // optional - installs via rustup
     mutagen: "0.18.1",    // optional
+    binary: {             // optional - arbitrary binaries via HTTP
+      jq: {
+        version: "1.7.1",
+        url: "https://github.com/jqlang/jq/releases/download/jq-{version}/jq-{target}",
+      },
+    },
   },
 });
 ```
 
 Toolchains are installed to `.ebdev/toolchain/` relative to the config file.
+
+### Binary Toolchains
+
+The `binary` field lets you pin any binary that can be downloaded via HTTP. Each entry specifies a name, version, and URL template:
+
+```typescript
+binary: {
+  "my-tool": {
+    version: "1.0.0",
+    url: "https://example.com/releases/v{version}/my-tool-{target}.tar.gz",
+    binary: "bin/my-tool",  // optional: path inside archive (default: key name)
+  },
+},
+```
+
+**URL placeholders:**
+
+| Placeholder | Replaced with |
+|---|---|
+| `{version}` | The configured version string |
+| `{target}` | Platform triple (e.g. `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`) |
+
+**Supported archive formats** (detected from URL extension):
+
+- `.tar.gz` / `.tgz` — tar gzip
+- `.tar.xz` — tar xz
+- Plain binary (no extension match) — downloaded as-is
+
+Binaries are installed to `.ebdev/toolchain/binary/<name>/v<version>/` and added to `PATH` by `ebdev run`.
 
 ## Commands
 

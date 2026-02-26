@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -29,6 +30,8 @@ pub struct ToolchainConfig {
     pub mutagen: Option<MutagenConfig>,
     #[serde(default)]
     pub rust: Option<RustConfig>,
+    #[serde(default)]
+    pub binary: Option<HashMap<String, BinaryToolchainConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,14 @@ pub struct RustConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EbdevSelfConfig {
     pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryToolchainConfig {
+    pub version: String,
+    pub url: String,
+    #[serde(default)]
+    pub binary: Option<String>,
 }
 
 impl Config {

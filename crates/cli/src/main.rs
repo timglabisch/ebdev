@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use ebdev_config::Config;
 use ebdev_remote::RemoteExecutor;
 use ebdev_toolchain_node::NodeEnv;
+use ebdev_toolchain_binary::BinaryEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
 use ebdev_toolchain_rust::RustEnv;
 
@@ -113,10 +114,15 @@ enum MutagenCommands {
     Terminate,
 }
 
-fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>, rust_env: Option<&RustEnv>) -> OsString {
+fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Option<&MutagenEnv>, rust_env: Option<&RustEnv>, binary_envs: &[BinaryEnv]) -> OsString {
     let mut paths: Vec<PathBuf> = Vec::new();
 
-    // mutagen bin dir first (if configured)
+    // binary toolchain dirs first
+    for env in binary_envs {
+        paths.push(env.install_dir().to_path_buf());
+    }
+
+    // mutagen bin dir (if configured)
     if let Some(env) = mutagen_env {
         paths.push(env.install_dir().to_path_buf());
     }
@@ -150,7 +156,8 @@ async fn ensure_toolchain(
     pnpm_version: Option<&str>,
     mutagen_version: Option<&str>,
     rust_version: Option<&str>,
-) -> anyhow::Result<(NodeEnv, Option<MutagenEnv>, Option<RustEnv>)> {
+    binary_toolchains: &Option<std::collections::HashMap<String, ebdev_config::BinaryToolchainConfig>>,
+) -> anyhow::Result<(NodeEnv, Option<MutagenEnv>, Option<RustEnv>, Vec<BinaryEnv>)> {
     let node_env = match NodeEnv::new(base_path, node_version) {
         Ok(env) => env,
         Err(_) => {
@@ -191,7 +198,27 @@ async fn ensure_toolchain(
         None
     };
 
-    Ok((node_env, mutagen_env, rust_env))
+    let mut binary_envs = Vec::new();
+    if let Some(binaries) = binary_toolchains {
+        for (name, cfg) in binaries {
+            let env = match BinaryEnv::new(base_path, name, &cfg.version) {
+                Ok(env) => env,
+                Err(_) => {
+                    ebdev_toolchain_binary::install_binary(
+                        name,
+                        &cfg.version,
+                        &cfg.url,
+                        cfg.binary.as_deref(),
+                        base_path,
+                    ).await?;
+                    BinaryEnv::new(base_path, name, &cfg.version)?
+                }
+            };
+            binary_envs.push(env);
+        }
+    }
+
+    Ok((node_env, mutagen_env, rust_env, binary_envs))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -289,6 +316,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                 if let Some(rust) = &config.toolchain.rust {
                     println!("  Rust:    {}", rust.version);
                 }
+                if let Some(binaries) = &config.toolchain.binary {
+                    for (name, cfg) in binaries {
+                        println!("  {name}: {} (binary)", cfg.version);
+                    }
+                }
             }
             ToolchainCommands::Install => {
                 let node_version = &config.toolchain.node.version;
@@ -308,6 +340,18 @@ async fn run() -> anyhow::Result<ExitCode> {
 
                 if let Some(rust) = &config.toolchain.rust {
                     ebdev_toolchain_rust::install_rust(&rust.version, &base_path).await?;
+                }
+
+                if let Some(binaries) = &config.toolchain.binary {
+                    for (name, cfg) in binaries {
+                        ebdev_toolchain_binary::install_binary(
+                            name,
+                            &cfg.version,
+                            &cfg.url,
+                            cfg.binary.as_deref(),
+                            &base_path,
+                        ).await?;
+                    }
                 }
             }
         },
@@ -410,8 +454,8 @@ async fn run() -> anyhow::Result<ExitCode> {
             let rust_v = rust_version.as_deref()
                 .or(config.toolchain.rust.as_ref().map(|r| r.version.as_str()));
 
-            let (node_env, mutagen_env, rust_env) = ensure_toolchain(&base_path, node_v, pnpm_v, mutagen_v, rust_v).await?;
-            let path = build_path(&node_env, pnpm_v, mutagen_env.as_ref(), rust_env.as_ref());
+            let (node_env, mutagen_env, rust_env, binary_envs) = ensure_toolchain(&base_path, node_v, pnpm_v, mutagen_v, rust_v, &config.toolchain.binary).await?;
+            let path = build_path(&node_env, pnpm_v, mutagen_env.as_ref(), rust_env.as_ref(), &binary_envs);
 
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 

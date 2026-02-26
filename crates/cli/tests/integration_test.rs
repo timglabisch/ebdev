@@ -728,3 +728,248 @@ fn file_hash(path: &Path) -> u32 {
     let data = fs::read(path).expect("failed to read file");
     crc32fast::hash(&data)
 }
+
+// =============================================================================
+// Binary Toolchain Tests
+// =============================================================================
+
+/// Start a minimal HTTP test server that serves files from a HashMap.
+fn start_test_server(files: std::collections::HashMap<String, Vec<u8>>) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let files = Arc::new(files);
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let files = files.clone();
+            std::thread::spawn(move || {
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 { return; }
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request.lines().next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+
+                if let Some(data) = files.get(&path) {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        data.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(data);
+                } else {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                }
+            });
+        }
+    });
+
+    addr
+}
+
+#[test]
+fn test_binary_toolchain() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Start test HTTP server with a shell script as "binary"
+    let binary_content = b"#!/bin/sh\necho \"mytool v1.0.0 working\"\n";
+    let mut files = std::collections::HashMap::new();
+    files.insert("/mytool-v1.0.0".to_string(), binary_content.to_vec());
+    let addr = start_test_server(files);
+
+    let config = format!(
+        r#"import {{ defineConfig }} from "ebdev";
+
+export default defineConfig({{
+  toolchain: {{
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    binary: {{
+      mytool: {{
+        version: "1.0.0",
+        url: "http://127.0.0.1:{port}/mytool-v{{version}}",
+      }},
+    }},
+  }},
+}});
+"#,
+        port = addr.port()
+    );
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // ========================================================================
+    // Toolchain Info
+    // ========================================================================
+    println!("Testing toolchain info shows binary...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "info"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mytool"))
+        .stdout(predicate::str::contains("1.0.0"))
+        .stdout(predicate::str::contains("(binary)"));
+
+    // ========================================================================
+    // Toolchain Install
+    // ========================================================================
+    println!("Testing toolchain install with binary...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "install"])
+        .timeout(std::time::Duration::from_secs(300))
+        .assert()
+        .success();
+
+    // Verify binary installed at correct path
+    assert!(
+        temp_dir.path().join(".ebdev/toolchain/binary/mytool/v1.0.0/mytool").exists(),
+        "Binary should be installed at .ebdev/toolchain/binary/mytool/v1.0.0/mytool"
+    );
+
+    // Verify NOT at old github path
+    assert!(
+        !temp_dir.path().join(".ebdev/toolchain/github").exists(),
+        "Should not use old 'github' cache path"
+    );
+
+    // ========================================================================
+    // Already Installed
+    // ========================================================================
+    println!("Testing binary already installed...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already installed"));
+
+    // ========================================================================
+    // Run: binary is in PATH
+    // ========================================================================
+    println!("Testing run with binary toolchain...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "mytool"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mytool v1.0.0 working"));
+
+    // ========================================================================
+    // PATH contains binary toolchain dir
+    // ========================================================================
+    println!("Testing PATH includes binary toolchain...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "node", "-e", "console.log(process.env.PATH)"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("toolchain/binary/mytool/v1.0.0"));
+
+    println!("All binary toolchain tests passed!");
+}
+
+#[test]
+fn test_binary_toolchain_not_configured() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Config without binary — should not show binary in info
+    let config = r#"import { defineConfig } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+  },
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "info"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(binary)").not());
+}
+
+#[test]
+fn test_binary_toolchain_tar_gz() {
+    use std::io::Write;
+
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create a tar.gz archive with a shell script
+    let binary_content = b"#!/bin/sh\necho \"archived-tool v2.0.0\"\n";
+    let tar_data = {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(binary_content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append_data(&mut header, "archived-tool", &binary_content[..]).unwrap();
+        builder.into_inner().unwrap()
+    };
+    let gz_data = {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&tar_data).unwrap();
+        encoder.finish().unwrap()
+    };
+
+    let mut files = std::collections::HashMap::new();
+    files.insert("/archived-tool-v2.0.0.tar.gz".to_string(), gz_data);
+    let addr = start_test_server(files);
+
+    let config = format!(
+        r#"import {{ defineConfig }} from "ebdev";
+
+export default defineConfig({{
+  toolchain: {{
+    ebdev: "0.1.0",
+    node: "22.12.0",
+    binary: {{
+      "archived-tool": {{
+        version: "2.0.0",
+        url: "http://127.0.0.1:{port}/archived-tool-v{{version}}.tar.gz",
+      }},
+    }},
+  }},
+}});
+"#,
+        port = addr.port()
+    );
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // Install
+    println!("Testing tar.gz binary toolchain install...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["toolchain", "install"])
+        .timeout(std::time::Duration::from_secs(300))
+        .assert()
+        .success();
+
+    assert!(
+        temp_dir.path().join(".ebdev/toolchain/binary/archived-tool/v2.0.0/archived-tool").exists()
+    );
+
+    // Run
+    println!("Testing tar.gz binary toolchain run...");
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["run", "archived-tool"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("archived-tool v2.0.0"));
+
+    println!("tar.gz binary toolchain tests passed!");
+}

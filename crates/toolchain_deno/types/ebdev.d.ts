@@ -73,6 +73,18 @@ declare module "ebdev" {
   }
 
   /**
+   * Binary toolchain configuration
+   */
+  export interface BinaryToolchain {
+    /** Version string (e.g., "1.0.26") */
+    version: string;
+    /** URL template with {version} and {target} placeholders */
+    url: string;
+    /** Path to binary inside archive (default: key name) */
+    binary?: string;
+  }
+
+  /**
    * Toolchain configuration
    */
   export interface ToolchainConfig {
@@ -84,6 +96,8 @@ declare module "ebdev" {
     pnpm?: PnpmToolchain | string;
     /** Mutagen configuration (optional) */
     mutagen?: MutagenToolchain | string;
+    /** Binary toolchains (optional) */
+    binary?: Record<string, BinaryToolchain>;
   }
 
   /**

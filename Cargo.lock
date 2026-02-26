@@ -1022,15 +1022,18 @@ dependencies = [
  "ebdev-config",
  "ebdev-task-runner",
  "ebdev-toolchain",
+ "ebdev-toolchain-binary",
  "ebdev-toolchain-deno",
  "ebdev-toolchain-ebdev",
  "ebdev-toolchain-mutagen",
  "ebdev-toolchain-node",
  "ebdev-toolchain-rust",
  "ebdev_remote",
+ "flate2",
  "libc",
  "predicates",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
 ]
@@ -1094,6 +1097,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+]
+
+[[package]]
+name = "ebdev-toolchain-binary"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "futures-util",
+ "reqwest",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "xz2",
 ]
 
 [[package]]
