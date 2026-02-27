@@ -40,6 +40,7 @@ export default defineConfig({
     pnpm: "9.15.0",       // optional
     rust: "1.84.0",       // optional - installs via rustup
     mutagen: "0.18.1",    // optional
+    gh: "2.67.0",         // optional - managed GitHub CLI
     binary: {             // optional - arbitrary binaries via HTTP
       jq: {
         version: "1.7.1",
@@ -72,6 +73,19 @@ binary: {
 |---|---|
 | `{version}` | The configured version string |
 | `{target}` | Platform triple (e.g. `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`) |
+
+**Private GitHub repos** — prefix the URL with `gh:` to download with GitHub authentication:
+
+```typescript
+binary: {
+  "my-private-tool": {
+    version: "0.0.2",
+    url: "gh:https://github.com/org/private-repo/releases/download/v{version}/tool-{target}",
+  },
+},
+```
+
+The `gh:` prefix resolves a token automatically (in order): `gh auth token` (system or managed gh CLI), `GITHUB_TOKEN` env, `GH_TOKEN` env. Configure a managed gh CLI via `gh: "2.67.0"` in the toolchain config or authenticate your system `gh` with `gh auth login`.
 
 **Supported archive formats** (detected from URL extension):
 

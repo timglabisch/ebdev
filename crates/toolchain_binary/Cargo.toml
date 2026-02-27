@@ -10,6 +10,7 @@ futures-util.workspace = true
 flate2.workspace = true
 tar.workspace = true
 xz2.workspace = true
+zip.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

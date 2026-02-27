@@ -1,5 +1,4 @@
-use crate::platform;
-use futures_util::StreamExt;
+use crate::{download, platform};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -17,6 +16,25 @@ pub enum InstallError {
         version: String,
         url: String,
     },
+
+    #[error("Binary '{name}' v{version} not found at {url} (HTTP 404)\n  Hint: Run `gh auth login` or set GITHUB_TOKEN env var.")]
+    NotFoundAuth {
+        name: String,
+        version: String,
+        url: String,
+    },
+
+    #[error("Download error: {0}")]
+    Download(String),
+}
+
+pub struct InstallBinaryOptions<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub url_template: &'a str,
+    pub binary_path: Option<&'a str>,
+    pub base_path: &'a Path,
+    pub gh_version: Option<&'a str>,
 }
 
 fn resolve_url(url_template: &str, version: &str) -> String {
@@ -43,13 +61,16 @@ fn detect_archive_type(url: &str) -> ArchiveType {
     }
 }
 
-pub async fn install_binary(
-    name: &str,
-    version: &str,
-    url_template: &str,
-    binary_path: Option<&str>,
-    base_path: &Path,
-) -> Result<PathBuf, InstallError> {
+pub async fn install_binary(opts: &InstallBinaryOptions<'_>) -> Result<PathBuf, InstallError> {
+    let InstallBinaryOptions {
+        name,
+        version,
+        url_template,
+        binary_path,
+        base_path,
+        gh_version,
+    } = opts;
+
     let install_dir = base_path
         .join(".ebdev")
         .join("toolchain")
@@ -62,14 +83,40 @@ pub async fn install_binary(
         return Ok(install_dir.clone());
     }
 
-    let url = resolve_url(url_template, version);
+    let is_gh_url = url_template.starts_with("gh:");
+    let effective_template = if is_gh_url {
+        &url_template[3..]
+    } else {
+        url_template
+    };
+
+    let url = resolve_url(effective_template, version);
     let archive_type = detect_archive_type(&url);
+
+    // Resolve auth token for gh: URLs
+    let auth_token = if is_gh_url {
+        crate::github::resolve_github_token(base_path, *gh_version).await
+    } else {
+        None
+    };
 
     println!("Downloading {url}...");
 
-    let response = reqwest::get(&url).await?;
+    let client = reqwest::Client::new();
+    let mut request = client.get(&url);
+    if let Some(ref token) = auth_token {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+    let response = request.send().await?;
 
     if !response.status().is_success() {
+        if is_gh_url {
+            return Err(InstallError::NotFoundAuth {
+                name: name.to_string(),
+                version: version.to_string(),
+                url,
+            });
+        }
         return Err(InstallError::NotFound {
             name: name.to_string(),
             version: version.to_string(),
@@ -87,15 +134,9 @@ pub async fn install_binary(
 
     let temp_file = temp_dir.join(format!("{name}-v{version}.tmp"));
 
-    // Stream download to temp file
-    let mut file = tokio::fs::File::create(&temp_file).await?;
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
-    }
-    drop(file);
+    download::stream_to_file(response, &temp_file)
+        .await
+        .map_err(|e| InstallError::Download(e.to_string()))?;
 
     tokio::fs::create_dir_all(&install_dir).await?;
 
@@ -107,14 +148,14 @@ pub async fn install_binary(
             let temp_extract = temp_dir.join(format!("{name}-v{version}-extract"));
             tokio::fs::create_dir_all(&temp_extract).await?;
 
-            extract_tar_gz(&temp_file, &temp_extract)?;
+            download::extract_tar_gz(&temp_file, &temp_extract)?;
 
             let src = temp_extract.join(binary_name);
             let dest = install_dir.join(name);
             tokio::fs::rename(&src, &dest).await?;
 
             #[cfg(unix)]
-            set_executable(&dest)?;
+            download::set_executable(&dest)?;
 
             tokio::fs::remove_dir_all(&temp_extract).await.ok();
         }
@@ -123,14 +164,14 @@ pub async fn install_binary(
             let temp_extract = temp_dir.join(format!("{name}-v{version}-extract"));
             tokio::fs::create_dir_all(&temp_extract).await?;
 
-            extract_tar_xz(&temp_file, &temp_extract)?;
+            download::extract_tar_xz(&temp_file, &temp_extract)?;
 
             let src = temp_extract.join(binary_name);
             let dest = install_dir.join(name);
             tokio::fs::rename(&src, &dest).await?;
 
             #[cfg(unix)]
-            set_executable(&dest)?;
+            download::set_executable(&dest)?;
 
             tokio::fs::remove_dir_all(&temp_extract).await.ok();
         }
@@ -139,7 +180,7 @@ pub async fn install_binary(
             tokio::fs::rename(&temp_file, &dest).await?;
 
             #[cfg(unix)]
-            set_executable(&dest)?;
+            download::set_executable(&dest)?;
         }
     }
 
@@ -149,29 +190,4 @@ pub async fn install_binary(
     println!("Installed {name} v{version} to {}", install_dir.display());
 
     Ok(install_dir)
-}
-
-fn extract_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), std::io::Error> {
-    let file = std::fs::File::open(archive_path)?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(dest)?;
-    Ok(())
-}
-
-fn extract_tar_xz(archive_path: &Path, dest: &Path) -> Result<(), std::io::Error> {
-    let file = std::fs::File::open(archive_path)?;
-    let decoder = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(dest)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)?;
-    Ok(())
 }

@@ -31,6 +31,8 @@ pub struct ToolchainConfig {
     #[serde(default)]
     pub rust: Option<RustConfig>,
     #[serde(default)]
+    pub gh: Option<GhConfig>,
+    #[serde(default)]
     pub binary: Option<HashMap<String, BinaryToolchainConfig>>,
 }
 
@@ -56,6 +58,11 @@ pub struct RustConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EbdevSelfConfig {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhConfig {
     pub version: String,
 }
 

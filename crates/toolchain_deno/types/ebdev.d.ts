@@ -96,7 +96,9 @@ declare module "ebdev" {
     pnpm?: PnpmToolchain | string;
     /** Mutagen configuration (optional) */
     mutagen?: MutagenToolchain | string;
-    /** Binary toolchains (optional) */
+    /** GitHub CLI version — managed gh installation (optional) */
+    gh?: string;
+    /** Binary toolchains (optional). Use "gh:" URL prefix for private GitHub repos. */
     binary?: Record<string, BinaryToolchain>;
   }
 

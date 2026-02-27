@@ -152,12 +152,9 @@ fn build_path(node_env: &NodeEnv, pnpm_version: Option<&str>, mutagen_env: Optio
 
 async fn ensure_toolchain(
     base_path: &PathBuf,
-    node_version: &str,
-    pnpm_version: Option<&str>,
-    mutagen_version: Option<&str>,
-    rust_version: Option<&str>,
-    binary_toolchains: &Option<std::collections::HashMap<String, ebdev_config::BinaryToolchainConfig>>,
+    tc: &ebdev_config::ToolchainConfig,
 ) -> anyhow::Result<(NodeEnv, Option<MutagenEnv>, Option<RustEnv>, Vec<BinaryEnv>)> {
+    let node_version = &tc.node.version;
     let node_env = match NodeEnv::new(base_path, node_version) {
         Ok(env) => env,
         Err(_) => {
@@ -166,18 +163,18 @@ async fn ensure_toolchain(
         }
     };
 
-    if let Some(pnpm_v) = pnpm_version {
-        if !node_env.pnpm_bin_dir(pnpm_v).exists() {
-            node_env.install_pnpm(pnpm_v).await?;
+    if let Some(pnpm) = &tc.pnpm {
+        if !node_env.pnpm_bin_dir(&pnpm.version).exists() {
+            node_env.install_pnpm(&pnpm.version).await?;
         }
     }
 
-    let mutagen_env = if let Some(mutagen_v) = mutagen_version {
-        let env = match MutagenEnv::new(base_path, mutagen_v) {
+    let mutagen_env = if let Some(mutagen) = &tc.mutagen {
+        let env = match MutagenEnv::new(base_path, &mutagen.version) {
             Ok(env) => env,
             Err(_) => {
-                ebdev_toolchain_mutagen::install_mutagen(mutagen_v, base_path).await?;
-                MutagenEnv::new(base_path, mutagen_v)?
+                ebdev_toolchain_mutagen::install_mutagen(&mutagen.version, base_path).await?;
+                MutagenEnv::new(base_path, &mutagen.version)?
             }
         };
         Some(env)
@@ -185,31 +182,49 @@ async fn ensure_toolchain(
         None
     };
 
-    let rust_env = if let Some(rust_v) = rust_version {
-        let env = match RustEnv::new(base_path, rust_v) {
+    let rust_env = if let Some(rust) = &tc.rust {
+        let env = match RustEnv::new(base_path, &rust.version) {
             Ok(env) => env,
             Err(_) => {
-                ebdev_toolchain_rust::install_rust(rust_v, base_path).await?;
-                RustEnv::new(base_path, rust_v)?
+                ebdev_toolchain_rust::install_rust(&rust.version, base_path).await?;
+                RustEnv::new(base_path, &rust.version)?
             }
         };
         Some(env)
     } else {
         None
     };
+
+    let gh_version = tc.gh.as_ref().map(|g| g.version.as_str());
+
+    // Install gh CLI if configured
+    if let Some(gh_v) = gh_version {
+        if BinaryEnv::new(base_path, "gh", gh_v).is_err() {
+            ebdev_toolchain_binary::install_gh(gh_v, base_path).await?;
+        }
+    }
 
     let mut binary_envs = Vec::new();
-    if let Some(binaries) = binary_toolchains {
+
+    // Add gh to binary_envs so it appears in PATH
+    if let Some(gh_v) = gh_version {
+        binary_envs.push(BinaryEnv::new(base_path, "gh", gh_v)?);
+    }
+
+    if let Some(binaries) = &tc.binary {
         for (name, cfg) in binaries {
             let env = match BinaryEnv::new(base_path, name, &cfg.version) {
                 Ok(env) => env,
                 Err(_) => {
                     ebdev_toolchain_binary::install_binary(
-                        name,
-                        &cfg.version,
-                        &cfg.url,
-                        cfg.binary.as_deref(),
-                        base_path,
+                        &ebdev_toolchain_binary::InstallBinaryOptions {
+                            name,
+                            version: &cfg.version,
+                            url_template: &cfg.url,
+                            binary_path: cfg.binary.as_deref(),
+                            base_path,
+                            gh_version,
+                        },
                     ).await?;
                     BinaryEnv::new(base_path, name, &cfg.version)?
                 }
@@ -316,6 +331,9 @@ async fn run() -> anyhow::Result<ExitCode> {
                 if let Some(rust) = &config.toolchain.rust {
                     println!("  Rust:    {}", rust.version);
                 }
+                if let Some(gh) = &config.toolchain.gh {
+                    println!("  gh:      {}", gh.version);
+                }
                 if let Some(binaries) = &config.toolchain.binary {
                     for (name, cfg) in binaries {
                         println!("  {name}: {} (binary)", cfg.version);
@@ -323,33 +341,39 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
             }
             ToolchainCommands::Install => {
-                let node_version = &config.toolchain.node.version;
-                let pnpm_version = config.toolchain.pnpm.as_ref().map(|p| p.version.as_str());
-                let mutagen_version = config.toolchain.mutagen.as_ref().map(|m| m.version.as_str());
+                let tc = &config.toolchain;
 
-                ebdev_toolchain_node::install_node(node_version, &base_path).await?;
+                ebdev_toolchain_node::install_node(&tc.node.version, &base_path).await?;
 
-                if let Some(pnpm_v) = pnpm_version {
-                    let env = NodeEnv::new(&base_path, node_version)?;
-                    env.install_pnpm(pnpm_v).await?;
+                if let Some(pnpm) = &tc.pnpm {
+                    let env = NodeEnv::new(&base_path, &tc.node.version)?;
+                    env.install_pnpm(&pnpm.version).await?;
                 }
 
-                if let Some(mutagen_v) = mutagen_version {
-                    ebdev_toolchain_mutagen::install_mutagen(mutagen_v, &base_path).await?;
+                if let Some(mutagen) = &tc.mutagen {
+                    ebdev_toolchain_mutagen::install_mutagen(&mutagen.version, &base_path).await?;
                 }
 
-                if let Some(rust) = &config.toolchain.rust {
+                if let Some(rust) = &tc.rust {
                     ebdev_toolchain_rust::install_rust(&rust.version, &base_path).await?;
                 }
 
-                if let Some(binaries) = &config.toolchain.binary {
+                if let Some(gh) = &tc.gh {
+                    ebdev_toolchain_binary::install_gh(&gh.version, &base_path).await?;
+                }
+
+                let gh_version = tc.gh.as_ref().map(|g| g.version.as_str());
+                if let Some(binaries) = &tc.binary {
                     for (name, cfg) in binaries {
                         ebdev_toolchain_binary::install_binary(
-                            name,
-                            &cfg.version,
-                            &cfg.url,
-                            cfg.binary.as_deref(),
-                            &base_path,
+                            &ebdev_toolchain_binary::InstallBinaryOptions {
+                                name,
+                                version: &cfg.version,
+                                url_template: &cfg.url,
+                                binary_path: cfg.binary.as_deref(),
+                                base_path: &base_path,
+                                gh_version,
+                            },
                         ).await?;
                     }
                 }
@@ -445,16 +469,22 @@ async fn run() -> anyhow::Result<ExitCode> {
             }
         },
         Commands::Run { node_version, pnpm_version, mutagen_version, rust_version, command, args } => {
-            let node_v = node_version.as_deref()
-                .unwrap_or(&config.toolchain.node.version);
-            let pnpm_v = pnpm_version.as_deref()
-                .or(config.toolchain.pnpm.as_ref().map(|p| p.version.as_str()));
-            let mutagen_v = mutagen_version.as_deref()
-                .or(config.toolchain.mutagen.as_ref().map(|m| m.version.as_str()));
-            let rust_v = rust_version.as_deref()
-                .or(config.toolchain.rust.as_ref().map(|r| r.version.as_str()));
+            let mut tc = config.toolchain.clone();
+            if let Some(v) = node_version {
+                tc.node.version = v;
+            }
+            if let Some(v) = pnpm_version {
+                tc.pnpm = Some(ebdev_config::PnpmConfig { version: v });
+            }
+            if let Some(v) = mutagen_version {
+                tc.mutagen = Some(ebdev_config::MutagenConfig { version: v });
+            }
+            if let Some(v) = rust_version {
+                tc.rust = Some(ebdev_config::RustConfig { version: v });
+            }
 
-            let (node_env, mutagen_env, rust_env, binary_envs) = ensure_toolchain(&base_path, node_v, pnpm_v, mutagen_v, rust_v, &config.toolchain.binary).await?;
+            let (node_env, mutagen_env, rust_env, binary_envs) = ensure_toolchain(&base_path, &tc).await?;
+            let pnpm_v = tc.pnpm.as_ref().map(|p| p.version.as_str());
             let path = build_path(&node_env, pnpm_v, mutagen_env.as_ref(), rust_env.as_ref(), &binary_envs);
 
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

@@ -1,7 +1,10 @@
+mod download;
+mod github;
 mod install;
 mod platform;
 
-pub use install::{install_binary, InstallError};
+pub use github::{install_gh, GhInstallError};
+pub use install::{install_binary, InstallBinaryOptions, InstallError};
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;

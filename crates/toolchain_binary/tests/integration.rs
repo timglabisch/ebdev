@@ -3,7 +3,25 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use ebdev_toolchain_binary::{install_binary, BinaryEnv};
+use ebdev_toolchain_binary::{install_binary, InstallBinaryOptions, BinaryEnv};
+
+/// Shorthand for creating InstallBinaryOptions with common defaults.
+fn opts<'a>(
+    name: &'a str,
+    version: &'a str,
+    url_template: &'a str,
+    binary_path: Option<&'a str>,
+    base_path: &'a std::path::Path,
+) -> InstallBinaryOptions<'a> {
+    InstallBinaryOptions {
+        name,
+        version,
+        url_template,
+        binary_path,
+        base_path,
+        gh_version: None,
+    }
+}
 
 // =============================================================================
 // Test HTTP Server
@@ -165,7 +183,7 @@ async fn test_install_plain_binary() {
 
     let url_template = format!("http://127.0.0.1:{}/mytool-v{{version}}", addr.port());
 
-    let install_dir = install_binary("mytool", "1.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("mytool", "1.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -198,7 +216,7 @@ async fn test_install_tar_gz() {
         addr.port()
     );
 
-    let install_dir = install_binary("mytool", "2.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("mytool", "2.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -219,7 +237,7 @@ async fn test_install_tgz() {
 
     let url_template = format!("http://127.0.0.1:{}/mytool-v{{version}}.tgz", addr.port());
 
-    let install_dir = install_binary("mytool", "1.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("mytool", "1.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -247,7 +265,7 @@ async fn test_install_tar_xz() {
         addr.port()
     );
 
-    let install_dir = install_binary("mytool", "3.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("mytool", "3.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -275,15 +293,9 @@ async fn test_install_custom_binary_path() {
         addr.port()
     );
 
-    let install_dir = install_binary(
-        "tool",
-        "1.0.0",
-        &url_template,
-        Some("bin/actual-binary"),
-        temp_dir.path(),
-    )
-    .await
-    .unwrap();
+    let install_dir = install_binary(&opts("tool", "1.0.0", &url_template, Some("bin/actual-binary"), temp_dir.path()))
+        .await
+        .unwrap();
 
     // The binary is renamed to the tool name
     assert!(install_dir.join("tool").exists());
@@ -307,13 +319,13 @@ async fn test_already_installed() {
     std::fs::write(install_dir.join("mytool"), b"existing content").unwrap();
 
     // URL is invalid — if it tried to download, it would fail
-    let result = install_binary(
+    let result = install_binary(&opts(
         "mytool",
         "1.0.0",
         "http://should-not-be-called.invalid/",
         None,
         temp_dir.path(),
-    )
+    ))
     .await;
 
     assert!(result.is_ok());
@@ -338,7 +350,7 @@ async fn test_install_not_found() {
         addr.port()
     );
 
-    let err = install_binary("nonexistent", "1.0.0", &url_template, None, temp_dir.path())
+    let err = install_binary(&opts("nonexistent", "1.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap_err();
 
@@ -370,7 +382,7 @@ async fn test_url_resolves_version() {
         addr.port()
     );
 
-    let result = install_binary("tool", "5.0.0", &url_template, None, temp_dir.path()).await;
+    let result = install_binary(&opts("tool", "5.0.0", &url_template, None, temp_dir.path())).await;
     assert!(result.is_ok(), "Should resolve {{version}} in URL: {:?}", result.err());
 }
 
@@ -392,7 +404,7 @@ async fn test_installed_binary_is_executable() {
 
     let url_template = format!("http://127.0.0.1:{}/tool-v{{version}}", addr.port());
 
-    let install_dir = install_binary("tool", "1.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("tool", "1.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -420,7 +432,7 @@ async fn test_tar_gz_binary_is_executable() {
         addr.port()
     );
 
-    let install_dir = install_binary("tool", "1.0.0", &url_template, None, temp_dir.path())
+    let install_dir = install_binary(&opts("tool", "1.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -449,7 +461,7 @@ async fn test_install_then_binary_env() {
     assert!(BinaryEnv::new(temp_dir.path(), "tool", "4.0.0").is_err());
 
     // Install
-    install_binary("tool", "4.0.0", &url_template, None, temp_dir.path())
+    install_binary(&opts("tool", "4.0.0", &url_template, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -476,10 +488,10 @@ async fn test_multiple_binaries_coexist() {
     let url_a = format!("http://127.0.0.1:{}/tool-a-v{{version}}", addr.port());
     let url_b = format!("http://127.0.0.1:{}/tool-b-v{{version}}", addr.port());
 
-    install_binary("tool-a", "1.0.0", &url_a, None, temp_dir.path())
+    install_binary(&opts("tool-a", "1.0.0", &url_a, None, temp_dir.path()))
         .await
         .unwrap();
-    install_binary("tool-b", "2.0.0", &url_b, None, temp_dir.path())
+    install_binary(&opts("tool-b", "2.0.0", &url_b, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -507,10 +519,10 @@ async fn test_multiple_versions_coexist() {
 
     let url = format!("http://127.0.0.1:{}/tool-v{{version}}", addr.port());
 
-    install_binary("tool", "1.0.0", &url, None, temp_dir.path())
+    install_binary(&opts("tool", "1.0.0", &url, None, temp_dir.path()))
         .await
         .unwrap();
-    install_binary("tool", "2.0.0", &url, None, temp_dir.path())
+    install_binary(&opts("tool", "2.0.0", &url, None, temp_dir.path()))
         .await
         .unwrap();
 
@@ -523,4 +535,93 @@ async fn test_multiple_versions_coexist() {
     let content_v2 = std::fs::read(env_v2.bin_path()).unwrap();
     assert_eq!(content_v1, b"v1");
     assert_eq!(content_v2, b"v2");
+}
+
+// =============================================================================
+// Install: GitHub-style URL with {version} in path and filename (no {target})
+// =============================================================================
+
+#[tokio::test]
+async fn test_install_github_release_style_url() {
+    let temp_dir = TempDir::new().unwrap();
+    let binary_content = b"\x7fELF fake binary";
+
+    let mut files = HashMap::new();
+    files.insert(
+        "/easybill/mysql_clickhouse_cdc_tool/releases/download/v0.0.2/mysql_clickhouse_schema-v0.0.2-aarch64-unknown-linux-musl".to_string(),
+        binary_content.to_vec(),
+    );
+    let addr = start_test_server(files);
+
+    let url_template = format!(
+        "http://127.0.0.1:{}/easybill/mysql_clickhouse_cdc_tool/releases/download/v{{version}}/mysql_clickhouse_schema-v{{version}}-aarch64-unknown-linux-musl",
+        addr.port()
+    );
+
+    let install_dir = install_binary(&opts(
+        "mysql_clickhouse_schema_linux_arm64",
+        "0.0.2",
+        &url_template,
+        None,
+        temp_dir.path(),
+    ))
+    .await
+    .unwrap();
+
+    // Binary is renamed to the tool name
+    let bin = install_dir.join("mysql_clickhouse_schema_linux_arm64");
+    assert!(bin.exists(), "Binary should exist at {}", bin.display());
+
+    let installed = std::fs::read(&bin).unwrap();
+    assert_eq!(installed, binary_content);
+
+    // BinaryEnv roundtrip
+    let env = BinaryEnv::new(temp_dir.path(), "mysql_clickhouse_schema_linux_arm64", "0.0.2").unwrap();
+    assert_eq!(env.name(), "mysql_clickhouse_schema_linux_arm64");
+    assert_eq!(env.version(), "0.0.2");
+    assert!(env.bin_path().exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&bin).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o755);
+    }
+}
+
+// =============================================================================
+// Install: Second install is a no-op (already installed)
+// =============================================================================
+
+#[tokio::test]
+async fn test_install_github_release_already_installed() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Pre-create install directory
+    let install_dir = temp_dir
+        .path()
+        .join(".ebdev/toolchain/binary/mysql_clickhouse_schema_linux_arm64/v0.0.2");
+    std::fs::create_dir_all(&install_dir).unwrap();
+    std::fs::write(
+        install_dir.join("mysql_clickhouse_schema_linux_arm64"),
+        b"existing",
+    )
+    .unwrap();
+
+    // URL would 404 — but install should skip the download
+    let result = install_binary(&opts(
+        "mysql_clickhouse_schema_linux_arm64",
+        "0.0.2",
+        "http://should-not-be-called.invalid/v{version}/bin",
+        None,
+        temp_dir.path(),
+    ))
+    .await;
+
+    assert!(result.is_ok());
+    let content = std::fs::read(
+        install_dir.join("mysql_clickhouse_schema_linux_arm64"),
+    )
+    .unwrap();
+    assert_eq!(content, b"existing");
 }
