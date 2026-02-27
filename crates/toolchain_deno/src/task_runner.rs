@@ -32,9 +32,8 @@ pub struct ArgInfo {
     pub choices: Option<Vec<String>>,
 }
 
-/// List all exported async functions (tasks) from a .ebdev.ts file
-pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
-    let path = path.canonicalize()?;
+/// Create a JsRuntime, load the given module, and return both ready for script execution.
+async fn create_runtime(path: &Path, init_state: impl FnOnce(&mut deno_core::OpState)) -> Result<(JsRuntime, ModuleSpecifier), Error> {
     let dir = path.parent().unwrap_or(Path::new("."));
 
     let mut rt = JsRuntime::new(RuntimeOptions {
@@ -43,25 +42,42 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
         ..Default::default()
     });
 
-    // Initialize task runner state (no event sender for list)
     {
         let op_state = rt.op_state();
         let mut state = op_state.borrow_mut();
-        init_task_runner_state(&mut state, None, None, HashMap::new());
+        init_state(&mut state);
     }
 
-    let module = ModuleSpecifier::from_file_path(&path).map_err(|_| Error("Invalid path".into()))?;
+    let module = ModuleSpecifier::from_file_path(path).map_err(|_| Error("Invalid path".into()))?;
 
-    // Load module
     let id = rt.load_main_es_module(&module).await.map_err(|e| Error(e.to_string()))?;
     let eval = rt.mod_evaluate(id);
     rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
     eval.await.map_err(|e| Error(e.to_string()))?;
 
-    // Get all exported function names with metadata
+    Ok((rt, module))
+}
+
+/// Execute a JS script, run the event loop, then read a global string result.
+async fn exec_and_read_global(rt: &mut JsRuntime, label: &'static str, code: String, global: &'static str) -> Result<String, Error> {
+    rt.execute_script(label, code).map_err(|e| Error(e.to_string()))?;
+    rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
+
+    let result = rt.execute_script("<r>", global.to_string()).map_err(|e| Error(e.to_string()))?;
+    v8_string(rt, result)
+}
+
+/// List all exported async functions (tasks) from a .ebdev.ts file
+pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
+    let path = path.canonicalize()?;
+
+    let (mut rt, module) = create_runtime(&path, |state| {
+        init_task_runner_state(state, None, None, HashMap::new());
+    }).await?;
+
     let code = format!(r#"
         (async () => {{
-            const mod = await import("{}");
+            const mod = await import("{module}");
             const tasks = [];
             for (const [name, value] of Object.entries(mod)) {{
                 if (typeof value === 'function' && name !== 'default') {{
@@ -92,13 +108,9 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
             }}
             globalThis.__tasks = JSON.stringify(tasks);
         }})()
-    "#, module);
+    "#);
 
-    rt.execute_script("<list>", code).map_err(|e| Error(e.to_string()))?;
-    rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
-
-    let result = rt.execute_script("<r>", "globalThis.__tasks").map_err(|e| Error(e.to_string()))?;
-    let json = v8_string(&mut rt, result)?;
+    let json = exec_and_read_global(&mut rt, "<list>", code, "globalThis.__tasks").await?;
     serde_json::from_str(&json).map_err(|e| Error(e.to_string()))
 }
 
@@ -115,63 +127,39 @@ pub async fn run_task(
     let path = path.canonicalize()?;
     let dir = path.parent().unwrap_or(Path::new("."));
 
-    let mut rt = JsRuntime::new(RuntimeOptions {
-        module_loader: Some(Rc::new(TsModuleLoader(dir.to_path_buf()))),
-        extensions: vec![ebdev_deno_ops::init()],
-        ..Default::default()
-    });
+    let (mut rt, module) = create_runtime(&path, |state| {
+        init_task_runner_state(state, handle, Some(dir.to_string_lossy().to_string()), env);
+        init_mutagen_state(state, mutagen_path, path.clone());
+        init_bridge_state(state, embedded_linux_binary);
+    }).await?;
 
-    // Initialize task runner state
-    {
-        let op_state = rt.op_state();
-        let mut state = op_state.borrow_mut();
-        init_task_runner_state(&mut state, handle, Some(dir.to_string_lossy().to_string()), env);
-        init_mutagen_state(&mut state, mutagen_path, path.clone());
-        init_bridge_state(&mut state, embedded_linux_binary);
-    }
-
-    let module = ModuleSpecifier::from_file_path(&path).map_err(|_| Error("Invalid path".into()))?;
-
-    // Load module
-    let id = rt.load_main_es_module(&module).await.map_err(|e| Error(e.to_string()))?;
-    let eval = rt.mod_evaluate(id);
-    rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
-    eval.await.map_err(|e| Error(e.to_string()))?;
-
-    // Serialize task_args as JSON for injection into JS
     let task_args_json = serde_json::to_string(&task_args).unwrap_or_else(|_| "[]".to_string());
 
-    // Call the task function
     let code = format!(r#"
         (async () => {{
-            const mod = await import("{}");
-            const task = mod["{}"];
+            const mod = await import("{module}");
+            const task = mod["{task_name}"];
             if (!task) {{
-                throw new Error("Task '{}' not found. Available tasks: " +
+                throw new Error("Task '{task_name}' not found. Available tasks: " +
                     Object.keys(mod).filter(k => typeof mod[k] === 'function' && k !== 'default').join(', '));
             }}
             if (typeof task !== 'function') {{
-                throw new Error("'{}' is not a function");
+                throw new Error("'{task_name}' is not a function");
             }}
-            const rawArgs = {};
+            const rawArgs = {task_args_json};
             if (task.__ebdevTaskDef) {{
                 const parsed = task.__ebdevTaskDef.__parseArgs(rawArgs);
                 await task.__ebdevTaskDef.run(parsed);
             }} else if (rawArgs.length > 0) {{
-                throw new Error("Task '{}' does not accept arguments. Use defineTask() to define a task with typed arguments.");
+                throw new Error("Task '{task_name}' does not accept arguments. Use defineTask() to define a task with typed arguments.");
             }} else {{
                 await task();
             }}
             globalThis.__taskResult = "ok";
         }})()
-    "#, module, task_name, task_name, task_name, task_args_json, task_name);
+    "#);
 
-    rt.execute_script("<run>", code).map_err(|e| Error(e.to_string()))?;
-    rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
-
-    // Check result
-    let result = rt.execute_script("<r>", "globalThis.__taskResult").map_err(|e| Error(e.to_string()))?;
-    let result_str = v8_string(&mut rt, result)?;
+    let result_str = exec_and_read_global(&mut rt, "<run>", code, "globalThis.__taskResult").await?;
 
     if result_str != "ok" {
         return Err(Error(format!("Task failed: {}", result_str)));
