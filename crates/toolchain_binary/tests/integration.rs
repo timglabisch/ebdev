@@ -27,51 +27,95 @@ fn opts<'a>(
 // Test HTTP Server
 // =============================================================================
 
-/// Starts a minimal HTTP server that serves files from a HashMap.
-/// Returns the address. The server runs until the process exits.
+struct TestServer {
+    addr: std::net::SocketAddr,
+}
+
+impl TestServer {
+    /// Start a server that serves files unconditionally (no auth).
+    fn open(files: HashMap<String, Vec<u8>>) -> Self {
+        Self::start(files, None)
+    }
+
+    /// Start a server that requires `Authorization: token <expected>` — returns 404 without it.
+    fn authenticated(files: HashMap<String, Vec<u8>>, expected_token: &str) -> Self {
+        Self::start(files, Some(expected_token.to_string()))
+    }
+
+    fn start(files: HashMap<String, Vec<u8>>, required_token: Option<String>) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let files = Arc::new(files);
+        let required_token = Arc::new(required_token);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let files = files.clone();
+                let required_token = required_token.clone();
+                std::thread::spawn(move || {
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .ok();
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+
+                    // Check auth if required
+                    if let Some(ref expected) = *required_token {
+                        let expected_header = format!("token {expected}");
+                        let has_auth = request.lines().any(|line| {
+                            let line_lower = line.to_ascii_lowercase();
+                            if let Some(value) = line_lower.strip_prefix("authorization:") {
+                                value.trim() == expected_header.to_ascii_lowercase()
+                            } else {
+                                false
+                            }
+                        });
+                        if !has_auth {
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            );
+                            return;
+                        }
+                    }
+
+                    if let Some(data) = files.get(&path) {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(data);
+                    } else {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                });
+            }
+        });
+
+        Self { addr }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+}
+
+/// Compat wrapper for existing tests.
 fn start_test_server(files: HashMap<String, Vec<u8>>) -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let files = Arc::new(files);
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let files = files.clone();
-            std::thread::spawn(move || {
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                    .ok();
-                let mut buf = vec![0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                if n == 0 {
-                    return;
-                }
-                let request = String::from_utf8_lossy(&buf[..n]);
-                let path = request
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("/")
-                    .to_string();
-
-                if let Some(data) = files.get(&path) {
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        data.len()
-                    );
-                    let _ = stream.write_all(header.as_bytes());
-                    let _ = stream.write_all(data);
-                } else {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    );
-                }
-            });
-        }
-    });
-
-    addr
+    TestServer::open(files).addr
 }
 
 // =============================================================================
@@ -624,4 +668,248 @@ async fn test_install_github_release_already_installed() {
     )
     .unwrap();
     assert_eq!(content, b"existing");
+}
+
+// =============================================================================
+// gh: prefix — authentication tests
+//
+// These tests manipulate process-wide env vars (GITHUB_TOKEN, GH_TOKEN)
+// and must run sequentially. They are combined into a single test to avoid
+// races with parallel test execution.
+// =============================================================================
+
+#[tokio::test]
+async fn test_gh_prefix_auth() {
+    // --- Setup: clear env vars so system `gh` doesn't interfere ---
+    // (resolve_github_token checks system gh first; we override via PATH
+    //  to ensure only env vars are used)
+    let orig_github_token = std::env::var("GITHUB_TOKEN").ok();
+    let orig_gh_token = std::env::var("GH_TOKEN").ok();
+    std::env::remove_var("GITHUB_TOKEN");
+    std::env::remove_var("GH_TOKEN");
+
+    // --- 1. GITHUB_TOKEN sends auth, download succeeds ---
+    {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_content = b"private binary";
+        let token = "ghp_test_token_12345";
+
+        let mut files = HashMap::new();
+        files.insert(
+            "/org/repo/releases/download/v0.0.2/tool".to_string(),
+            binary_content.to_vec(),
+        );
+        let server = TestServer::authenticated(files, token);
+
+        let url_template = format!(
+            "gh:http://127.0.0.1:{}/org/repo/releases/download/v{{version}}/tool",
+            server.port()
+        );
+
+        std::env::set_var("GITHUB_TOKEN", token);
+
+        let result = install_binary(&InstallBinaryOptions {
+            name: "private-tool",
+            version: "0.0.2",
+            url_template: &url_template,
+            binary_path: None,
+            base_path: temp_dir.path(),
+            gh_version: None,
+        })
+        .await;
+
+        std::env::remove_var("GITHUB_TOKEN");
+
+        let install_dir = result.expect("gh: with valid GITHUB_TOKEN should succeed");
+        let bin = install_dir.join("private-tool");
+        assert!(bin.exists(), "Binary should be downloaded at {}", bin.display());
+        assert_eq!(std::fs::read(&bin).unwrap(), binary_content);
+    }
+
+    // --- 2. GH_TOKEN works too (GITHUB_TOKEN unset) ---
+    {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_content = b"gh_token binary";
+        let token = "ghp_from_gh_token_var";
+
+        let mut files = HashMap::new();
+        files.insert("/download/v2.0.0/bin".to_string(), binary_content.to_vec());
+        let server = TestServer::authenticated(files, token);
+
+        let url_template = format!(
+            "gh:http://127.0.0.1:{}/download/v{{version}}/bin",
+            server.port()
+        );
+
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::set_var("GH_TOKEN", token);
+
+        let result = install_binary(&InstallBinaryOptions {
+            name: "gh-token-tool",
+            version: "2.0.0",
+            url_template: &url_template,
+            binary_path: None,
+            base_path: temp_dir.path(),
+            gh_version: None,
+        })
+        .await;
+
+        std::env::remove_var("GH_TOKEN");
+
+        let install_dir = result.expect("gh: with valid GH_TOKEN should succeed");
+        assert!(install_dir.join("gh-token-tool").exists());
+        assert_eq!(
+            std::fs::read(install_dir.join("gh-token-tool")).unwrap(),
+            binary_content
+        );
+    }
+
+    // --- 3. No token → 404 with auth hint ---
+    {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(
+            "/org/repo/releases/download/v1.0.0/tool".to_string(),
+            b"secret".to_vec(),
+        );
+        let server = TestServer::authenticated(files, "ghp_real_secret");
+
+        let url_template = format!(
+            "gh:http://127.0.0.1:{}/org/repo/releases/download/v{{version}}/tool",
+            server.port()
+        );
+
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("GH_TOKEN");
+
+        let err = install_binary(&InstallBinaryOptions {
+            name: "no-token-tool",
+            version: "1.0.0",
+            url_template: &url_template,
+            binary_path: None,
+            base_path: temp_dir.path(),
+            gh_version: None,
+        })
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gh auth login") || msg.contains("GITHUB_TOKEN"),
+            "Error should contain auth hint, got: {msg}"
+        );
+    }
+
+    // --- 4. Wrong token → 404 with auth hint ---
+    {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(
+            "/org/repo/releases/download/v1.0.0/tool".to_string(),
+            b"secret".to_vec(),
+        );
+        let server = TestServer::authenticated(files, "ghp_correct_token");
+
+        let url_template = format!(
+            "gh:http://127.0.0.1:{}/org/repo/releases/download/v{{version}}/tool",
+            server.port()
+        );
+
+        std::env::set_var("GITHUB_TOKEN", "ghp_wrong_token");
+
+        let err = install_binary(&InstallBinaryOptions {
+            name: "wrong-token-tool",
+            version: "1.0.0",
+            url_template: &url_template,
+            binary_path: None,
+            base_path: temp_dir.path(),
+            gh_version: None,
+        })
+        .await
+        .unwrap_err();
+
+        std::env::remove_var("GITHUB_TOKEN");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gh auth login") || msg.contains("GITHUB_TOKEN"),
+            "Error should contain auth hint, got: {msg}"
+        );
+    }
+
+    // --- 5. Without gh: prefix — no auth header sent ---
+    {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(
+            "/download/v1.0.0/tool".to_string(),
+            b"public binary".to_vec(),
+        );
+        // Server requires auth, but URL has no gh: prefix
+        let server = TestServer::authenticated(files, "ghp_some_token");
+
+        let url_template = format!(
+            "http://127.0.0.1:{}/download/v{{version}}/tool",
+            server.port()
+        );
+
+        // Even with token set, non-gh: URL must NOT send auth
+        std::env::set_var("GITHUB_TOKEN", "ghp_some_token");
+
+        let err = install_binary(&opts("no-prefix-tool", "1.0.0", &url_template, None, temp_dir.path()))
+            .await
+            .unwrap_err();
+
+        std::env::remove_var("GITHUB_TOKEN");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "Should fail with 'not found' (no auth sent): {msg}"
+        );
+        assert!(
+            !msg.contains("gh auth login"),
+            "Non-gh URL error should not suggest gh auth: {msg}"
+        );
+    }
+
+    // --- Restore original env ---
+    match orig_github_token {
+        Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+        None => std::env::remove_var("GITHUB_TOKEN"),
+    }
+    match orig_gh_token {
+        Some(v) => std::env::set_var("GH_TOKEN", v),
+        None => std::env::remove_var("GH_TOKEN"),
+    }
+}
+
+/// Real end-to-end test: download from a private GitHub repo via the API.
+/// Requires `gh auth login` (uses system gh for token).
+/// Run with: cargo test -p ebdev-toolchain-binary --test integration test_gh_private_repo_e2e -- --ignored
+#[tokio::test]
+#[ignore]
+async fn test_gh_private_repo_e2e() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let result = install_binary(&InstallBinaryOptions {
+        name: "mysql_clickhouse_schema",
+        version: "0.0.2",
+        url_template: "gh:https://github.com/easybill/mysql_clickhouse_cdc_tool/releases/download/v{version}/mysql_clickhouse_schema-v{version}-aarch64-unknown-linux-musl",
+        binary_path: None,
+        base_path: temp_dir.path(),
+        gh_version: None,
+    })
+    .await;
+
+    let install_dir = result.expect("Should download from private GitHub repo");
+    let binary = install_dir.join("mysql_clickhouse_schema");
+    assert!(binary.exists(), "Binary should exist at {}", binary.display());
+
+    let metadata = std::fs::metadata(&binary).unwrap();
+    assert!(metadata.len() > 0, "Binary should not be empty");
+    println!("Downloaded {} bytes to {}", metadata.len(), binary.display());
 }

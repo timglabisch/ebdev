@@ -1208,6 +1208,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "reqwest",
+ "serde_json",
  "tar",
  "tempfile",
  "thiserror 2.0.17",

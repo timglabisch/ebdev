@@ -3,6 +3,140 @@ use crate::platform::{Arch, Platform};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Parsed components of a GitHub releases download URL.
+struct GhReleaseUrl {
+    owner: String,
+    repo: String,
+    tag: String,
+    asset_name: String,
+}
+
+/// Parse `https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}`
+fn parse_gh_release_url(url: &str) -> Option<GhReleaseUrl> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<&str> = path.splitn(6, '/').collect();
+    // parts: [owner, repo, "releases", "download", tag, asset_name]
+    if parts.len() == 6 && parts[2] == "releases" && parts[3] == "download" {
+        Some(GhReleaseUrl {
+            owner: parts[0].to_string(),
+            repo: parts[1].to_string(),
+            tag: parts[4].to_string(),
+            asset_name: parts[5].to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Download a release asset from the GitHub API (works for private repos).
+///
+/// Steps:
+/// 1. `GET /repos/{owner}/{repo}/releases/tags/{tag}` → find asset ID by name
+/// 2. `GET /repos/{owner}/{repo}/releases/assets/{id}` with `Accept: application/octet-stream`
+pub async fn download_gh_release_asset(
+    url: &str,
+    token: &str,
+) -> Result<reqwest::Response, GhApiError> {
+    let parsed = parse_gh_release_url(url).ok_or_else(|| {
+        GhApiError::InvalidUrl(url.to_string())
+    })?;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()?;
+
+    // Step 1: Resolve asset ID
+    let api_url = format!(
+        "https://api.github.com/repos/{}/{}/releases/tags/{}",
+        parsed.owner, parsed.repo, parsed.tag
+    );
+
+    let release_resp = client
+        .get(&api_url)
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "ebdev")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await?;
+
+    if !release_resp.status().is_success() {
+        return Err(GhApiError::ReleaseNotFound {
+            owner: parsed.owner,
+            repo: parsed.repo,
+            tag: parsed.tag,
+            status: release_resp.status().as_u16(),
+        });
+    }
+
+    let bytes = release_resp.bytes().await?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| GhApiError::InvalidResponse(e.to_string()))?;
+    let assets = body["assets"]
+        .as_array()
+        .ok_or_else(|| GhApiError::InvalidResponse("no assets array".into()))?;
+
+    let asset = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(&parsed.asset_name))
+        .ok_or_else(|| GhApiError::AssetNotFound {
+            asset_name: parsed.asset_name.clone(),
+            tag: parsed.tag.clone(),
+        })?;
+
+    let asset_id = asset["id"]
+        .as_u64()
+        .ok_or_else(|| GhApiError::InvalidResponse("asset has no id".into()))?;
+
+    // Step 2: Download asset via API
+    let asset_url = format!(
+        "https://api.github.com/repos/{}/{}/releases/assets/{}",
+        parsed.owner, parsed.repo, asset_id
+    );
+
+    let download_resp = client
+        .get(&asset_url)
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "ebdev")
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await?;
+
+    if !download_resp.status().is_success() {
+        return Err(GhApiError::DownloadFailed {
+            asset_name: parsed.asset_name,
+            status: download_resp.status().as_u16(),
+        });
+    }
+
+    Ok(download_resp)
+}
+
+#[derive(Debug, Error)]
+pub enum GhApiError {
+    #[error("Invalid GitHub release URL: {0}")]
+    InvalidUrl(String),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("Release not found: {owner}/{repo} tag {tag} (HTTP {status})")]
+    ReleaseNotFound {
+        owner: String,
+        repo: String,
+        tag: String,
+        status: u16,
+    },
+
+    #[error("Asset '{asset_name}' not found in release {tag}")]
+    AssetNotFound { asset_name: String, tag: String },
+
+    #[error("Invalid API response: {0}")]
+    InvalidResponse(String),
+
+    #[error("Download failed for asset '{asset_name}' (HTTP {status})")]
+    DownloadFailed { asset_name: String, status: u16 },
+}
+
 #[derive(Debug, Error)]
 pub enum GhInstallError {
     #[error("HTTP request failed: {0}")]

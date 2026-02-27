@@ -26,6 +26,9 @@ pub enum InstallError {
 
     #[error("Download error: {0}")]
     Download(String),
+
+    #[error("GitHub API error: {0}")]
+    GhApi(#[from] crate::github::GhApiError),
 }
 
 pub struct InstallBinaryOptions<'a> {
@@ -93,36 +96,48 @@ pub async fn install_binary(opts: &InstallBinaryOptions<'_>) -> Result<PathBuf, 
     let url = resolve_url(effective_template, version);
     let archive_type = detect_archive_type(&url);
 
-    // Resolve auth token for gh: URLs
-    let auth_token = if is_gh_url {
-        crate::github::resolve_github_token(base_path, *gh_version).await
-    } else {
-        None
-    };
-
     println!("Downloading {url}...");
 
-    let client = reqwest::Client::new();
-    let mut request = client.get(&url);
-    if let Some(ref token) = auth_token {
-        request = request.header("Authorization", format!("token {token}"));
-    }
-    let response = request.send().await?;
+    let response = if is_gh_url {
+        // For gh: URLs, resolve auth token and use GitHub API for private repos
+        let token = crate::github::resolve_github_token(base_path, *gh_version).await;
+        let token = token.ok_or_else(|| InstallError::NotFoundAuth {
+            name: name.to_string(),
+            version: version.to_string(),
+            url: url.clone(),
+        })?;
 
-    if !response.status().is_success() {
-        if is_gh_url {
-            return Err(InstallError::NotFoundAuth {
+        if url.starts_with("https://github.com/") {
+            // Use GitHub API (required for private repos)
+            crate::github::download_gh_release_asset(&url, &token).await?
+        } else {
+            // Non-github.com URL: direct download with auth header
+            let client = reqwest::Client::new();
+            let response = client
+                .get(&url)
+                .header("Authorization", format!("token {token}"))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(InstallError::NotFoundAuth {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    url,
+                });
+            }
+            response
+        }
+    } else {
+        let response = reqwest::get(&url).await?;
+        if !response.status().is_success() {
+            return Err(InstallError::NotFound {
                 name: name.to_string(),
                 version: version.to_string(),
                 url,
             });
         }
-        return Err(InstallError::NotFound {
-            name: name.to_string(),
-            version: version.to_string(),
-            url,
-        });
-    }
+        response
+    };
 
     let temp_dir = base_path
         .join(".ebdev")
