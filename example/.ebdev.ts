@@ -65,6 +65,8 @@ export async function down() {
     await stage("Cleanup");
     console.log("Cleaning up mutagen sessions...");
     await mutagenReconcile([]);
+    await docker.exec("foo", ["pnpm", "run", "dev"], { name: "pnpm dev (watch)", timeout: 999999999999 });
+
     console.log("Cleanup complete!");
 }
 

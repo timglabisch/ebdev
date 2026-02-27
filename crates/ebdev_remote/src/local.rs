@@ -234,11 +234,16 @@ impl Pty {
 
 /// Resolve a program name to its full path by searching PATH.
 /// If the program already contains a '/', it's returned as-is.
-fn resolve_program_path(program: &str) -> String {
+/// Checks the provided env for PATH first, falling back to std::env::var("PATH").
+fn resolve_program_path(program: &str, env: &[(String, String)]) -> String {
     if program.contains('/') {
         return program.to_string();
     }
-    if let Ok(path) = std::env::var("PATH") {
+    let path_value = env.iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("PATH").ok());
+    if let Some(path) = path_value {
         for dir in path.split(':') {
             let full = std::path::PathBuf::from(dir).join(program);
             if full.exists() {
@@ -267,7 +272,7 @@ async fn start_pty_process(
     // etc. can deadlock if another thread holds their internal locks at fork time.
 
     // Resolve program path via PATH lookup before fork (execve doesn't search PATH)
-    let resolved_program = resolve_program_path(&options.program);
+    let resolved_program = resolve_program_path(&options.program, &options.env);
     let c_program = std::ffi::CString::new(resolved_program.as_str())
         .map_err(|e| ExecutorError::Spawn(format!("invalid program name: {}", e)))?;
 
