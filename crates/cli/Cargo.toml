@@ -21,6 +21,8 @@ ebdev_remote = { path = "../ebdev_remote" }
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 crc32fast.workspace = true
 libc = "0.2"

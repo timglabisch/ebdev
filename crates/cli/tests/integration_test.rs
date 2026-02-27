@@ -724,6 +724,211 @@ fn test_self_update_upgrade_and_downgrade() {
     println!("Upgrade and downgrade test passed!");
 }
 
+// =============================================================================
+// Shell Completion Tests
+// =============================================================================
+
+/// Write a .ebdev.ts config with tasks (including defineTask with args)
+fn write_config_with_tasks(dir: &Path) {
+    let config = r#"import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+  },
+});
+
+export async function build() {
+  console.log("building");
+}
+
+export async function test_unit() {
+  console.log("testing");
+}
+
+export const deploy = defineTask({
+  description: "Deploy to environment",
+  args: {
+    target: arg.string("Target environment").required(),
+    dryRun: arg.boolean("Simulate without changes"),
+  },
+  async run({ target, dryRun }) {
+    console.log(`deploying to ${target}, dry=${dryRun}`);
+  },
+});
+"#;
+    fs::write(dir.join(".ebdev.ts"), config).unwrap();
+}
+
+#[test]
+fn test_completions_no_args() {
+    ebdev()
+        .args(["completions"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ebdev completions zsh"));
+}
+
+#[test]
+fn test_completions_zsh_script() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef ebdev"))
+        .stdout(predicate::str::contains("./ebdev"))
+        .stdout(predicate::str::contains("compdef _clap_dynamic_completer_ebdev ./ebdev"))
+        // Must NOT contain absolute binary path
+        .stdout(predicate::str::contains("target/debug/ebdev").not());
+}
+
+#[test]
+fn test_completions_bash_script() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("./ebdev"))
+        .stdout(predicate::str::contains("complete"))
+        .stdout(predicate::str::contains("target/debug/ebdev").not());
+}
+
+#[test]
+fn test_completion_subcommands() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // Complete subcommands: "ebdev <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "1")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task:"))
+        .stdout(predicate::str::contains("tasks:"))
+        .stdout(predicate::str::contains("completions:"));
+}
+
+#[test]
+fn test_completion_task_names() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // Complete task names: "ebdev task <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build"))
+        .stdout(predicate::str::contains("test_unit"))
+        .stdout(predicate::str::contains("deploy:Deploy to environment"));
+}
+
+#[test]
+fn test_completion_task_names_with_prefix() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // Complete with prefix: "ebdev task de<TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "de"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deploy"))
+        // Should not include non-matching tasks
+        .stdout(predicate::str::contains("build\n").not());
+}
+
+#[test]
+fn test_completion_task_args() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // Complete task args: "ebdev task deploy -- <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "deploy", "--", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--target:Target environment"))
+        .stdout(predicate::str::contains("--dry-run:Simulate without changes"));
+}
+
+#[test]
+fn test_completion_task_args_with_prefix() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // Complete with prefix: "ebdev task deploy -- --t<TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "deploy", "--", "--t"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--target"))
+        .stdout(predicate::str::contains("--dry-run").not());
+}
+
+#[test]
+fn test_completion_task_args_no_args_defined() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "build" has no defineTask args — should show empty or only help
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "build", "--", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--target").not());
+}
+
+#[test]
+fn test_completion_no_ebdev_ts() {
+    let temp_dir = TempDir::new().unwrap();
+    // No .ebdev.ts — completions should still work (just no task names)
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", ""])
+        .assert()
+        .success()
+        // Should still show flags even without tasks
+        .stdout(predicate::str::contains("--tui"));
+}
+
 fn file_hash(path: &Path) -> u32 {
     let data = fs::read(path).expect("failed to read file");
     crc32fast::hash(&data)

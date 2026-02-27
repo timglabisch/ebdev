@@ -1,4 +1,4 @@
-import { defineConfig, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
+import { defineConfig, defineTask, arg, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
 
 export default defineConfig({
     toolchain: {
@@ -91,10 +91,17 @@ export async function hello() {
     await exec(["echo", "Hello from ebdev task runner!"]);
 }
 
-export async function greet() {
-    const name = "World";
-    await exec(["echo", `Hello, ${name}!`]);
-}
+export const greet = defineTask({
+    description: "Greet someone",
+    args: {
+        name: arg.string("Name to greet").required(),
+        loud: arg.boolean("Shout the greeting"),
+    },
+    async run({ name, loud }) {
+        const msg = `Hello, ${name}!`;
+        await exec(["echo", loud ? msg.toUpperCase() : msg]);
+    },
+});
 
 export async function info() {
     console.log("Running multiple commands...");

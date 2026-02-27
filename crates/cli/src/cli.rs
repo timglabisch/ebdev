@@ -1,4 +1,7 @@
 use clap::{Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
+
+use crate::completions::{complete_task_args, complete_task_names};
 
 #[derive(Parser)]
 #[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "Development environment tool")]
@@ -43,6 +46,7 @@ pub enum Commands {
     /// Run a task defined in .ebdev.ts
     Task {
         /// Task name to run
+        #[arg(add = ArgValueCandidates::new(complete_task_names))]
         name: String,
         /// Run with TUI visualization
         #[arg(long)]
@@ -50,13 +54,25 @@ pub enum Commands {
         /// Log all executor communication to file (JSON format)
         #[arg(long)]
         debug_log: Option<std::path::PathBuf>,
+        /// Arguments to pass to the task (after --)
+        #[arg(last = true, add = ArgValueCompleter::new(complete_task_args))]
+        task_args: Vec<String>,
     },
     /// List all available tasks from .ebdev.ts
-    Tasks,
+    Tasks {
+        /// Output task info as JSON (for tooling/completion)
+        #[arg(long)]
+        json: bool,
+    },
     /// Run commands in Docker containers via bridge
     Remote {
         #[command(subcommand)]
         command: RemoteCommands,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for (zsh, bash, fish). Omit for setup instructions.
+        shell: Option<String>,
     },
     /// Internal: Run as remote bridge inside a container (used by remote run)
     #[command(hide = true)]

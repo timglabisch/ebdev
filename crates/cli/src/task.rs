@@ -10,6 +10,7 @@ pub async fn run_task_with_tui(
     mutagen_path: Option<PathBuf>,
     task_env: std::collections::HashMap<String, String>,
     embedded_binary: &'static [u8],
+    task_args: Vec<String>,
 ) -> anyhow::Result<ExitCode> {
     // Start TUI task runner in separate thread
     let (handle, tui_thread) = match ebdev_task_runner::run_with_tui(
@@ -35,7 +36,7 @@ pub async fn run_task_with_tui(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, embedded_binary).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, embedded_binary, task_args).await;
 
     // Signal shutdown to TUI
     if let Err(e) = handle_for_shutdown.shutdown() {
@@ -68,6 +69,7 @@ pub async fn run_task_headless(
     mutagen_path: Option<PathBuf>,
     task_env: std::collections::HashMap<String, String>,
     embedded_binary: &'static [u8],
+    task_args: Vec<String>,
 ) -> anyhow::Result<ExitCode> {
     // Start headless task runner in separate thread
     let (handle, runner_thread) = ebdev_task_runner::run_headless(
@@ -81,7 +83,7 @@ pub async fn run_task_headless(
     let task_name = task_name.to_string();
 
     // Run Deno in main thread
-    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, embedded_binary).await;
+    let deno_result = ebdev_toolchain_deno::run_task(&config_path, &task_name, Some(handle), mutagen_path, task_env, embedded_binary, task_args).await;
 
     // Signal shutdown
     let _ = handle_for_shutdown.shutdown();

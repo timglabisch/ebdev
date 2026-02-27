@@ -53,11 +53,150 @@ export function gitignore() {
   return [".git", ".svn", ".hg", ".DS_Store", "Thumbs.db", "*.swp", "*.swo", "*~", ".idea", ".vscode", "*.log"];
 }
 
+// =============================================================================
+// defineTask / arg — Typed Task Arguments
+// =============================================================================
+
+class ArgBuilder {
+  constructor(type, description) {
+    this._type = type;
+    this._description = description || "";
+    this._required = false;
+    this._default = undefined;
+    this._choices = undefined;
+  }
+  required() {
+    const b = new ArgBuilder(this._type, this._description);
+    b._required = true;
+    b._default = this._default;
+    b._choices = this._choices;
+    return b;
+  }
+  default(value) {
+    const b = new ArgBuilder(this._type, this._description);
+    b._required = false;
+    b._default = value;
+    b._choices = this._choices;
+    return b;
+  }
+}
+
+export const arg = {
+  string(description) { return new ArgBuilder("string", description); },
+  number(description) { return new ArgBuilder("number", description); },
+  boolean(description) { return new ArgBuilder("boolean", description); },
+  oneOf(choices, description) {
+    const b = new ArgBuilder("oneOf", description);
+    b._choices = [...choices];
+    return b;
+  },
+};
+
+function camelToKebab(s) {
+  return s.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+}
+
+function kebabToCamel(s) {
+  return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function parseTaskArgs(rawArgs, argSchema) {
+  const result = {};
+  const schemaEntries = Object.entries(argSchema);
+
+  // Build lookup: --cli-name → { camelName, builder }
+  const lookup = {};
+  for (const [camelName, builder] of schemaEntries) {
+    const cliName = camelToKebab(camelName);
+    lookup[cliName] = { camelName, builder };
+  }
+
+  let i = 0;
+  while (i < rawArgs.length) {
+    const token = rawArgs[i];
+    if (!token.startsWith("--")) {
+      throw new Error(`Unexpected positional argument: '${token}'`);
+    }
+
+    // Handle --no-flag for booleans
+    const isNegated = token.startsWith("--no-");
+    const flagName = isNegated ? token.slice(5) : token.slice(2);
+    const entry = lookup[flagName];
+
+    if (!entry) {
+      const available = schemaEntries.map(([n]) => `--${camelToKebab(n)}`).join(", ");
+      throw new Error(`Unknown flag '${token}'. Available flags: ${available}`);
+    }
+
+    const { camelName, builder } = entry;
+
+    if (builder._type === "boolean") {
+      result[camelName] = !isNegated;
+      i++;
+    } else {
+      // Consume next token as value
+      i++;
+      if (i >= rawArgs.length) {
+        throw new Error(`Flag '${token}' requires a value`);
+      }
+      const val = rawArgs[i];
+      if (builder._type === "number") {
+        const num = Number(val);
+        if (isNaN(num)) {
+          throw new Error(`Flag '${token}' expects a number, got '${val}'`);
+        }
+        result[camelName] = num;
+      } else if (builder._type === "oneOf") {
+        if (builder._choices && !builder._choices.includes(val)) {
+          throw new Error(`Flag '${token}' must be one of: ${builder._choices.join(", ")}. Got '${val}'`);
+        }
+        result[camelName] = val;
+      } else {
+        result[camelName] = val;
+      }
+      i++;
+    }
+  }
+
+  // Apply defaults and validate required
+  for (const [camelName, builder] of schemaEntries) {
+    if (result[camelName] === undefined) {
+      if (builder._default !== undefined) {
+        result[camelName] = builder._default;
+      } else if (builder._type === "boolean") {
+        result[camelName] = false;
+      } else if (builder._required) {
+        throw new Error(`Missing required flag '--${camelToKebab(camelName)}'`);
+      }
+    }
+  }
+
+  return result;
+}
+
+export function defineTask(config) {
+  const fn = async function (...args) {
+    // When called without args (backward compat from plain invocation)
+    await config.run(args[0] || {});
+  };
+  fn.__ebdevTaskDef = {
+    description: config.description,
+    run: config.run,
+    __argSchema: config.args || {},
+    __parseArgs(rawArgs) {
+      return parseTaskArgs(rawArgs, config.args || {});
+    },
+  };
+  return fn;
+}
+
 // For backward compatibility with test runtime (global scope)
 globalThis.defineConfig = defineConfig;
 globalThis.presets = presets;
 globalThis.mergeIgnore = mergeIgnore;
 globalThis.gitignore = gitignore;
+globalThis.defineTask = defineTask;
+globalThis.arg = arg;
 
 // =============================================================================
 // Interactive Mode

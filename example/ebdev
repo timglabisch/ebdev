@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+# Wrapper script that builds and runs ebdev from the workspace.
+# In real projects this would download a release binary instead.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EBDEV_BIN="$SCRIPT_DIR/../target/debug/ebdev"
+
+if [ ! -x "$EBDEV_BIN" ]; then
+  echo "Building ebdev..." >&2
+  (cd "$SCRIPT_DIR/.." && cargo build -p ebdev)
+fi
+
+export EBDEV_SKIP_SELF_UPDATE=1
+exec "$EBDEV_BIN" "$@"

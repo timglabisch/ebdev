@@ -8,8 +8,32 @@ use std::collections::HashMap;
 use crate::ops::{ebdev_deno_ops, init_bridge_state, init_mutagen_state, init_task_runner_state};
 use crate::runtime::Error;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaskInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<ArgInfo>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ArgInfo {
+    pub name: String,
+    #[serde(rename = "cliName")]
+    pub cli_name: String,
+    #[serde(rename = "type")]
+    pub arg_type: String,
+    pub description: String,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+}
+
 /// List all exported async functions (tasks) from a .ebdev.ts file
-pub async fn list_tasks(path: &Path) -> Result<Vec<String>, Error> {
+pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
     let path = path.canonicalize()?;
     let dir = path.parent().unwrap_or(Path::new("."));
 
@@ -34,14 +58,36 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<String>, Error> {
     rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
     eval.await.map_err(|e| Error(e.to_string()))?;
 
-    // Get all exported function names
+    // Get all exported function names with metadata
     let code = format!(r#"
         (async () => {{
             const mod = await import("{}");
             const tasks = [];
             for (const [name, value] of Object.entries(mod)) {{
                 if (typeof value === 'function' && name !== 'default') {{
-                    tasks.push(name);
+                    const info = {{ name }};
+                    if (value.__ebdevTaskDef) {{
+                        const def = value.__ebdevTaskDef;
+                        if (def.description) info.description = def.description;
+                        const schema = def.__argSchema;
+                        if (schema && Object.keys(schema).length > 0) {{
+                            info.args = [];
+                            for (const [argName, builder] of Object.entries(schema)) {{
+                                const cliName = argName.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+                                const argInfo = {{
+                                    name: argName,
+                                    cliName,
+                                    type: builder._type,
+                                    description: builder._description || "",
+                                    required: !!builder._required,
+                                }};
+                                if (builder._default !== undefined) argInfo.default = builder._default;
+                                if (builder._choices) argInfo.choices = builder._choices;
+                                info.args.push(argInfo);
+                            }}
+                        }}
+                    }}
+                    tasks.push(info);
                 }}
             }}
             globalThis.__tasks = JSON.stringify(tasks);
@@ -64,6 +110,7 @@ pub async fn run_task(
     mutagen_path: Option<PathBuf>,
     env: HashMap<String, String>,
     embedded_linux_binary: &'static [u8],
+    task_args: Vec<String>,
 ) -> Result<(), Error> {
     let path = path.canonicalize()?;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -91,6 +138,9 @@ pub async fn run_task(
     rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
     eval.await.map_err(|e| Error(e.to_string()))?;
 
+    // Serialize task_args as JSON for injection into JS
+    let task_args_json = serde_json::to_string(&task_args).unwrap_or_else(|_| "[]".to_string());
+
     // Call the task function
     let code = format!(r#"
         (async () => {{
@@ -103,10 +153,18 @@ pub async fn run_task(
             if (typeof task !== 'function') {{
                 throw new Error("'{}' is not a function");
             }}
-            await task();
+            const rawArgs = {};
+            if (task.__ebdevTaskDef) {{
+                const parsed = task.__ebdevTaskDef.__parseArgs(rawArgs);
+                await task.__ebdevTaskDef.run(parsed);
+            }} else if (rawArgs.length > 0) {{
+                throw new Error("Task '{}' does not accept arguments. Use defineTask() to define a task with typed arguments.");
+            }} else {{
+                await task();
+            }}
             globalThis.__taskResult = "ok";
         }})()
-    "#, module, task_name, task_name, task_name);
+    "#, module, task_name, task_name, task_name, task_args_json, task_name);
 
     rt.execute_script("<run>", code).map_err(|e| Error(e.to_string()))?;
     rt.run_event_loop(PollEventLoopOptions::default()).await.map_err(|e| Error(e.to_string()))?;
@@ -166,11 +224,12 @@ export const VERSION = "1.0.0";
 "#).unwrap();
 
         let tasks = list_tasks(&config_path).await.unwrap();
-        assert!(tasks.contains(&"build".to_string()));
-        assert!(tasks.contains(&"test".to_string()));
-        assert!(tasks.contains(&"deploy".to_string()));
-        assert!(!tasks.contains(&"VERSION".to_string()));
-        assert!(!tasks.contains(&"default".to_string()));
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"build"));
+        assert!(names.contains(&"test"));
+        assert!(names.contains(&"deploy"));
+        assert!(!names.contains(&"VERSION"));
+        assert!(!names.contains(&"default"));
     }
 
     #[tokio::test]
@@ -192,7 +251,7 @@ export async function build() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "build", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "build", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "Task should succeed: {:?}", result);
@@ -215,7 +274,7 @@ export async function build() {}
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "nonexistent", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "nonexistent", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_err());
@@ -246,7 +305,7 @@ export async function test_fs() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_fs", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_fs", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_fs should succeed: {:?}", result);
@@ -282,7 +341,7 @@ export async function test_append() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_append", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_append", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_append should succeed: {:?}", result);
@@ -312,7 +371,7 @@ export async function test_mkdir() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_mkdir", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_mkdir", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_mkdir should succeed: {:?}", result);
@@ -345,7 +404,7 @@ export async function test_rm() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_rm", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_rm", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_rm should succeed: {:?}", result);
@@ -377,7 +436,7 @@ export async function test_rm_recursive() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_rm_recursive", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_rm_recursive", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_rm_recursive should succeed: {:?}", result);
@@ -405,7 +464,7 @@ export async function test_stat_missing() {
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_stat_missing", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_stat_missing", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_stat_missing should succeed: {:?}", result);
@@ -436,7 +495,7 @@ export async function test_read_error() {
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_read_error", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_read_error", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_read_error should succeed: {:?}", result);
@@ -467,7 +526,7 @@ export async function test_write_error() {
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_write_error", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_write_error", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_write_error should succeed: {:?}", result);
@@ -497,7 +556,7 @@ export async function test_stat_size() {{
         let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
         let handle_for_shutdown = handle.clone();
 
-        let result = run_task(&config_path, "test_stat_size", Some(handle), None, HashMap::new(), b"").await;
+        let result = run_task(&config_path, "test_stat_size", Some(handle), None, HashMap::new(), b"", vec![]).await;
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_stat_size should succeed: {:?}", result);

@@ -1,4 +1,5 @@
 mod cli;
+mod completions;
 mod remote;
 mod task;
 mod toolchain;
@@ -6,7 +7,7 @@ mod toolchain;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use ebdev_config::Config;
 use ebdev_toolchain_node::NodeEnv;
 use ebdev_toolchain_mutagen::MutagenEnv;
@@ -44,7 +45,14 @@ async fn run() -> anyhow::Result<ExitCode> {
         }
     }
 
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
+
+    // Completions braucht keine Config
+    if let Commands::Completions { shell } = &cli.command {
+        return completions::handle_completions(shell.as_deref());
+    }
 
     // RemoteBridge und Remote brauchen keine Config - direkt ausführen
     if matches!(cli.command, Commands::RemoteBridge) {
@@ -299,7 +307,7 @@ async fn run() -> anyhow::Result<ExitCode> {
 
             return Ok(ExitCode::from(status.code().unwrap_or(1) as u8));
         }
-        Commands::Tasks => {
+        Commands::Tasks { json } => {
             let config_path = base_path.join(".ebdev.ts");
             if !config_path.exists() {
                 eprintln!("No .ebdev.ts found in current directory");
@@ -308,7 +316,9 @@ async fn run() -> anyhow::Result<ExitCode> {
 
             let tasks = ebdev_toolchain_deno::list_tasks(&config_path).await?;
 
-            if tasks.is_empty() {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tasks)?);
+            } else if tasks.is_empty() {
                 println!("No tasks found in .ebdev.ts");
                 println!();
                 println!("Define tasks as exported async functions:");
@@ -318,14 +328,18 @@ async fn run() -> anyhow::Result<ExitCode> {
                 println!("  }}");
             } else {
                 println!("Available tasks:\n");
-                for task in tasks {
-                    println!("  {}", task);
+                for t in &tasks {
+                    if let Some(desc) = &t.description {
+                        println!("  {:20} {}", t.name, desc);
+                    } else {
+                        println!("  {}", t.name);
+                    }
                 }
                 println!();
                 println!("Run a task with: ebdev task <name>");
             }
         }
-        Commands::Task { name, tui, debug_log } => {
+        Commands::Task { name, tui, debug_log, task_args } => {
             let config_path = base_path.join(".ebdev.ts");
             if !config_path.exists() {
                 eprintln!("No .ebdev.ts found in current directory");
@@ -350,12 +364,13 @@ async fn run() -> anyhow::Result<ExitCode> {
             }
 
             if tui {
-                return task::run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY).await;
+                return task::run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY, task_args).await;
             } else {
-                return task::run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY).await;
+                return task::run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY, task_args).await;
             }
         }
         // Handled earlier before config load
+        Commands::Completions { .. } => unreachable!(),
         Commands::RemoteBridge => unreachable!(),
         Commands::Remote { .. } => unreachable!(),
     }

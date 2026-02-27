@@ -242,6 +242,71 @@ declare module "ebdev" {
   };
 
   // =============================================================================
+  // defineTask / arg — Typed Task Arguments
+  // =============================================================================
+
+  export interface StringArgBuilder {
+    required(): StringArgBuilder;
+    default(value: string): StringArgBuilder;
+    /** @internal */ _type: "string";
+    /** @internal */ _required: boolean;
+    /** @internal */ _default: string | undefined;
+  }
+
+  export interface NumberArgBuilder {
+    required(): NumberArgBuilder;
+    default(value: number): NumberArgBuilder;
+    /** @internal */ _type: "number";
+    /** @internal */ _required: boolean;
+    /** @internal */ _default: number | undefined;
+  }
+
+  export interface BooleanArgBuilder {
+    required(): BooleanArgBuilder;
+    default(value: boolean): BooleanArgBuilder;
+    /** @internal */ _type: "boolean";
+    /** @internal */ _required: boolean;
+    /** @internal */ _default: boolean | undefined;
+  }
+
+  export interface OneOfArgBuilder<T extends string> {
+    required(): OneOfArgBuilder<T>;
+    default(value: T): OneOfArgBuilder<T>;
+    /** @internal */ _type: "oneOf";
+    /** @internal */ _required: boolean;
+    /** @internal */ _default: T | undefined;
+    /** @internal */ _choices: T[];
+  }
+
+  export const arg: {
+    string(description?: string): StringArgBuilder;
+    number(description?: string): NumberArgBuilder;
+    boolean(description?: string): BooleanArgBuilder;
+    oneOf<T extends string>(choices: readonly T[], description?: string): OneOfArgBuilder<T>;
+  };
+
+  type InferArgType<T> =
+    T extends StringArgBuilder ? (T extends { _required: true } ? string : T extends { _default: string } ? string : string | undefined) :
+    T extends NumberArgBuilder ? (T extends { _required: true } ? number : T extends { _default: number } ? number : number | undefined) :
+    T extends BooleanArgBuilder ? boolean :
+    T extends OneOfArgBuilder<infer U> ? (T extends { _required: true } ? U : T extends { _default: U } ? U : U | undefined) :
+    never;
+
+  type InferArgs<T> = {
+    [K in keyof T]: InferArgType<T[K]>;
+  };
+
+  export interface TaskDefinition<TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>> {
+    description?: string;
+    args?: TArgs;
+    run(args: InferArgs<TArgs>): Promise<void>;
+  }
+
+  export function defineTask<TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>>(
+    config: TaskDefinition<TArgs>
+  ): (() => Promise<void>) & { __ebdevTaskDef: unknown };
+
+  // =============================================================================
   // Interactive Mode
   // =============================================================================
 
