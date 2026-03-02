@@ -168,6 +168,78 @@ export async function dev() {
 }
 ```
 
+### Typed Task Arguments
+
+Use `defineTask` with `arg` to declare typed CLI arguments. Arguments are parsed from `--` flags and passed to `run()` as a typed object.
+
+```typescript
+import { defineConfig, defineTask, arg, exec } from "ebdev";
+
+export default defineConfig({
+  toolchain: { ebdev: "0.0.5", node: "22.12.0" },
+});
+
+export const deploy = defineTask({
+  description: "Deploy to environment",
+  args: {
+    target: arg.string("Target environment").required(),
+    replicas: arg.number("Number of replicas").default(1),
+    dryRun: arg.boolean("Simulate without changes"),
+    logLevel: arg.oneOf(["debug", "info", "warn", "error"], "Log level").default("info"),
+  },
+  async run({ target, replicas, dryRun, logLevel }) {
+    await exec(["./deploy.sh", target, "--replicas", String(replicas)]);
+  },
+});
+```
+
+```bash
+ebdev task deploy -- --target staging --replicas 3 --dry-run
+ebdev task deploy -- --target=staging --log-level=debug
+```
+
+**Arg types:**
+
+| Builder | CLI syntax | Value |
+|---|---|---|
+| `arg.string(desc)` | `--name value` or `--name=value` | `string` |
+| `arg.number(desc)` | `--count 3` or `--count=3` | `number` |
+| `arg.boolean(desc)` | `--verbose` / `--no-verbose` | `boolean` |
+| `arg.oneOf(["a","b"], desc)` | `--env staging` | validated `string` |
+
+**Modifiers:** `.required()`, `.default(value)` — chainable in any order.
+
+#### Dynamic Shell Completions
+
+Add `.complete()` to any non-boolean arg to provide dynamic completion values at `<TAB>` time. The function runs when the user requests shell completions and can return values computed at runtime.
+
+```typescript
+export const deploy = defineTask({
+  args: {
+    target: arg.string("Target environment")
+      .required()
+      .complete(async () => {
+        // Dynamic: read from config, call API, list files, etc.
+        return ["staging", "production", "dev"];
+      }),
+    region: arg.oneOf(["eu", "us"], "Region")
+      .complete(async () => {
+        // Static choices from oneOf are merged with dynamic values
+        return ["eu-west-1", "us-east-1"];
+      }),
+  },
+  async run({ target, region }) { ... },
+});
+```
+
+```bash
+ebdev task deploy -- --target <TAB>     # shows: staging, production, dev
+ebdev task deploy -- --target=st<TAB>   # shows: staging (filtered)
+ebdev task deploy -- --region <TAB>     # shows: eu, us, eu-west-1, us-east-1
+```
+
+`.complete()` is chainable with `.required()` and `.default()` in any order. The completion function should return a `string[]` (or `Promise<string[]>`). If it throws, completions degrade gracefully to static choices only.
+
 ### API Reference
 
 #### Execution
@@ -425,13 +497,20 @@ export async function down() {
 match the desired state, so calling `mutagenPauseAll()` before `mutagenReconcile(sessions)`
 is always safe (e.g. on restart after Ctrl+C).
 
-## Shell Completions (zsh)
+## Shell Completions
 
 ```bash
-./ebdev completions zsh >> ~/.zshrc
+./ebdev completions zsh >> ~/.zshrc    # zsh
+./ebdev completions bash >> ~/.bashrc  # bash
+./ebdev completions fish >> ~/.config/fish/config.fish  # fish
 ```
 
-Restart your shell. `./ebdev task <TAB>` completes task names, `-- --<TAB>` completes task arguments — works in any project with an `ebdev` wrapper.
+Restart your shell. Completions work with `./ebdev` wrapper scripts in any project:
+
+- `./ebdev task <TAB>` — task names (with descriptions)
+- `./ebdev task deploy -- --<TAB>` — flag names from `defineTask` args
+- `./ebdev task deploy -- --target <TAB>` — dynamic values from `.complete()`
+- `./ebdev task deploy -- --target=st<TAB>` — filtered values (equals syntax)
 
 ## Self-Update
 

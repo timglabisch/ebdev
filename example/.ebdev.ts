@@ -119,6 +119,18 @@ export const deploy = defineTask({
     },
 });
 
+export const city = defineTask({
+    description: "Select a city",
+    args: {
+        name: arg.string("City name").required().complete(async () => {
+            return ["New York", "San Francisco", "Los Angeles", "Berlin Mitte"];
+        }),
+    },
+    async run({ name }) {
+        await exec(["echo", `Selected city: ${name}`]);
+    },
+});
+
 export async function info() {
     console.log("Running multiple commands...");
     await exec(["uname", "-a"]);
