@@ -248,6 +248,7 @@ declare module "ebdev" {
   export interface StringArgBuilder {
     required(): StringArgBuilder;
     default(value: string): StringArgBuilder;
+    complete(fn: () => Promise<string[]> | string[]): StringArgBuilder;
     /** @internal */ _type: "string";
     /** @internal */ _required: boolean;
     /** @internal */ _default: string | undefined;
@@ -256,6 +257,7 @@ declare module "ebdev" {
   export interface NumberArgBuilder {
     required(): NumberArgBuilder;
     default(value: number): NumberArgBuilder;
+    complete(fn: () => Promise<string[]> | string[]): NumberArgBuilder;
     /** @internal */ _type: "number";
     /** @internal */ _required: boolean;
     /** @internal */ _default: number | undefined;
@@ -272,6 +274,7 @@ declare module "ebdev" {
   export interface OneOfArgBuilder<T extends string> {
     required(): OneOfArgBuilder<T>;
     default(value: T): OneOfArgBuilder<T>;
+    complete(fn: () => Promise<string[]> | string[]): OneOfArgBuilder<T>;
     /** @internal */ _type: "oneOf";
     /** @internal */ _required: boolean;
     /** @internal */ _default: T | undefined;

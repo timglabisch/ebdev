@@ -750,11 +750,25 @@ export async function test_unit() {
 export const deploy = defineTask({
   description: "Deploy to environment",
   args: {
-    target: arg.string("Target environment").required(),
+    target: arg.string("Target environment").required().complete(async () => {
+      return ["staging", "production", "dev"];
+    }),
     dryRun: arg.boolean("Simulate without changes"),
   },
   async run({ target, dryRun }) {
     console.log(`deploying to ${target}, dry=${dryRun}`);
+  },
+});
+
+export const greet = defineTask({
+  description: "Greet someone",
+  args: {
+    name: arg.string("Name to greet").required().complete(() => ["Alice", "Bob", "Charlie"]),
+    loud: arg.boolean("Shout the greeting"),
+  },
+  async run({ name, loud }) {
+    const msg = loud ? name.toUpperCase() : name;
+    console.log(msg);
   },
 });
 "#;
@@ -927,6 +941,345 @@ fn test_completion_no_ebdev_ts() {
         .success()
         // Should still show flags even without tasks
         .stdout(predicate::str::contains("--tui"));
+}
+
+// =============================================================================
+// complete-arg Subcommand Tests
+// =============================================================================
+
+#[test]
+fn test_complete_arg_returns_values() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // ebdev complete-arg greet name → should return JSON array
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-arg", "greet", "name"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Bob"))
+        .stdout(predicate::str::contains("Charlie"));
+}
+
+#[test]
+fn test_complete_arg_no_complete_fn() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let config = r#"import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({
+  toolchain: { ebdev: "0.1.0", node: "22.12.0" },
+});
+
+export const greet = defineTask({
+  args: { name: arg.string("Name").required() },
+  async run({ name }) {},
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // No .complete() → should return empty array
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-arg", "greet", "name"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("[]"));
+}
+
+#[test]
+fn test_complete_arg_nonexistent_task() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-arg", "nonexistent", "foo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("[]"));
+}
+
+#[test]
+fn test_complete_arg_no_ebdev_ts() {
+    let temp_dir = TempDir::new().unwrap();
+    // No .ebdev.ts file
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-arg", "greet", "name"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("[]"));
+}
+
+// =============================================================================
+// Value Completion Tests (space-separated and equals-separated)
+// =============================================================================
+
+#[test]
+fn test_completion_value_space_separated() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task greet -- --name <TAB>" → should return bare values
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--name", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Bob"))
+        .stdout(predicate::str::contains("Charlie"))
+        // Must NOT contain --name= prefix (space mode returns bare values)
+        .stdout(predicate::str::contains("--name=").not());
+}
+
+#[test]
+fn test_completion_value_space_with_prefix() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task greet -- --name A<TAB>" → should return only "Alice"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--name", "A"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Bob").not())
+        .stdout(predicate::str::contains("--name=").not());
+}
+
+#[test]
+fn test_completion_value_equals_separated() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task greet -- --name=<TAB>" → should return --name=value candidates
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--name="])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--name=Alice"))
+        .stdout(predicate::str::contains("--name=Bob"))
+        .stdout(predicate::str::contains("--name=Charlie"));
+}
+
+#[test]
+fn test_completion_value_equals_with_prefix() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task deploy -- --target=st<TAB>" → should return --target=staging
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "deploy", "--", "--target=st"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--target=staging"))
+        .stdout(predicate::str::contains("--target=production").not());
+}
+
+#[test]
+fn test_completion_value_no_complete_fn() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Task with args but no .complete()
+    let config = r#"import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({
+  toolchain: { ebdev: "0.1.0", node: "22.12.0" },
+});
+
+export const greet = defineTask({
+  args: { name: arg.string("Name").required() },
+  async run({ name }) {},
+});
+"#;
+    fs::write(temp_dir.path().join(".ebdev.ts"), config).unwrap();
+
+    // "ebdev task greet -- --name <TAB>" → should return no values
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--name", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice").not());
+}
+
+#[test]
+fn test_completion_boolean_flag_no_value() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // After a boolean flag, should still show flag names (not values)
+    // "ebdev task greet -- --loud <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--loud", ""])
+        .assert()
+        .success()
+        // Should show flag names, not values
+        .stdout(predicate::str::contains("--name"))
+        .stdout(predicate::str::contains("Alice").not());
+}
+
+// =============================================================================
+// --flag=value Parsing Tests (runtime, not just completion)
+// =============================================================================
+
+#[test]
+fn test_task_equals_syntax_runs() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // ebdev task greet -- --name=Alice should work
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "greet", "--", "--name=Alice"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_task_equals_syntax_with_boolean() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // ebdev task greet -- --name=Alice --loud should work
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "greet", "--", "--name=Alice", "--loud"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success();
+}
+
+// =============================================================================
+// Completion Edge Cases (Integration)
+// =============================================================================
+
+/// Config with oneOf + .complete() to test merging/dedup of static + dynamic values
+fn write_config_with_oneof_complete(dir: &Path) {
+    let config = r#"import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({
+  toolchain: { ebdev: "0.1.0", node: "22.12.0" },
+});
+
+export const release = defineTask({
+  description: "Release to environment",
+  args: {
+    env: arg.oneOf(["staging", "prod"], "Environment")
+      .complete(() => ["staging", "prod", "dev-preview"]),
+  },
+  async run({ env }) {
+    console.log(`Releasing to ${env}`);
+  },
+});
+"#;
+    fs::write(dir.join(".ebdev.ts"), config).unwrap();
+}
+
+#[test]
+fn test_completion_oneof_with_complete_merges() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_oneof_complete(temp_dir.path());
+
+    // "ebdev task release -- --env <TAB>" → should show merged values:
+    // "staging", "prod" (from choices) + "dev-preview" (from complete, deduplicated)
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "release", "--", "--env", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("staging"))
+        .stdout(predicate::str::contains("prod"))
+        .stdout(predicate::str::contains("dev-preview"));
+}
+
+#[test]
+fn test_completion_oneof_with_complete_filters() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_oneof_complete(temp_dir.path());
+
+    // "ebdev task release -- --env dev<TAB>" → should show only "dev-preview"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "release", "--", "--env", "dev"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev-preview"))
+        .stdout(predicate::str::contains("staging").not())
+        .stdout(predicate::str::contains("prod\n").not());
+}
+
+#[test]
+fn test_completion_after_value_shows_flags() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task greet -- --name Alice <TAB>" → should show remaining flags, not values
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "6")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--name", "Alice", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--loud"))
+        // Should NOT show values — "Alice" is not a flag
+        .stdout(predicate::str::contains("Bob").not());
+}
+
+#[test]
+fn test_completion_after_boolean_then_new_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path());
+
+    // "ebdev task greet -- --loud --name <TAB>" → value completion for --name
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "6")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "greet", "--", "--loud", "--name", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Bob"))
+        .stdout(predicate::str::contains("Charlie"))
+        .stdout(predicate::str::contains("--name=").not());
 }
 
 fn file_hash(path: &Path) -> u32 {

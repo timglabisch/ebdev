@@ -30,6 +30,8 @@ pub struct ArgInfo {
     pub default: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub choices: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completable: bool,
 }
 
 /// Create a JsRuntime, load the given module, and return both ready for script execution.
@@ -99,6 +101,7 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
                                 }};
                                 if (builder._default !== undefined) argInfo.default = builder._default;
                                 if (builder._choices) argInfo.choices = builder._choices;
+                                if (builder._completeFn) argInfo.completable = true;
                                 info.args.push(argInfo);
                             }}
                         }}
@@ -111,6 +114,46 @@ pub async fn list_tasks(path: &Path) -> Result<Vec<TaskInfo>, Error> {
     "#);
 
     let json = exec_and_read_global(&mut rt, "<list>", code, "globalThis.__tasks").await?;
+    serde_json::from_str(&json).map_err(|e| Error(e.to_string()))
+}
+
+/// Run the completion function for a specific arg of a specific task.
+/// Returns the list of completion values, or an empty vec on error.
+pub async fn complete_arg(path: &Path, task_name: &str, arg_name: &str) -> Result<Vec<String>, Error> {
+    let path = path.canonicalize()?;
+
+    let (mut rt, module) = create_runtime(&path, |state| {
+        init_task_runner_state(state, None, None, HashMap::new());
+    }).await?;
+
+    let code = format!(r#"
+        (async () => {{
+            const mod = await import("{module}");
+            const task = mod["{task_name}"];
+            if (!task || !task.__ebdevTaskDef) {{
+                globalThis.__completeResult = "[]";
+                return;
+            }}
+            const schema = task.__ebdevTaskDef.__argSchema;
+            if (!schema) {{
+                globalThis.__completeResult = "[]";
+                return;
+            }}
+            const builder = schema["{arg_name}"];
+            if (!builder || !builder._completeFn) {{
+                globalThis.__completeResult = "[]";
+                return;
+            }}
+            try {{
+                const values = await builder._completeFn();
+                globalThis.__completeResult = JSON.stringify(Array.isArray(values) ? values : []);
+            }} catch (e) {{
+                globalThis.__completeResult = "[]";
+            }}
+        }})()
+    "#);
+
+    let json = exec_and_read_global(&mut rt, "<complete>", code, "globalThis.__completeResult").await?;
     serde_json::from_str(&json).map_err(|e| Error(e.to_string()))
 }
 
@@ -548,5 +591,487 @@ export async function test_stat_size() {{
 
         let _ = handle_for_shutdown.shutdown();
         assert!(result.is_ok(), "test_stat_size should succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_complete_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({});
+
+export const greet = defineTask({
+    description: "Greet someone",
+    args: {
+        name: arg.string("Name").required().complete(async () => {
+            return ["Alice", "Bob", "Charlie"];
+        }),
+        loud: arg.boolean("Shout"),
+    },
+    async run({ name, loud }) {},
+});
+"#).unwrap();
+
+        let values = complete_arg(&config_path, "greet", "name").await.unwrap();
+        assert_eq!(values, vec!["Alice", "Bob", "Charlie"]);
+    }
+
+    #[tokio::test]
+    async fn test_complete_arg_no_complete_fn() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({});
+
+export const greet = defineTask({
+    args: {
+        name: arg.string("Name").required(),
+    },
+    async run({ name }) {},
+});
+"#).unwrap();
+
+        let values = complete_arg(&config_path, "greet", "name").await.unwrap();
+        assert!(values.is_empty(), "Should return empty for arg without .complete()");
+    }
+
+    #[tokio::test]
+    async fn test_complete_arg_nonexistent_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig } from "ebdev";
+export default defineConfig({});
+export async function build() {}
+"#).unwrap();
+
+        let values = complete_arg(&config_path, "nonexistent", "foo").await.unwrap();
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_completable_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+
+export default defineConfig({});
+
+export const deploy = defineTask({
+    args: {
+        target: arg.string("Target").complete(() => ["staging", "prod"]),
+        count: arg.number("Count"),
+    },
+    async run({ target, count }) {},
+});
+"#).unwrap();
+
+        let tasks = list_tasks(&config_path).await.unwrap();
+        let deploy = tasks.iter().find(|t| t.name == "deploy").unwrap();
+        let args = deploy.args.as_ref().unwrap();
+
+        let target_arg = args.iter().find(|a| a.name == "target").unwrap();
+        assert!(target_arg.completable, "target should be completable");
+
+        let count_arg = args.iter().find(|a| a.name == "count").unwrap();
+        assert!(!count_arg.completable, "count should not be completable");
+    }
+
+    #[tokio::test]
+    async fn test_parse_args_equals_syntax() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg, exec } from "ebdev";
+
+export default defineConfig({});
+
+export const greet = defineTask({
+    args: {
+        name: arg.string("Name").required(),
+        loud: arg.boolean("Shout"),
+    },
+    async run({ name, loud }) {
+        const msg = loud ? name.toUpperCase() : name;
+        await exec(["echo", msg]);
+    },
+});
+"#).unwrap();
+
+        // Test --name=Alice (equals syntax)
+        let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
+        let handle_for_shutdown = handle.clone();
+
+        let result = run_task(
+            &config_path, "greet", Some(handle), None, HashMap::new(), b"",
+            vec!["--name=Alice".to_string()],
+        ).await;
+
+        let _ = handle_for_shutdown.shutdown();
+        assert!(result.is_ok(), "Equals syntax should work: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_parse_args_equals_syntax_with_boolean() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg, exec } from "ebdev";
+
+export default defineConfig({});
+
+export const greet = defineTask({
+    args: {
+        name: arg.string("Name").required(),
+        loud: arg.boolean("Shout"),
+    },
+    async run({ name, loud }) {
+        const msg = loud ? name.toUpperCase() : name;
+        await exec(["echo", msg]);
+    },
+});
+"#).unwrap();
+
+        // Test --name=Alice --loud (mixed)
+        let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
+        let handle_for_shutdown = handle.clone();
+
+        let result = run_task(
+            &config_path, "greet", Some(handle), None, HashMap::new(), b"",
+            vec!["--name=Alice".to_string(), "--loud".to_string()],
+        ).await;
+
+        let _ = handle_for_shutdown.shutdown();
+        assert!(result.is_ok(), "Mixed equals + space syntax should work: {:?}", result);
+    }
+
+    // =========================================================================
+    // parseTaskArgs edge cases
+    // =========================================================================
+
+    /// Helper: run a task with given args and return the result.
+    /// Uses a config that writes the parsed args as JSON to a file.
+    async fn run_parse_test(config_path: &std::path::Path, task_args: Vec<String>) -> Result<(), Error> {
+        let (handle, _thread) = ebdev_task_runner::run_headless(None, None, b"");
+        let handle_for_shutdown = handle.clone();
+        let result = run_task(
+            config_path, "test_task", Some(handle), None, HashMap::new(), b"",
+            task_args,
+        ).await;
+        let _ = handle_for_shutdown.shutdown();
+        result
+    }
+
+    fn write_parse_test_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let config_path = dir.join(".ebdev.ts");
+        let result_file = dir.join("result.json");
+        let result_str = result_file.to_string_lossy().to_string();
+        std::fs::write(&config_path, format!(r#"
+import {{ defineConfig, defineTask, arg, fs }} from "ebdev";
+
+export default defineConfig({{}});
+
+export const test_task = defineTask({{
+    args: {{
+        name: arg.string("Name"),
+        count: arg.number("Count"),
+        env: arg.oneOf(["staging", "prod"], "Environment"),
+        loud: arg.boolean("Shout"),
+        requiredField: arg.string("Required").required(),
+    }},
+    async run(args) {{
+        await fs.writeFile("{result_str}", JSON.stringify(args));
+    }},
+}});
+"#)).unwrap();
+        config_path
+    }
+
+    fn read_result(dir: &std::path::Path) -> serde_json::Value {
+        let data = std::fs::read_to_string(dir.join("result.json")).unwrap();
+        serde_json::from_str(&data).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_empty_value() {
+        // --name= should be treated as empty string
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--name=".into(),
+        ]).await;
+        assert!(result.is_ok(), "Empty value after = should be accepted: {:?}", result);
+        let parsed = read_result(dir.path());
+        assert_eq!(parsed["name"], "");
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_multiple_equals() {
+        // --name=a=b=c should split on FIRST = only → value is "a=b=c"
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--name=a=b=c".into(),
+        ]).await;
+        assert!(result.is_ok(), "Multiple = should work: {:?}", result);
+        let parsed = read_result(dir.path());
+        assert_eq!(parsed["name"], "a=b=c");
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_number_type() {
+        // --count=42 should parse as number
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--count=42".into(),
+        ]).await;
+        assert!(result.is_ok(), "Number equals should work: {:?}", result);
+        let parsed = read_result(dir.path());
+        assert_eq!(parsed["count"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_number_invalid() {
+        // --count=abc should fail with type error
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--count=abc".into(),
+        ]).await;
+        assert!(result.is_err(), "Non-numeric value for number should fail");
+        assert!(result.unwrap_err().to_string().contains("expects a number"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_oneof_valid() {
+        // --env=staging should work
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--env=staging".into(),
+        ]).await;
+        assert!(result.is_ok(), "Valid oneOf value should work: {:?}", result);
+        let parsed = read_result(dir.path());
+        assert_eq!(parsed["env"], "staging");
+    }
+
+    #[tokio::test]
+    async fn test_parse_equals_oneof_invalid() {
+        // --env=invalid should fail with validation error
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--required-field=x".into(), "--env=invalid".into(),
+        ]).await;
+        assert!(result.is_err(), "Invalid oneOf value should fail");
+        assert!(result.unwrap_err().to_string().contains("must be one of"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_required_missing() {
+        // Missing required_field should fail
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--name=Alice".into(),
+        ]).await;
+        assert!(result.is_err(), "Missing required field should fail");
+        assert!(result.unwrap_err().to_string().contains("required"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_mixed_syntax() {
+        // Mix equals and space syntax: --name=Alice --loud --count 3 --env staging
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_parse_test_config(dir.path());
+        let result = run_parse_test(&config_path, vec![
+            "--name=Alice".into(), "--loud".into(), "--count".into(), "3".into(),
+            "--env".into(), "staging".into(), "--required-field".into(), "yes".into(),
+        ]).await;
+        assert!(result.is_ok(), "Mixed syntax should work: {:?}", result);
+        let parsed = read_result(dir.path());
+        assert_eq!(parsed["name"], "Alice");
+        assert_eq!(parsed["loud"], true);
+        assert_eq!(parsed["count"], 3);
+        assert_eq!(parsed["env"], "staging");
+        assert_eq!(parsed["requiredField"], "yes");
+    }
+
+    // =========================================================================
+    // ArgBuilder .complete() chaining order
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_complete_then_required() {
+        // .complete(fn).required() — completeFn must survive chaining
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        name: arg.string("Name").complete(() => ["X", "Y"]).required(),
+    },
+    async run({ name }) {},
+});
+"#).unwrap();
+
+        // Verify completable flag is set
+        let tasks = list_tasks(&config_path).await.unwrap();
+        let t = tasks.iter().find(|t| t.name == "t").unwrap();
+        let arg = &t.args.as_ref().unwrap()[0];
+        assert!(arg.completable, ".complete().required() should preserve completable");
+        assert!(arg.required, "should be required");
+
+        // Verify complete_arg returns values
+        let values = complete_arg(&config_path, "t", "name").await.unwrap();
+        assert_eq!(values, vec!["X", "Y"]);
+    }
+
+    #[tokio::test]
+    async fn test_required_then_complete() {
+        // .required().complete(fn) — same result, different order
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        name: arg.string("Name").required().complete(() => ["A", "B"]),
+    },
+    async run({ name }) {},
+});
+"#).unwrap();
+
+        let tasks = list_tasks(&config_path).await.unwrap();
+        let t = tasks.iter().find(|t| t.name == "t").unwrap();
+        let arg = &t.args.as_ref().unwrap()[0];
+        assert!(arg.completable, ".required().complete() should preserve completable");
+        assert!(arg.required, "should be required");
+
+        let values = complete_arg(&config_path, "t", "name").await.unwrap();
+        assert_eq!(values, vec!["A", "B"]);
+    }
+
+    #[tokio::test]
+    async fn test_complete_then_default() {
+        // .complete(fn).default("x") — both survive chaining
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        env: arg.string("Env").complete(() => ["dev", "staging"]).default("dev"),
+    },
+    async run({ env }) {},
+});
+"#).unwrap();
+
+        let tasks = list_tasks(&config_path).await.unwrap();
+        let t = tasks.iter().find(|t| t.name == "t").unwrap();
+        let arg = &t.args.as_ref().unwrap()[0];
+        assert!(arg.completable, ".complete().default() should preserve completable");
+        assert_eq!(arg.default.as_ref().unwrap(), "dev");
+
+        let values = complete_arg(&config_path, "t", "env").await.unwrap();
+        assert_eq!(values, vec!["dev", "staging"]);
+    }
+
+    #[tokio::test]
+    async fn test_default_then_complete() {
+        // .default("x").complete(fn) — same result
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        env: arg.string("Env").default("dev").complete(() => ["dev", "staging"]),
+    },
+    async run({ env }) {},
+});
+"#).unwrap();
+
+        let tasks = list_tasks(&config_path).await.unwrap();
+        let t = tasks.iter().find(|t| t.name == "t").unwrap();
+        let arg = &t.args.as_ref().unwrap()[0];
+        assert!(arg.completable, ".default().complete() should preserve completable");
+        assert_eq!(arg.default.as_ref().unwrap(), "dev");
+
+        let values = complete_arg(&config_path, "t", "env").await.unwrap();
+        assert_eq!(values, vec!["dev", "staging"]);
+    }
+
+    // =========================================================================
+    // Completion edge cases (complete_arg)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_complete_arg_empty_result() {
+        // .complete(() => []) should return empty array
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        name: arg.string("Name").complete(() => []),
+    },
+    async run({ name }) {},
+});
+"#).unwrap();
+
+        let values = complete_arg(&config_path, "t", "name").await.unwrap();
+        assert!(values.is_empty(), "Empty complete fn should return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_complete_arg_fn_throws() {
+        // .complete(() => { throw new Error("boom") }) should return empty array
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".ebdev.ts");
+
+        std::fs::write(&config_path, r#"
+import { defineConfig, defineTask, arg } from "ebdev";
+export default defineConfig({});
+
+export const t = defineTask({
+    args: {
+        name: arg.string("Name").complete(() => { throw new Error("boom"); }),
+    },
+    async run({ name }) {},
+});
+"#).unwrap();
+
+        let values = complete_arg(&config_path, "t", "name").await.unwrap();
+        assert!(values.is_empty(), "Throwing complete fn should gracefully return empty vec");
     }
 }

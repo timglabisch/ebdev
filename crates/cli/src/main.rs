@@ -54,6 +54,24 @@ async fn run() -> anyhow::Result<ExitCode> {
         return completions::handle_completions(shell.as_deref());
     }
 
+    // CompleteArg braucht keine Config — direkt .ebdev.ts laden
+    if let Commands::CompleteArg { task, arg } = &cli.command {
+        let config_path = PathBuf::from(".ebdev.ts");
+        if config_path.exists() {
+            match ebdev_toolchain_deno::complete_arg(&config_path, task, arg).await {
+                Ok(values) => {
+                    println!("{}", serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string()));
+                }
+                Err(_) => {
+                    println!("[]");
+                }
+            }
+        } else {
+            println!("[]");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // RemoteBridge und Remote brauchen keine Config - direkt ausführen
     if matches!(cli.command, Commands::RemoteBridge) {
         if let Err(e) = ebdev_remote::run_bridge().await {
@@ -373,6 +391,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         Commands::Completions { .. } => unreachable!(),
         Commands::RemoteBridge => unreachable!(),
         Commands::Remote { .. } => unreachable!(),
+        Commands::CompleteArg { .. } => unreachable!(),
     }
 
     Ok(ExitCode::SUCCESS)

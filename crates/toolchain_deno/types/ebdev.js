@@ -64,20 +64,24 @@ class ArgBuilder {
     this._required = false;
     this._default = undefined;
     this._choices = undefined;
+    this._completeFn = undefined;
   }
-  required() {
+  _clone() {
     const b = new ArgBuilder(this._type, this._description);
-    b._required = true;
+    b._required = this._required;
     b._default = this._default;
     b._choices = this._choices;
+    b._completeFn = this._completeFn;
     return b;
   }
+  required() {
+    const b = this._clone(); b._required = true; return b;
+  }
   default(value) {
-    const b = new ArgBuilder(this._type, this._description);
-    b._required = false;
-    b._default = value;
-    b._choices = this._choices;
-    return b;
+    const b = this._clone(); b._required = false; b._default = value; return b;
+  }
+  complete(fn) {
+    const b = this._clone(); b._completeFn = fn; return b;
   }
 }
 
@@ -113,9 +117,17 @@ function parseTaskArgs(rawArgs, argSchema) {
 
   let i = 0;
   while (i < rawArgs.length) {
-    const token = rawArgs[i];
+    let token = rawArgs[i];
     if (!token.startsWith("--")) {
       throw new Error(`Unexpected positional argument: '${token}'`);
+    }
+
+    // Handle --flag=value syntax (split on first '=')
+    let inlineValue;
+    const eqIdx = token.indexOf('=');
+    if (eqIdx !== -1) {
+      inlineValue = token.slice(eqIdx + 1);
+      token = token.slice(0, eqIdx);
     }
 
     // Handle --no-flag for booleans
@@ -134,12 +146,17 @@ function parseTaskArgs(rawArgs, argSchema) {
       result[camelName] = !isNegated;
       i++;
     } else {
-      // Consume next token as value
-      i++;
-      if (i >= rawArgs.length) {
-        throw new Error(`Flag '${token}' requires a value`);
+      let val;
+      if (inlineValue !== undefined) {
+        val = inlineValue;
+      } else {
+        // Consume next token as value
+        i++;
+        if (i >= rawArgs.length) {
+          throw new Error(`Flag '${token}' requires a value`);
+        }
+        val = rawArgs[i];
       }
-      const val = rawArgs[i];
       if (builder._type === "number") {
         const num = Number(val);
         if (isNaN(num)) {

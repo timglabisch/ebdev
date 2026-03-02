@@ -77,6 +77,14 @@ pub enum Commands {
     /// Internal: Run as remote bridge inside a container (used by remote run)
     #[command(hide = true)]
     RemoteBridge,
+    /// Internal: Complete arg values for a task (used by shell completion)
+    #[command(hide = true)]
+    CompleteArg {
+        /// Task name (export name in .ebdev.ts)
+        task: String,
+        /// Arg name (camelCase field name)
+        arg: String,
+    },
 }
 
 #[derive(Subcommand)]

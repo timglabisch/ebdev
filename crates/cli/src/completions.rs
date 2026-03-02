@@ -77,6 +77,29 @@ pub fn complete_task_args(current: &std::ffi::OsStr) -> Vec<CompletionCandidate>
         return Vec::new();
     };
     let prefix = current.to_str().unwrap_or("");
+
+    // Detect if we're completing a flag value rather than a flag name.
+    // Case 1: --flag=partial  (prefix contains '=')
+    //   → return "--flag=value" candidates (replaces entire token)
+    if let Some(eq_pos) = prefix.find('=') {
+        let flag_part = &prefix[..eq_pos]; // e.g. "--target"
+        let value_prefix = &prefix[eq_pos + 1..]; // e.g. "st"
+        let cli_name = flag_part.strip_prefix("--").unwrap_or(flag_part);
+        if let Some(arg) = args.iter().find(|a| a.cli_name == cli_name) {
+            return complete_flag_values(&task_name, arg, Some(flag_part), value_prefix);
+        }
+        return Vec::new();
+    }
+
+    // Case 2: --flag <cursor>  (previous token is a non-boolean flag)
+    //   → return bare "value" candidates (value is a separate token)
+    if prefix.is_empty() || !prefix.starts_with('-') {
+        if let Some(arg) = detect_prev_flag_needs_value(args) {
+            return complete_flag_values(&task_name, &arg, None, prefix);
+        }
+    }
+
+    // Default: complete flag names
     args.iter()
         .flat_map(|arg| {
             let flag = format!("--{}", arg.cli_name);
@@ -100,6 +123,88 @@ pub fn complete_task_args(current: &std::ffi::OsStr) -> Vec<CompletionCandidate>
             candidates
         })
         .collect()
+}
+
+/// Check if the previous CLI token (before cursor) is a non-boolean flag
+/// that expects a value. If so, return the matching ArgInfo.
+fn detect_prev_flag_needs_value(args: &[ArgInfo]) -> Option<ArgInfo> {
+    let cli_args: Vec<String> = std::env::args().collect();
+    // Find tokens after "--"
+    let after_dd: Vec<&str> = cli_args.iter()
+        .skip(1)
+        .skip_while(|a| *a != "--")
+        .skip(1) // skip the "--" itself
+        .map(|s| s.as_str())
+        .collect();
+
+    // The last token in after_dd is the current prefix (being completed).
+    // The second-to-last is what we're interested in.
+    if after_dd.len() < 2 {
+        return None;
+    }
+    let prev = after_dd[after_dd.len() - 2];
+    if !prev.starts_with("--") {
+        return None;
+    }
+    let cli_name = prev.strip_prefix("--").unwrap_or(prev);
+    args.iter()
+        .find(|a| a.cli_name == cli_name && a.arg_type != "boolean")
+        .cloned()
+}
+
+/// Collect completion values for a flag (static choices + dynamic completeFn).
+///
+/// `eq_flag`: If `Some("--name")`, we're in equals mode (`--name=<TAB>`)
+///            and return `--name=value` candidates (full token replacement).
+///            If `None`, we're in space mode (`--name <TAB>`)
+///            and return bare `value` candidates.
+fn complete_flag_values(task_name: &str, arg: &ArgInfo, eq_flag: Option<&str>, value_prefix: &str) -> Vec<CompletionCandidate> {
+    let mut values: Vec<String> = Vec::new();
+
+    // Static choices
+    if let Some(choices) = &arg.choices {
+        values.extend(choices.iter().cloned());
+    }
+
+    // Dynamic completions
+    if arg.completable {
+        if let Some(dynamic) = run_complete_arg(task_name, &arg.name) {
+            for v in dynamic {
+                if !values.contains(&v) {
+                    values.push(v);
+                }
+            }
+        }
+    }
+
+    values.iter()
+        .filter(|v| v.starts_with(value_prefix))
+        .map(|v| {
+            let candidate_value = match eq_flag {
+                Some(flag) => format!("{}={}", flag, v),
+                None => v.clone(),
+            };
+            let mut c = CompletionCandidate::new(&candidate_value);
+            c = c.help(Some(format!("{} ({})", arg.description, v).into()));
+            c
+        })
+        .collect()
+}
+
+/// Run `ebdev complete-arg <task> <arg>` as subprocess and parse JSON result.
+fn run_complete_arg(task_name: &str, arg_name: &str) -> Option<Vec<String>> {
+    let exe = std::env::current_exe().ok()?;
+    let output = std::process::Command::new(exe)
+        .args(["complete-arg", task_name, arg_name])
+        .env_remove("COMPLETE")
+        .env("EBDEV_SKIP_SELF_UPDATE", "1")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Extract the task name from the current CLI args (env::args).
@@ -130,12 +235,17 @@ struct TaskInfo {
     args: Option<Vec<ArgInfo>>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct ArgInfo {
+    name: String,
     #[serde(rename = "cliName")]
     cli_name: String,
+    #[serde(rename = "type", default)]
+    arg_type: String,
     description: String,
     choices: Option<Vec<String>>,
+    #[serde(default)]
+    completable: bool,
 }
 
 /// Run `ebdev tasks --json` as a subprocess and parse the result.

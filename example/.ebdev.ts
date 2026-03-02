@@ -94,12 +94,28 @@ export async function hello() {
 export const greet = defineTask({
     description: "Greet someone",
     args: {
-        name: arg.string("Name to greet").required(),
+        name: arg.string("Name to greet").required().complete(async () => {
+            return ["Alice", "Bob", "Charlie"];
+        }),
         loud: arg.boolean("Shout the greeting"),
     },
     async run({ name, loud }) {
         const msg = `Hello, ${name}!`;
         await exec(["echo", loud ? msg.toUpperCase() : msg]);
+    },
+});
+
+export const deploy = defineTask({
+    description: "Deploy to environment",
+    args: {
+        target: arg.string("Target environment").required().complete(async () => {
+            return ["staging", "production", "dev"];
+        }),
+        dryRun: arg.boolean("Dry run mode"),
+    },
+    async run({ target, dryRun }) {
+        const prefix = dryRun ? "[DRY RUN] " : "";
+        await exec(["echo", `${prefix}Deploying to ${target}...`]);
     },
 });
 
