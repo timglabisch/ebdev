@@ -2035,6 +2035,79 @@ fn test_complete_flag_no_ebdev_ts() {
         .stdout(predicate::str::starts_with("[]"));
 }
 
+#[test]
+fn test_completion_flag_value_boolean() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev flag clickhouse <TAB>" → on, off
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "3")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "flag", "clickhouse", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("on"))
+        .stdout(predicate::str::contains("off"));
+}
+
+#[test]
+fn test_completion_flag_value_config_field_choices() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev flag search.engine <TAB>" → elasticsearch, meilisearch
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "3")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "flag", "search.engine", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("elasticsearch"))
+        .stdout(predicate::str::contains("meilisearch"));
+}
+
+#[test]
+fn test_completion_flag_value_config_field_dynamic() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev flag search.index <TAB>" → dynamic completions (main, products, orders)
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "3")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "flag", "search.index", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"))
+        .stdout(predicate::str::contains("products"))
+        .stdout(predicate::str::contains("orders"));
+}
+
+#[test]
+fn test_completion_flag_value_config_flag_on_off() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev flag search <TAB>" (config flag without dotted field) → on, off
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "3")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "flag", "search", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("on"))
+        .stdout(predicate::str::contains("off"));
+}
+
 // =============================================================================
 // Feature Flag Tests — Subcommands
 // =============================================================================

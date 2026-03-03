@@ -328,6 +328,94 @@ pub fn complete_with_flags() -> Vec<CompletionCandidate> {
     candidates
 }
 
+/// Complete flag values for `ebdev flag <name> <TAB>`.
+/// Boolean flags → on/off, config field → static choices + dynamic completions.
+pub fn complete_flag_value(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
+    let Some(flag_name) = find_flag_name_in_args() else {
+        return Vec::new();
+    };
+    let Some(flags) = run_flags_json() else {
+        return Vec::new();
+    };
+    let prefix = current.to_str().unwrap_or("");
+
+    if let Some(dot_pos) = flag_name.find('.') {
+        // Config field: "search.engine" → choices + dynamic
+        let base = &flag_name[..dot_pos];
+        let field = &flag_name[dot_pos + 1..];
+        let Some(flag) = flags.iter().find(|f| f.name == base) else {
+            return Vec::new();
+        };
+        let Some(config) = &flag.config else {
+            return Vec::new();
+        };
+        let Some(field_info) = config.iter().find(|f| f.name == field) else {
+            return Vec::new();
+        };
+        let mut values: Vec<String> = Vec::new();
+        if let Some(choices) = &field_info.choices {
+            values.extend(choices.iter().cloned());
+        }
+        if field_info.completable {
+            if let Some(dynamic) = run_complete_flag(base, field) {
+                for v in dynamic {
+                    if !values.contains(&v) {
+                        values.push(v);
+                    }
+                }
+            }
+        }
+        values.iter()
+            .filter(|v| v.starts_with(prefix))
+            .map(|v| {
+                let mut c = CompletionCandidate::new(v.as_str());
+                c = c.help(Some(field_info.description.clone().into()));
+                c
+            })
+            .collect()
+    } else {
+        // Boolean or whole config flag → on/off
+        ["on", "off"].iter()
+            .filter(|v| v.starts_with(prefix))
+            .map(|v| CompletionCandidate::new(*v))
+            .collect()
+    }
+}
+
+/// Extract the flag name from CLI args for value completion.
+/// Looks for `flag <name>` pattern.
+fn find_flag_name_in_args() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "flag" {
+            for next in iter.by_ref() {
+                if !next.starts_with('-') {
+                    return Some(next.clone());
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Run `ebdev complete-flag <flag> <field>` as subprocess and parse JSON result.
+fn run_complete_flag(flag_name: &str, field_name: &str) -> Option<Vec<String>> {
+    let exe = std::env::current_exe().ok()?;
+    let output = std::process::Command::new(exe)
+        .args(["complete-flag", flag_name, field_name])
+        .env_remove("COMPLETE")
+        .env("EBDEV_SKIP_SELF_UPDATE", "1")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
 /// Run `ebdev flags --json` as a subprocess and parse the result.
 fn run_flags_json() -> Option<Vec<FlagInfo>> {
     let exe = std::env::current_exe().ok()?;

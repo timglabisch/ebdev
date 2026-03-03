@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
-use crate::completions::{complete_task_args, complete_task_names, complete_flag_names, complete_with_flags};
+use crate::completions::{complete_task_args, complete_task_names, complete_flag_names, complete_flag_value, complete_with_flags};
 
 #[derive(Parser)]
 #[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "Development environment tool")]
@@ -82,6 +82,7 @@ pub enum Commands {
         #[arg(add = ArgValueCandidates::new(complete_flag_names))]
         name: String,
         /// Value: on/off for boolean, or string value for config fields
+        #[arg(add = ArgValueCompleter::new(complete_flag_value))]
         value: Option<String>,
     },
     /// Run commands in Docker containers via bridge
