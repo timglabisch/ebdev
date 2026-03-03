@@ -14,6 +14,7 @@ pub async fn run_task_with_tui(
     task_env: std::collections::HashMap<String, String>,
     embedded_binary: &'static [u8],
     task_args: Vec<String>,
+    flag_overrides: std::collections::HashMap<String, serde_json::Value>,
 ) -> anyhow::Result<ExitCode> {
     let (handle, thread) = match ebdev_task_runner::run_with_tui(
         task_name.to_string(),
@@ -33,7 +34,7 @@ pub async fn run_task_with_tui(
         }
     };
 
-    run_task_with_runner(config_path, task_name, handle, thread, mutagen_path, task_env, embedded_binary, task_args).await
+    run_task_with_runner(config_path, task_name, handle, thread, mutagen_path, task_env, embedded_binary, task_args, flag_overrides).await
 }
 
 /// Run a task in headless mode with PTY support
@@ -46,6 +47,7 @@ pub async fn run_task_headless(
     task_env: std::collections::HashMap<String, String>,
     embedded_binary: &'static [u8],
     task_args: Vec<String>,
+    flag_overrides: std::collections::HashMap<String, serde_json::Value>,
 ) -> anyhow::Result<ExitCode> {
     let (handle, thread) = ebdev_task_runner::run_headless(
         Some(base_path.to_string_lossy().to_string()),
@@ -53,7 +55,7 @@ pub async fn run_task_headless(
         embedded_binary,
     );
 
-    run_task_with_runner(config_path, task_name, handle, thread, mutagen_path, task_env, embedded_binary, task_args).await
+    run_task_with_runner(config_path, task_name, handle, thread, mutagen_path, task_env, embedded_binary, task_args, flag_overrides).await
 }
 
 /// Shared logic: run deno task, then shutdown the runner and check results.
@@ -66,11 +68,12 @@ async fn run_task_with_runner(
     task_env: std::collections::HashMap<String, String>,
     embedded_binary: &'static [u8],
     task_args: Vec<String>,
+    flag_overrides: std::collections::HashMap<String, serde_json::Value>,
 ) -> anyhow::Result<ExitCode> {
     let handle_for_shutdown = handle.clone();
 
     let deno_result = ebdev_toolchain_deno::run_task(
-        config_path, task_name, Some(handle), mutagen_path, task_env, embedded_binary, task_args,
+        config_path, task_name, Some(handle), mutagen_path, task_env, embedded_binary, task_args, flag_overrides,
     ).await;
 
     let _ = handle_for_shutdown.shutdown();

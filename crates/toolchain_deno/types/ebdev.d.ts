@@ -132,6 +132,47 @@ declare module "ebdev" {
     toolchain: ToolchainConfig;
     /** Mutagen sync configuration */
     mutagen?: MutagenConfig;
+    /** Feature flags */
+    flags?: Record<string, BooleanFlagBuilder | ConfigFlagBuilder<any>>;
+  }
+
+  // =============================================================================
+  // Feature Flags
+  // =============================================================================
+
+  export interface BooleanFlagBuilder {
+    default(value: boolean): BooleanFlagBuilder;
+    requires(...flags: string[]): BooleanFlagBuilder;
+    config<T extends Record<string, StringArgBuilder | NumberArgBuilder | OneOfArgBuilder<any>>>(
+      schema: T
+    ): ConfigFlagBuilder<T>;
+  }
+
+  export interface ConfigFlagBuilder<T extends Record<string, any>> {
+    default(value: boolean): ConfigFlagBuilder<T>;
+    requires(...flags: string[]): ConfigFlagBuilder<T>;
+  }
+
+  export function flag(description: string): BooleanFlagBuilder;
+
+  type InferArgValue<T> =
+    T extends OneOfArgBuilder<infer U> ? U :
+    T extends StringArgBuilder ? string :
+    T extends NumberArgBuilder ? number :
+    never;
+
+  type InferFlagConfig<T> = { [K in keyof T]: InferArgValue<T[K]> };
+
+  type InferFlag<T> =
+    T extends BooleanFlagBuilder ? boolean :
+    T extends ConfigFlagBuilder<infer C> ? InferFlagConfig<C> | false :
+    never;
+
+  type InferFlags<F> = { [K in keyof F]: InferFlag<F[K]> };
+
+  interface ResolvedConfig<F extends Record<string, BooleanFlagBuilder | ConfigFlagBuilder<any>>> extends Omit<EbdevConfig, 'flags'> {
+    flags: InferFlags<F>;
+    pick<K extends keyof F>(...keys: K[]): { [P in K]: InferFlag<F[P]> };
   }
 
   /**
@@ -163,6 +204,9 @@ declare module "ebdev" {
    * ```
    */
   export function defineConfig(config: EbdevConfig): EbdevConfig;
+  export function defineConfig<F extends Record<string, BooleanFlagBuilder | ConfigFlagBuilder<any>>>(
+    config: EbdevConfig & { flags: F }
+  ): ResolvedConfig<F>;
 
   /**
    * Preset configurations for common project types
@@ -299,14 +343,21 @@ declare module "ebdev" {
     [K in keyof T]: InferArgType<T[K]>;
   };
 
-  export interface TaskDefinition<TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>> {
+  export interface TaskDefinition<
+    TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>,
+    TFlags = {}
+  > {
     description?: string;
     args?: TArgs;
-    run(args: InferArgs<TArgs>): Promise<void>;
+    flags?: TFlags;
+    run(args: InferArgs<TArgs>, flags: TFlags): Promise<void>;
   }
 
-  export function defineTask<TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>>(
-    config: TaskDefinition<TArgs>
+  export function defineTask<
+    TArgs extends Record<string, StringArgBuilder | NumberArgBuilder | BooleanArgBuilder | OneOfArgBuilder<any>>,
+    TFlags = {}
+  >(
+    config: TaskDefinition<TArgs, TFlags>
   ): (() => Promise<void>) & { __ebdevTaskDef: unknown };
 
   // =============================================================================

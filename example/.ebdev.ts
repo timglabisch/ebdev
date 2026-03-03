@@ -1,11 +1,42 @@
-import { defineConfig, defineTask, arg, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
+import { defineConfig, defineTask, arg, flag, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
 
-export default defineConfig({
+const config = defineConfig({
     toolchain: {
         ebdev: "0.1.0",
         node: "22.12.0",
         pnpm: "9.15.0",
         mutagen: "0.18.1",
+    },
+    flags: {
+        search: flag("Elasticsearch").config({
+            engine: arg.oneOf(["elasticsearch", "meilisearch"] as const).default("elasticsearch"),
+        }),
+        clickhouse: flag("ClickHouse Analytics").default(true),
+        mailhog: flag("Mail Catcher").default(false),
+    },
+});
+export default config;
+
+// =============================================================================
+// Feature Flag Example
+// =============================================================================
+
+export async function services() {
+    const s = ["php", "nginx"];
+    if (config.flags.search) s.push(config.flags.search.engine);
+    if (config.flags.clickhouse) s.push("clickhouse");
+    if (config.flags.mailhog) s.push("mailhog");
+    await exec(["echo", "Starting:", ...s]);
+}
+
+export const build = defineTask({
+    description: "Build with selected services",
+    flags: config.pick("search", "clickhouse"),
+    async run(_args, flags) {
+        const s = ["app"];
+        if (flags.search) s.push(flags.search.engine);
+        if (flags.clickhouse) s.push("clickhouse");
+        await exec(["echo", "Building:", ...s]);
     },
 });
 

@@ -186,7 +186,7 @@ export default defineConfig({
     ebdev()
         .current_dir(temp_dir.path())
         .args(["run", "--pnpm-version", "9.14.0", "pnpm", "-v"])
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(30))
         .assert()
         .success()
         .stdout(predicate::str::contains("9.14.0"));
@@ -198,7 +198,7 @@ export default defineConfig({
     ebdev()
         .current_dir(temp_dir.path())
         .args(["run", "--mutagen-version", "0.17.5", "mutagen", "version"])
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(30))
         .assert()
         .success()
         .stdout(predicate::str::contains("0.17.5"));
@@ -1288,6 +1288,57 @@ fn file_hash(path: &Path) -> u32 {
 }
 
 // =============================================================================
+// Feature Flag Tests
+// =============================================================================
+
+/// Write a .ebdev.ts config with feature flags
+fn write_config_with_flags(dir: &Path) {
+    // Create fake node toolchain dir so ensure_toolchain skips download
+    fs::create_dir_all(dir.join(".ebdev/toolchain/node/v22.12.0/bin")).unwrap();
+
+    let config = r#"import { defineConfig, defineTask, flag, arg } from "ebdev";
+
+const config = defineConfig({
+  toolchain: {
+    ebdev: "0.1.0",
+    node: "22.12.0",
+  },
+  flags: {
+    search: flag("Elasticsearch").config({
+      engine: arg.oneOf(["elasticsearch", "meilisearch"] as const, "Search engine").default("elasticsearch"),
+      index: arg.string("Index name").default("main").complete(async () => ["main", "products", "orders"]),
+    }),
+    clickhouse: flag("ClickHouse Analytics").default(true),
+    mailhog: flag("Mail Catcher").default(false),
+    tidb: flag("TiDB Cluster").default(true),
+    analytics: flag("Analytics").default(true).requires("tidb"),
+  },
+});
+export default config;
+
+export async function dev() {
+  const services: string[] = ["php", "nginx"];
+  if (config.flags.search) services.push(config.flags.search.engine);
+  if (config.flags.clickhouse) services.push("clickhouse");
+  console.log("services:" + services.join(","));
+  console.log("search:" + JSON.stringify(config.flags.search));
+  console.log("clickhouse:" + JSON.stringify(config.flags.clickhouse));
+  console.log("mailhog:" + JSON.stringify(config.flags.mailhog));
+}
+
+export const build = defineTask({
+  description: "Build with selected services",
+  flags: config.pick("search", "clickhouse"),
+  async run(_args: Record<string, never>, flags: { search: { engine: string; index: string } | false; clickhouse: boolean }) {
+    console.log("build:search:" + JSON.stringify(flags.search));
+    console.log("build:clickhouse:" + JSON.stringify(flags.clickhouse));
+  },
+});
+"#;
+    fs::write(dir.join(".ebdev.ts"), config).unwrap();
+}
+
+// =============================================================================
 // Binary Toolchain Tests
 // =============================================================================
 
@@ -1530,4 +1581,648 @@ export default defineConfig({{
         .stdout(predicate::str::contains("archived-tool v2.0.0"));
 
     println!("tar.gz binary toolchain tests passed!");
+}
+
+// =============================================================================
+// Feature Flag Tests — `ebdev flags` and `ebdev flag`
+// =============================================================================
+
+#[test]
+fn test_flags_list() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flags"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search"))
+        .stdout(predicate::str::contains("Elasticsearch"))
+        .stdout(predicate::str::contains("clickhouse"))
+        .stdout(predicate::str::contains("mailhog"))
+        .stdout(predicate::str::contains("ON"))
+        .stdout(predicate::str::contains("OFF"));
+}
+
+#[test]
+fn test_flags_list_json() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    let output = ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flags", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(parsed.is_array(), "flags --json should output a JSON array");
+
+    let flags = parsed.as_array().unwrap();
+    let names: Vec<&str> = flags.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"search"));
+    assert!(names.contains(&"clickhouse"));
+    assert!(names.contains(&"mailhog"));
+
+    // Check active values (active = saved value or metadata default)
+    let search = flags.iter().find(|f| f["name"] == "search").unwrap();
+    // Config flag with no saved state: active = default (true)
+    assert_eq!(search["active"], true, "search active should be true (default, config object resolved at runtime)");
+    // Config fields should be listed in the flag's config array
+    assert!(search["config"].is_array(), "search should have config fields");
+
+    let mailhog = flags.iter().find(|f| f["name"] == "mailhog").unwrap();
+    assert_eq!(mailhog["active"], false, "mailhog should be OFF by default");
+}
+
+#[test]
+fn test_flag_set_on_off() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Turn mailhog ON
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog", "on"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog = ON"));
+
+    // Verify persistence
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+    assert_eq!(saved["mailhog"], true);
+
+    // Turn mailhog OFF
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog", "off"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog = OFF"));
+}
+
+#[test]
+fn test_flag_toggle() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // mailhog default is false, toggle should turn ON
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog = ON"));
+
+    // Toggle again should turn OFF
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog = OFF"));
+}
+
+#[test]
+fn test_flag_set_config_field() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Set search.engine to meilisearch
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.engine", "meilisearch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search.engine = meilisearch"));
+
+    // Verify persistence
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+    assert_eq!(saved["search"]["engine"], "meilisearch");
+}
+
+#[test]
+fn test_flag_config_field_invalid_choice() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Invalid choice for engine
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.engine", "solr"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid value"))
+        .stderr(predicate::str::contains("Must be one of"));
+}
+
+#[test]
+fn test_flag_unknown_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "nonexistent", "on"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown flag"));
+}
+
+#[test]
+fn test_flag_unknown_field() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.nonexistent", "value"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown field"));
+}
+
+#[test]
+fn test_flag_boolean_no_config_field() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // clickhouse is boolean, not config — can't set fields
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "clickhouse.engine", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("boolean flag"));
+}
+
+#[test]
+fn test_flag_dependency_auto_enable() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // First disable tidb
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "tidb", "off"])
+        .assert()
+        .success();
+
+    // Now enable analytics (requires tidb) → should auto-enable tidb
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "analytics", "on"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tidb = ON (required by analytics)"))
+        .stdout(predicate::str::contains("analytics = ON"));
+}
+
+#[test]
+fn test_flag_dependency_auto_disable() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Disable tidb → should auto-disable analytics (requires tidb)
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "tidb", "off"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("analytics = OFF (requires tidb)"))
+        .stdout(predicate::str::contains("tidb = OFF"));
+}
+
+#[test]
+fn test_flag_persistence_only_diffs() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Set mailhog ON (differs from default false)
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog", "on"])
+        .assert()
+        .success();
+
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+
+    // Should only contain mailhog (the only diff from defaults)
+    assert_eq!(saved["mailhog"], true);
+    // clickhouse should NOT be in saved (it's at default)
+    assert!(saved.get("clickhouse").is_none(), "clickhouse should not be in saved (at default)");
+}
+
+#[test]
+fn test_flag_no_flags_defined() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_tasks(temp_dir.path()); // uses existing helper without flags
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flags"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No feature flags defined"));
+}
+
+// =============================================================================
+// Feature Flag Tests — Task with --with / --without
+// =============================================================================
+
+#[test]
+fn test_task_with_flag_override() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // mailhog is OFF by default, --with should enable it for this run
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--with", "mailhog"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog:true"));
+}
+
+#[test]
+fn test_task_without_flag_override() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // clickhouse is ON by default, --without should disable it for this run
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--without", "clickhouse"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("clickhouse:false"));
+}
+
+#[test]
+fn test_task_without_config_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // search is ON by default (config flag), --without should set it to false
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--without", "search"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search:false"));
+}
+
+#[test]
+fn test_task_with_config_override_colon_syntax() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // --with search:engine=meilisearch
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--with", "search:engine=meilisearch"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"engine\":\"meilisearch\""));
+}
+
+#[test]
+fn test_task_with_config_override_dot_syntax() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // --with search.engine=meilisearch
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--with", "search.engine=meilisearch"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"engine\":\"meilisearch\""));
+}
+
+#[test]
+fn test_task_with_picked_flags_and_override() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // build task picks search + clickhouse, override clickhouse to off
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "build", "--without", "clickhouse"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build:clickhouse:false"));
+}
+
+// =============================================================================
+// Feature Flag Tests — Completions
+// =============================================================================
+
+#[test]
+fn test_completion_flag_names() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev flag <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "flag", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search"))
+        .stdout(predicate::str::contains("clickhouse"))
+        .stdout(predicate::str::contains("mailhog"))
+        // Config flag should also show dotted fields
+        .stdout(predicate::str::contains("search.engine"))
+        .stdout(predicate::str::contains("search.index"));
+}
+
+#[test]
+fn test_completion_with_flags_on_task() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev task dev --with <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "dev", "--with", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search"))
+        .stdout(predicate::str::contains("clickhouse"))
+        .stdout(predicate::str::contains("mailhog"));
+}
+
+#[test]
+fn test_completion_without_flags_on_task() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev task dev --without <TAB>"
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "4")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", "task", "dev", "--without", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search"))
+        .stdout(predicate::str::contains("clickhouse"));
+}
+
+#[test]
+fn test_complete_flag_subcommand() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // ebdev complete-flag search index → should return dynamic completions
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-flag", "search", "index"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"))
+        .stdout(predicate::str::contains("products"))
+        .stdout(predicate::str::contains("orders"));
+}
+
+#[test]
+fn test_complete_flag_subcommand_nonexistent() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // ebdev complete-flag nonexistent field → should return empty
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-flag", "nonexistent", "field"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("[]"));
+}
+
+#[test]
+fn test_complete_flag_no_ebdev_ts() {
+    let temp_dir = TempDir::new().unwrap();
+    // No .ebdev.ts
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["complete-flag", "search", "engine"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("[]"));
+}
+
+// =============================================================================
+// Feature Flag Tests — Subcommands
+// =============================================================================
+
+#[test]
+fn test_flags_subcommand_shows_in_help() {
+    ebdev()
+        .args(["--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("flags"))
+        .stdout(predicate::str::contains("flag"));
+}
+
+#[test]
+fn test_completion_subcommands_include_flags() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // "ebdev <TAB>" should include flags/flag subcommands
+    ebdev()
+        .current_dir(temp_dir.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "1")
+        .env("_CLAP_IFS", "\n")
+        .args(["--", "ebdev", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("flags:"))
+        .stdout(predicate::str::contains("flag:"));
+}
+
+// =============================================================================
+// Feature Flag Tests — Additional Coverage
+// =============================================================================
+
+#[test]
+fn test_flag_toggle_config_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // search is a config flag, default ON. Toggle should turn it OFF.
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search = OFF"));
+
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+    assert_eq!(saved["search"], false);
+
+    // Toggle again should turn it back ON (with default config values)
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search = ON"));
+
+    // After toggling ON again, search should be removed from saved (back to default)
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+    assert!(saved.get("search").is_none(), "search should be removed from saved (back to default ON)");
+}
+
+#[test]
+fn test_task_with_and_without_combined() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // mailhog OFF by default → --with enables, clickhouse ON by default → --without disables
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--with", "mailhog", "--without", "clickhouse"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mailhog:true"))
+        .stdout(predicate::str::contains("clickhouse:false"));
+}
+
+#[test]
+fn test_task_with_config_flag_enable() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // First persist search=off
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search", "off"])
+        .assert()
+        .success();
+
+    // Now --with search should re-enable it for this run
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["task", "dev", "--with", "search"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        // search should be truthy (not false)
+        .stdout(predicate::str::contains("search:false").not());
+}
+
+#[test]
+fn test_flag_set_string_field_without_choices() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // search.index is a string field without choices — any value should be accepted
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.index", "products"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("search.index = products"));
+
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(temp_dir.path().join(".ebdev/flags.json")).unwrap()
+    ).unwrap();
+    assert_eq!(saved["search"]["index"], "products");
+}
+
+#[test]
+fn test_flags_json_with_saved_state() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Save some state
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "mailhog", "on"])
+        .assert()
+        .success();
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.engine", "meilisearch"])
+        .assert()
+        .success();
+
+    let output = ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flags", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let flags = parsed.as_array().unwrap();
+
+    // mailhog should now be active=true (saved: true, overriding default false)
+    let mailhog = flags.iter().find(|f| f["name"] == "mailhog").unwrap();
+    assert_eq!(mailhog["active"], true, "mailhog should be ON after flag set");
+
+    // search should have saved config with engine=meilisearch
+    let search = flags.iter().find(|f| f["name"] == "search").unwrap();
+    assert_eq!(search["active"]["engine"], "meilisearch",
+        "search.engine should be meilisearch after flag set");
+}
+
+#[test]
+fn test_flag_invalid_boolean_value() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "clickhouse", "maybe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid value"));
+}
+
+#[test]
+fn test_flag_config_field_no_value() {
+    let temp_dir = TempDir::new().unwrap();
+    write_config_with_flags(temp_dir.path());
+
+    // Setting a config field without a value should show usage
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["flag", "search.engine"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage"));
 }

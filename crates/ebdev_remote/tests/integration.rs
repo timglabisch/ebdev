@@ -1594,6 +1594,10 @@ async fn test_pty_exit_parallel_heavy_output() {
     let script = "for i in $(seq 1 1000); do echo \"parallel-output-line-$i\"; done";
 
     // Start 3 parallel sessions
+    // Note: after sending Execute, earlier sessions may have already produced
+    // Output or Exit responses, so we drain those while waiting for Started.
+    let mut exited = std::collections::HashSet::new();
+
     for sid in 1..=3u32 {
         client.send(&Request::Execute {
             session_id: sid,
@@ -1604,12 +1608,19 @@ async fn test_pty_exit_parallel_heavy_output() {
             pty: Some(PtyConfig { cols: 120, rows: 40 }),
         }).await;
 
-        let response = client.read_response().await;
-        assert!(matches!(response, Response::Started { .. }));
+        loop {
+            let response = client.read_response().await;
+            match response {
+                Response::Started { .. } => break,
+                Response::Output { .. } => {}
+                Response::Exit { session_id, code } => {
+                    assert_eq!(code, Some(0), "Session {} failed", session_id);
+                    exited.insert(session_id);
+                }
+                other => panic!("Unexpected response while waiting for Started: {:?}", other),
+            }
+        }
     }
-
-    // Collect all exits (order may vary)
-    let mut exited = std::collections::HashSet::new();
     let timeout = tokio::time::Duration::from_secs(15);
     let deadline = tokio::time::Instant::now() + timeout;
 

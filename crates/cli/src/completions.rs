@@ -229,10 +229,13 @@ fn find_task_name_in_args() -> Option<String> {
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct TaskInfo {
     name: String,
     description: Option<String>,
     args: Option<Vec<ArgInfo>>,
+    #[serde(rename = "pickedFlags", default)]
+    picked_flags: Option<Vec<String>>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -254,6 +257,82 @@ fn run_tasks_json() -> Option<Vec<TaskInfo>> {
     let exe = std::env::current_exe().ok()?;
     let output = std::process::Command::new(exe)
         .args(["tasks", "--json"])
+        .env_remove("COMPLETE")
+        .env("EBDEV_SKIP_SELF_UPDATE", "1")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+// =============================================================================
+// Flag Completions
+// =============================================================================
+
+#[derive(serde::Deserialize)]
+struct FlagInfo {
+    name: String,
+    description: String,
+    config: Option<Vec<FlagConfigFieldInfo>>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct FlagConfigFieldInfo {
+    name: String,
+    #[serde(rename = "cliName")]
+    cli_name: String,
+    description: String,
+    choices: Option<Vec<String>>,
+    #[serde(default)]
+    completable: bool,
+}
+
+/// Complete flag names for `ebdev flag <TAB>`.
+/// Returns flag names and flag.field variants.
+pub fn complete_flag_names() -> Vec<CompletionCandidate> {
+    let Some(flags) = run_flags_json() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for f in &flags {
+        let mut c = CompletionCandidate::new(&f.name);
+        c = c.help(Some(f.description.clone().into()));
+        candidates.push(c);
+        if let Some(config) = &f.config {
+            for field in config {
+                let dotted = format!("{}.{}", f.name, field.name);
+                let mut fc = CompletionCandidate::new(&dotted);
+                fc = fc.help(Some(field.description.clone().into()));
+                candidates.push(fc);
+            }
+        }
+    }
+    candidates
+}
+
+/// Complete flag names for `--with`/`--without` on task command.
+pub fn complete_with_flags() -> Vec<CompletionCandidate> {
+    let Some(flags) = run_flags_json() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for f in &flags {
+        let mut c = CompletionCandidate::new(&f.name);
+        c = c.help(Some(f.description.clone().into()));
+        candidates.push(c);
+    }
+    candidates
+}
+
+/// Run `ebdev flags --json` as a subprocess and parse the result.
+fn run_flags_json() -> Option<Vec<FlagInfo>> {
+    let exe = std::env::current_exe().ok()?;
+    let output = std::process::Command::new(exe)
+        .args(["flags", "--json"])
         .env_remove("COMPLETE")
         .env("EBDEV_SKIP_SELF_UPDATE", "1")
         .stderr(std::process::Stdio::null())

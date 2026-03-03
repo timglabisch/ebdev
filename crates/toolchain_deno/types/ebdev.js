@@ -21,6 +21,103 @@ export function defineConfig(config) {
     }));
   }
 
+  if (config.flags) {
+    // Store original builders for completion functions
+    config.__flagBuilders = { ...config.flags };
+
+    // 1. Read .ebdev/flags.json (injected by Rust runtime as globalThis.__ebdevSavedFlags)
+    let saved = {};
+    try {
+      saved = JSON.parse(globalThis.__ebdevSavedFlags || "{}");
+    } catch { /* invalid JSON = use defaults */ }
+
+    // 2. Store metadata for runtime introspection
+    config.__flagDefs = {};
+    for (const [name, builder] of Object.entries(config.flags)) {
+      config.__flagDefs[name] = {
+        description: builder._description,
+        default: builder._default,
+        requires: builder._requires,
+        config: builder._config ? Object.fromEntries(
+          Object.entries(builder._config).map(([k, b]) => [k, {
+            type: b._type,
+            description: b._description || "",
+            default: b._default,
+            choices: b._choices,
+            completable: !!b._completeFn,
+          }])
+        ) : undefined,
+      };
+    }
+
+    // 3. Resolve flags: saved value > default
+    const resolved = {};
+    for (const [name, builder] of Object.entries(config.flags)) {
+      if (name in saved) {
+        if (builder._config && saved[name] !== false) {
+          // Merge partial saved config with defaults
+          const obj = {};
+          for (const [k, b] of Object.entries(builder._config)) {
+            obj[k] = b._default;
+          }
+          if (typeof saved[name] === "object" && saved[name] !== null) {
+            Object.assign(obj, saved[name]);
+          }
+          resolved[name] = obj;
+        } else {
+          resolved[name] = saved[name];
+        }
+      } else if (builder._config) {
+        // Config flag: build default object from arg builders
+        const obj = {};
+        for (const [k, b] of Object.entries(builder._config)) {
+          obj[k] = b._default;
+        }
+        resolved[name] = builder._default ? obj : false;
+      } else {
+        resolved[name] = builder._default;
+      }
+    }
+
+    // 4. Dependency resolution
+    //    enabled flag → force requires ON
+    for (const [name, builder] of Object.entries(config.flags)) {
+      if (resolved[name]) {
+        for (const dep of builder._requires) {
+          if (!resolved[dep]) {
+            const depBuilder = config.flags[dep];
+            if (depBuilder && depBuilder._config) {
+              const obj = {};
+              for (const [k, b] of Object.entries(depBuilder._config)) {
+                obj[k] = b._default;
+              }
+              resolved[dep] = obj;
+            } else if (depBuilder) {
+              resolved[dep] = true;
+            }
+          }
+        }
+      }
+    }
+    //    disabled dependency → force dependents OFF
+    for (const [name, builder] of Object.entries(config.flags)) {
+      for (const dep of builder._requires) {
+        if (!resolved[dep]) resolved[name] = false;
+      }
+    }
+
+    // 5. Replace builders with resolved values
+    config.flags = resolved;
+
+    // 6. Add pick() method
+    config.pick = (...keys) => {
+      const picked = {};
+      for (const k of keys) picked[k] = resolved[k];
+      picked.__pickedKeys = keys;
+      return picked;
+    };
+  }
+
   return config;
 }
 
@@ -51,6 +148,39 @@ export function mergeIgnore(...arrays) {
 
 export function gitignore() {
   return [".git", ".svn", ".hg", ".DS_Store", "Thumbs.db", "*.swp", "*.swo", "*~", ".idea", ".vscode", "*.log"];
+}
+
+// =============================================================================
+// Feature Flags
+// =============================================================================
+
+class FlagBuilder {
+  constructor(description) {
+    this._description = description;
+    this._default = false;
+    this._requires = [];
+    this._config = undefined; // undefined = boolean, object = config flag
+  }
+  _clone() {
+    const b = new FlagBuilder(this._description);
+    b._default = this._default;
+    b._requires = [...this._requires];
+    b._config = this._config;
+    return b;
+  }
+  default(value) {
+    const b = this._clone(); b._default = value; return b;
+  }
+  requires(...flags) {
+    const b = this._clone(); b._requires = [...this._requires, ...flags]; return b;
+  }
+  config(schema) {
+    const b = this._clone(); b._config = schema; b._default = true; return b;
+  }
+}
+
+export function flag(description) {
+  return new FlagBuilder(description);
 }
 
 // =============================================================================
@@ -191,18 +321,20 @@ function parseTaskArgs(rawArgs, argSchema) {
   return result;
 }
 
-export function defineTask(config) {
+export function defineTask(taskConfig) {
   const fn = async function (...args) {
     // When called without args (backward compat from plain invocation)
-    await config.run(args[0] || {});
+    await taskConfig.run(args[0] || {}, taskConfig.flags || {});
   };
   fn.__ebdevTaskDef = {
-    description: config.description,
-    run: config.run,
-    __argSchema: config.args || {},
+    description: taskConfig.description,
+    run: taskConfig.run,
+    __argSchema: taskConfig.args || {},
     __parseArgs(rawArgs) {
-      return parseTaskArgs(rawArgs, config.args || {});
+      return parseTaskArgs(rawArgs, taskConfig.args || {});
     },
+    __pickedFlags: taskConfig.flags?.__pickedKeys || undefined,
+    __flags: taskConfig.flags || undefined,
   };
   return fn;
 }
@@ -214,6 +346,7 @@ globalThis.mergeIgnore = mergeIgnore;
 globalThis.gitignore = gitignore;
 globalThis.defineTask = defineTask;
 globalThis.arg = arg;
+globalThis.flag = flag;
 
 // =============================================================================
 // Interactive Mode

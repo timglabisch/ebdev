@@ -1,4 +1,6 @@
 .idea/*
 target/*
 .ebdev/toolchain/*
+.ebdev/flags.json
 example/.ebdev/toolchain/*
+example/.ebdev/flags.json

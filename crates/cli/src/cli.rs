@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
-use crate::completions::{complete_task_args, complete_task_names};
+use crate::completions::{complete_task_args, complete_task_names, complete_flag_names, complete_with_flags};
 
 #[derive(Parser)]
 #[command(name = "ebdev", version = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), about = "Development environment tool")]
@@ -54,6 +54,12 @@ pub enum Commands {
         /// Log all executor communication to file (JSON format)
         #[arg(long)]
         debug_log: Option<std::path::PathBuf>,
+        /// Activate flags for this run (e.g. --with search --with search:engine=meilisearch)
+        #[arg(long = "with", add = ArgValueCandidates::new(complete_with_flags))]
+        with_flags: Vec<String>,
+        /// Deactivate flags for this run
+        #[arg(long = "without", add = ArgValueCandidates::new(complete_with_flags))]
+        without_flags: Vec<String>,
         /// Arguments to pass to the task (after --)
         #[arg(last = true, add = ArgValueCompleter::new(complete_task_args))]
         task_args: Vec<String>,
@@ -63,6 +69,20 @@ pub enum Commands {
         /// Output task info as JSON (for tooling/completion)
         #[arg(long)]
         json: bool,
+    },
+    /// List all feature flags and their current state
+    Flags {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a feature flag value
+    Flag {
+        /// Flag name or flag.field (e.g. "search" or "search.engine")
+        #[arg(add = ArgValueCandidates::new(complete_flag_names))]
+        name: String,
+        /// Value: on/off for boolean, or string value for config fields
+        value: Option<String>,
     },
     /// Run commands in Docker containers via bridge
     Remote {
@@ -84,6 +104,14 @@ pub enum Commands {
         task: String,
         /// Arg name (camelCase field name)
         arg: String,
+    },
+    /// Internal: Complete flag config field values (used by shell completion)
+    #[command(hide = true)]
+    CompleteFlag {
+        /// Flag name
+        flag: String,
+        /// Field name (camelCase)
+        field: String,
     },
 }
 

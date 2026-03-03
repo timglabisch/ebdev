@@ -105,6 +105,9 @@ Binaries are installed to `.ebdev/toolchain/binary/<name>/v<version>/` and added
 | `ebdev task <name>` | Run a task (headless) |
 | `ebdev task <name> --tui` | Run a task with interactive TUI |
 | `ebdev tasks` | List available tasks |
+| `ebdev flags` | List feature flags and their state |
+| `ebdev flag <name> on/off` | Set a feature flag |
+| `ebdev flag <name>.<field> <value>` | Set a flag config field |
 | `ebdev mutagen status` | Show mutagen sync sessions |
 | `ebdev mutagen terminate` | Terminate project's sync sessions |
 | `ebdev remote run <container> <cmd>` | Execute command in Docker container |
@@ -208,6 +211,94 @@ ebdev task deploy -- --target=staging --log-level=debug
 | `arg.oneOf(["a","b"], desc)` | `--env staging` | validated `string` |
 
 **Modifiers:** `.required()`, `.default(value)` — chainable in any order.
+
+### Feature Flags
+
+Define per-developer feature flags to toggle optional services or behavior. Flags are persisted locally in `.ebdev/flags.json` (gitignored) and only store deviations from defaults.
+
+#### Defining Flags
+
+```typescript
+import { defineConfig, flag, arg } from "ebdev";
+
+const config = defineConfig({
+  toolchain: { ebdev: "0.1.0", node: "22.12.0" },
+  flags: {
+    clickhouse: flag("ClickHouse Analytics").default(true),
+    search: flag("Elasticsearch").config({
+      engine: arg.oneOf(["elasticsearch", "meilisearch"], "Search engine").default("elasticsearch"),
+      index: arg.string("Search index").default("main").complete(async () => ["main", "products"]),
+    }),
+    mailhog: flag("Mail Catcher").default(false),
+    tidb: flag("TiDB Cluster").default(true),
+    analytics: flag("Analytics").default(true).requires("tidb"),
+  },
+});
+export default config;
+```
+
+**Flag types:**
+
+| Builder | Resolved type | Description |
+|---|---|---|
+| `flag("desc")` | `boolean` | Simple on/off toggle (default: `false`) |
+| `flag("desc").default(true)` | `boolean` | Boolean with custom default |
+| `flag("desc").config({...})` | `{ field: value } \| false` | Config object when ON, `false` when OFF |
+| `.requires("other")` | — | Declares a dependency (see below) |
+
+**Dependencies:** `.requires("other")` ensures that when a flag is enabled, its dependencies are auto-enabled too. Conversely, disabling a dependency auto-disables all flags that require it.
+
+Config fields inside `.config({...})` use the same `arg` builders as task arguments — `arg.string()`, `arg.number()`, `arg.oneOf()`, with `.default()` and `.complete()` for shell completions.
+
+#### Using Flags in Tasks
+
+```typescript
+export async function dev() {
+  if (config.flags.search) {
+    console.log(config.flags.search.engine); // "elasticsearch" | "meilisearch"
+  }
+  if (config.flags.clickhouse) { /* ... */ }
+}
+```
+
+Config flags resolve to their config object when ON, or `false` when OFF — so a truthiness check narrows the type automatically.
+
+#### Scoping Flags to Tasks
+
+Use `config.pick()` to pass only relevant flags to a task:
+
+```typescript
+export const build = defineTask({
+  flags: config.pick("search", "clickhouse"),
+  async run(args, flags) {
+    flags.search    // typed
+    flags.clickhouse // typed
+  },
+});
+```
+
+#### CLI Commands
+
+```bash
+ebdev flags                          # List all flags and their current state
+ebdev flags --json                   # Output as JSON
+ebdev flag search off                # Persistently disable a flag
+ebdev flag search on                 # Persistently enable a flag
+ebdev flag search                    # Toggle current state
+ebdev flag search.engine meilisearch # Set a config field value
+```
+
+#### One-Time Overrides
+
+Override flags for a single task run without changing the persisted state:
+
+```bash
+ebdev task dev --with search                           # Enable for this run
+ebdev task dev --without clickhouse                    # Disable for this run
+ebdev task dev --with search:engine=meilisearch        # Override config values (colon syntax)
+ebdev task dev --with search.engine=meilisearch        # Override config values (dot syntax)
+ebdev task dev --with mailhog --without clickhouse     # Combine multiple overrides
+```
 
 #### Dynamic Shell Completions
 
@@ -511,6 +602,9 @@ Restart your shell. Completions work with `./ebdev` wrapper scripts in any proje
 - `./ebdev task deploy -- --<TAB>` — flag names from `defineTask` args
 - `./ebdev task deploy -- --target <TAB>` — dynamic values from `.complete()`
 - `./ebdev task deploy -- --target=st<TAB>` — filtered values (equals syntax)
+- `./ebdev flag <TAB>` — flag names and dotted config fields (e.g. `search.engine`)
+- `./ebdev task dev --with <TAB>` — available flag names
+- `./ebdev task dev --without <TAB>` — available flag names
 
 ## Self-Update
 

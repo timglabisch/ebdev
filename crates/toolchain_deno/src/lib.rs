@@ -5,4 +5,4 @@ mod task_runner;
 
 pub use ::ebdev_task_runner::TaskRunnerHandle;
 pub use runtime::{load_ts_config, Error};
-pub use task_runner::{list_tasks, run_task, complete_arg, TaskInfo, ArgInfo};
+pub use task_runner::{list_tasks, run_task, complete_arg, list_flags, complete_flag_value, TaskInfo, ArgInfo, FlagInfo, FlagConfigField};
