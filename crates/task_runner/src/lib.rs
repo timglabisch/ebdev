@@ -32,7 +32,7 @@ pub enum TaskRunnerError {
     #[error("Command failed: {0}")]
     CommandFailed(String),
 
-    #[error("TUI requires interactive terminal (try without --tui)")]
+    #[error("TUI requires interactive terminal (not a TTY)")]
     NotATty,
 }
 

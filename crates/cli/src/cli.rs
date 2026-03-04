@@ -48,9 +48,9 @@ pub enum Commands {
         /// Task name to run
         #[arg(add = ArgValueCandidates::new(complete_task_names))]
         name: String,
-        /// Run with TUI visualization
+        /// Disable TUI (use headless mode). TUI is enabled by default when running in a terminal.
         #[arg(long)]
-        tui: bool,
+        no_tui: bool,
         /// Log all executor communication to file (JSON format)
         #[arg(long)]
         debug_log: Option<std::path::PathBuf>,

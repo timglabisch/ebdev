@@ -940,7 +940,7 @@ fn test_completion_no_ebdev_ts() {
         .assert()
         .success()
         // Should still show flags even without tasks
-        .stdout(predicate::str::contains("--tui"));
+        .stdout(predicate::str::contains("--no-tui"));
 }
 
 // =============================================================================

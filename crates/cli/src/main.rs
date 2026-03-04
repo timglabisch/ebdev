@@ -388,7 +388,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 println!("Run a task with: ebdev task <name>");
             }
         }
-        Commands::Task { name, tui, debug_log, with_flags, without_flags, task_args } => {
+        Commands::Task { name, no_tui, debug_log, with_flags, without_flags, task_args } => {
             let config_path = base_path.join(".ebdev.ts");
             if !config_path.exists() {
                 eprintln!("No .ebdev.ts found in current directory");
@@ -457,10 +457,10 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
             }
 
-            if tui {
-                return task::run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY, task_args, flag_overrides).await;
-            } else {
+            if no_tui {
                 return task::run_task_headless(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY, task_args, flag_overrides).await;
+            } else {
+                return task::run_task_with_tui(&config_path, &name, &base_path, debug_log, mutagen_path, task_env, EMBEDDED_LINUX_BINARY, task_args, flag_overrides).await;
             }
         }
         // Handled earlier before config load

@@ -19,14 +19,13 @@ pub async fn run_task_with_tui(
     let (handle, thread) = match ebdev_task_runner::run_with_tui(
         task_name.to_string(),
         Some(base_path.to_string_lossy().to_string()),
-        debug_log,
+        debug_log.clone(),
         embedded_binary,
     ) {
         Ok(r) => r,
         Err(ebdev_task_runner::TaskRunnerError::NotATty) => {
-            eprintln!("Error: TUI requires an interactive terminal.");
-            eprintln!("Run without --tui flag or use an interactive terminal.");
-            return Ok(ExitCode::FAILURE);
+            // Auto-fallback to headless when not in a terminal
+            return run_task_headless(config_path, task_name, base_path, debug_log, mutagen_path, task_env, embedded_binary, task_args, flag_overrides).await;
         }
         Err(e) => {
             eprintln!("Error: {}", e);

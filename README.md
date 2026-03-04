@@ -23,7 +23,7 @@ ebdev run cargo build
 
 # Run tasks defined in .ebdev.ts
 ebdev task build
-ebdev task dev --tui
+ebdev task dev
 ```
 
 ## Configuration
@@ -102,8 +102,8 @@ Binaries are installed to `.ebdev/toolchain/binary/<name>/v<version>/` and added
 | `ebdev toolchain install` | Install all configured toolchains |
 | `ebdev toolchain info` | Show loaded configuration |
 | `ebdev run <cmd> [args]` | Run command with toolchain PATH |
-| `ebdev task <name>` | Run a task (headless) |
-| `ebdev task <name> --tui` | Run a task with interactive TUI |
+| `ebdev task <name>` | Run a task (TUI auto-detected, headless if not a terminal) |
+| `ebdev task <name> --no-tui` | Run a task in headless mode |
 | `ebdev tasks` | List available tasks |
 | `ebdev flags` | List feature flags and their state |
 | `ebdev flag <name> on/off` | Set a feature flag |

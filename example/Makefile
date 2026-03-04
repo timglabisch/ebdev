@@ -1,5 +1,6 @@
-.PHONY: help tasks hello greet info parallel shell build parallel-tui hello-tui \
-        complex complex-tui smoke smoke-tui stages timeout fail try \
+.PHONY: help tasks hello greet info parallel shell build \
+        complex smoke stages timeout fail try \
+        hello-headless parallel-headless complex-headless smoke-headless \
         complex-debug smoke-debug
 
 EBDEV := ../target/debug/ebdev
@@ -11,21 +12,24 @@ help:
 	@echo "    make tasks        - List all available tasks"
 	@echo "    make build        - Build ebdev first, then run hello"
 	@echo ""
-	@echo "  Simple Tasks:"
-	@echo "    make hello        - Run hello task (headless)"
-	@echo "    make hello-tui    - Run hello task (TUI)"
+	@echo "  Simple Tasks (TUI by default):"
+	@echo "    make hello        - Run hello task"
 	@echo "    make greet        - Run greet task"
 	@echo "    make info         - Run info task"
 	@echo "    make shell        - Run shell test"
 	@echo ""
 	@echo "  Parallel:"
-	@echo "    make parallel     - Run parallel test (headless)"
-	@echo "    make parallel-tui - Run parallel test (TUI)"
+	@echo "    make parallel     - Run parallel test"
 	@echo ""
 	@echo "  Integration Tests:"
-	@echo "    make complex      - Run complex integration test (headless)"
-	@echo "    make complex-tui  - Run complex integration test (TUI)"
+	@echo "    make complex      - Run complex integration test"
 	@echo "    make smoke        - Run quick smoke test"
+	@echo ""
+	@echo "  Headless (--no-tui):"
+	@echo "    make hello-headless    - Run hello task headless"
+	@echo "    make parallel-headless - Run parallel test headless"
+	@echo "    make complex-headless  - Run complex integration test headless"
+	@echo "    make smoke-headless    - Run quick smoke test headless"
 	@echo ""
 	@echo "  Feature Tests:"
 	@echo "    make stages       - Test stage functionality"
@@ -40,12 +44,9 @@ help:
 tasks:
 	$(EBDEV) tasks
 
-# Simple tasks
+# Simple tasks (TUI by default)
 hello:
 	$(EBDEV) task hello
-
-hello-tui:
-	$(EBDEV) task hello --tui
 
 greet:
 	$(EBDEV) task greet
@@ -60,21 +61,25 @@ shell:
 parallel:
 	$(EBDEV) task test_parallel
 
-parallel-tui:
-	$(EBDEV) task test_parallel --tui
-
 # Integration tests
 complex:
 	$(EBDEV) task test_complex
 
-complex-tui:
-	$(EBDEV) task test_complex --tui
-
 smoke:
 	$(EBDEV) task test_smoke
 
-smoke-tui:
-	$(EBDEV) task test_smoke --tui
+# Headless variants
+hello-headless:
+	$(EBDEV) task hello --no-tui
+
+parallel-headless:
+	$(EBDEV) task test_parallel --no-tui
+
+complex-headless:
+	$(EBDEV) task test_complex --no-tui
+
+smoke-headless:
+	$(EBDEV) task test_smoke --no-tui
 
 # Feature tests
 stages:
@@ -91,12 +96,12 @@ try:
 
 # Debug (with --debug-log)
 complex-debug:
-	$(EBDEV) task test_complex --tui --debug-log /tmp/ebdev-debug.json
+	$(EBDEV) task test_complex --debug-log /tmp/ebdev-debug.json
 	@echo ""
 	@echo "Debug log written to /tmp/ebdev-debug.json"
 
 smoke-debug:
-	$(EBDEV) task test_smoke --tui --debug-log /tmp/ebdev-debug.json
+	$(EBDEV) task test_smoke --debug-log /tmp/ebdev-debug.json
 	@echo ""
 	@echo "Debug log written to /tmp/ebdev-debug.json"
 
