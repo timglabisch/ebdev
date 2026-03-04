@@ -54,8 +54,8 @@ pub enum Commands {
         /// Log all executor communication to file (JSON format)
         #[arg(long)]
         debug_log: Option<std::path::PathBuf>,
-        /// Activate flags for this run (e.g. --with search --with search:engine=meilisearch)
-        #[arg(long = "with", add = ArgValueCandidates::new(complete_with_flags))]
+        /// Activate flags for this run (e.g. --with search --with search:engine=meilisearch). Use --with without values for interactive flag selection.
+        #[arg(long = "with", num_args = 0.., add = ArgValueCandidates::new(complete_with_flags))]
         with_flags: Vec<String>,
         /// Deactivate flags for this run
         #[arg(long = "without", add = ArgValueCandidates::new(complete_with_flags))]
@@ -70,9 +70,10 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// List all feature flags and their current state
+    /// List and configure feature flags
+    #[command(alias = "features")]
     Flags {
-        /// Output as JSON
+        /// Output as JSON (non-interactive)
         #[arg(long)]
         json: bool,
     },
