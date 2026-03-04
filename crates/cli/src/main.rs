@@ -115,35 +115,37 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     let base_path = PathBuf::from(".");
+
+    // Self-update: try early version extraction from raw source text first.
+    // This handles the case where a newer .ebdev.ts uses API features that
+    // the current binary's embedded runtime doesn't support. By extracting
+    // just the version string without evaluating TypeScript, we can still
+    // self-update to the correct version, which then loads the config properly.
+    if std::env::var("EBDEV_SKIP_SELF_UPDATE").is_err() {
+        let current = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        let current = current.strip_prefix('v').unwrap_or(current);
+
+        let ts_path = base_path.join(".ebdev.ts");
+        if let Ok(source) = std::fs::read_to_string(&ts_path) {
+            if let Some(desired) = ebdev_config::extract_ebdev_version(&source) {
+                if desired != current {
+                    self_update_and_reexec(&desired, current).await?;
+                }
+            }
+        }
+    }
+
     let config = Config::load_from_dir(&base_path).await?;
 
-    // Self-update check (skip if env var set to prevent loop)
+    // Fallback self-update check with fully evaluated config.
+    // Catches cases where the regex extraction missed the version
+    // (e.g., version stored in a variable or computed dynamically).
     if std::env::var("EBDEV_SKIP_SELF_UPDATE").is_err() {
         let desired = &config.toolchain.ebdev.version;
         let current = option_env!("EBDEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-        // Strip leading 'v' prefix for comparison (git describe produces "v0.0.5")
         let current = current.strip_prefix('v').unwrap_or(current);
         if desired != current {
-            let new_binary = ebdev_toolchain_ebdev::self_update(desired, current).await
-                .map_err(|e| anyhow::anyhow!(
-                    "Self-update failed (have v{current}, want v{desired}): {e}"
-                ))?;
-            // Re-exec with same args
-            let args: Vec<String> = std::env::args().collect();
-            eprintln!("ebdev self-update: re-executing as v{desired} ...");
-            eprintln!("  {} {}", new_binary.display(), args[1..].join(" "));
-            eprintln!("---");
-            let err = std::process::Command::new(&new_binary)
-                .args(&args[1..])
-                .env("EBDEV_SKIP_SELF_UPDATE", "1")
-                .exec();
-            // exec() only returns on error
-            anyhow::bail!(
-                "Failed to re-exec updated binary at {}: {}\n  args: {:?}",
-                new_binary.display(),
-                err,
-                &args[1..]
-            );
+            self_update_and_reexec(desired, current).await?;
         }
     }
 
@@ -526,5 +528,29 @@ fn parse_flag_override(spec: &str, enable: bool, overrides: &mut std::collection
 
     // Simple flag name → enable
     overrides.insert(spec.to_string(), serde_json::Value::Bool(true));
+}
+
+/// Download a new ebdev binary and re-exec with the same arguments.
+/// This function does not return on success (exec replaces the process).
+async fn self_update_and_reexec(desired: &str, current: &str) -> anyhow::Result<()> {
+    let new_binary = ebdev_toolchain_ebdev::self_update(desired, current).await
+        .map_err(|e| anyhow::anyhow!(
+            "Self-update failed (have v{current}, want v{desired}): {e}"
+        ))?;
+    let args: Vec<String> = std::env::args().collect();
+    eprintln!("ebdev self-update: re-executing as v{desired} ...");
+    eprintln!("  {} {}", new_binary.display(), args[1..].join(" "));
+    eprintln!("---");
+    let err = std::process::Command::new(&new_binary)
+        .args(&args[1..])
+        .env("EBDEV_SKIP_SELF_UPDATE", "1")
+        .exec();
+    // exec() only returns on error
+    anyhow::bail!(
+        "Failed to re-exec updated binary at {}: {}\n  args: {:?}",
+        new_binary.display(),
+        err,
+        &args[1..]
+    );
 }
 
