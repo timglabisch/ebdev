@@ -87,6 +87,8 @@ pub struct TuiUI {
     task_list_area: Rc<Cell<Rect>>,
     /// Stored geometry of the output panel (for mouse hit-testing)
     output_area: Rc<Cell<Rect>>,
+    /// Current mutagen sync status (None = no sync in progress)
+    mutagen_sessions: Option<Vec<crate::command::MutagenSessionProgress>>,
 }
 
 impl TuiUI {
@@ -120,6 +122,7 @@ impl TuiUI {
             pinned_task: None,
             task_list_area: Rc::new(Cell::new(Rect::default())),
             output_area: Rc::new(Cell::new(Rect::default())),
+            mutagen_sessions: None,
         })
     }
 
@@ -300,39 +303,53 @@ impl TuiUI {
         let task_list_area_rc = self.task_list_area.clone();
         let output_area_rc = self.output_area.clone();
         let palette = &self.palette;
+        let mutagen_sessions = self.mutagen_sessions.clone();
 
         let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Main layout: header + tasks + help
+            let mutagen_height = mutagen_sessions.as_ref()
+                .map(|s| if s.is_empty() { 0 } else { s.len() as u16 + 2 })
+                .unwrap_or(0)
+                .min(area.height / 3);
+
+            // Main layout: header + mutagen + tasks + help
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Header
-                    Constraint::Min(5),    // Tasks
-                    Constraint::Length(1), // Help
+                    Constraint::Length(3),              // Header [0]
+                    Constraint::Length(mutagen_height), // Mutagen Sync [1]
+                    Constraint::Min(5),                // Tasks [2]
+                    Constraint::Length(1),              // Help [3]
                 ])
                 .split(area);
 
             // Header
             header::draw_header(frame, chunks[0], task_name, tasks, completed_stages);
 
+            // Mutagen Sync widget
+            if let Some(ref sessions) = mutagen_sessions {
+                if !sessions.is_empty() {
+                    super::widgets::mutagen_sync::draw_mutagen_sync(frame, chunks[1], sessions);
+                }
+            }
+
             // Tasks area
             if tasks.is_empty() && completed_stages.is_empty() {
                 let waiting = Paragraph::new("Waiting for tasks...")
                     .style(Style::default().fg(Color::DarkGray))
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
-                frame.render_widget(waiting, chunks[1]);
+                frame.render_widget(waiting, chunks[2]);
             } else {
                 // Split area: task list on left, output on right
                 let task_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
-                        Constraint::Length(40.min(chunks[1].width / 3)),
+                        Constraint::Length(40.min(chunks[2].width / 3)),
                         Constraint::Min(20),
                     ])
-                    .split(chunks[1]);
+                    .split(chunks[2]);
 
                 // Store areas for mouse hit-testing
                 task_list_area_rc.set(task_chunks[0]);
@@ -358,7 +375,7 @@ impl TuiUI {
             }
 
             // Help line
-            help::draw_help(frame, chunks[2], has_registered_tasks, auto_quit);
+            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit);
 
             // Command Palette overlay
             if palette_open {
@@ -609,6 +626,14 @@ impl TaskRunnerUI for TuiUI {
                 }
             }
         }
+    }
+
+    fn on_mutagen_sync_status(&mut self, sessions: &[crate::command::MutagenSessionProgress]) {
+        self.mutagen_sessions = Some(sessions.to_vec());
+    }
+
+    fn on_mutagen_sync_clear(&mut self) {
+        self.mutagen_sessions = None;
     }
 
     fn should_auto_quit(&self) -> bool {

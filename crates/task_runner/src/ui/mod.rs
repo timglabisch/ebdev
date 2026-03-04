@@ -43,6 +43,12 @@ pub trait TaskRunnerUI {
     /// Log a message (works correctly in both headless and TUI mode)
     fn on_log(&mut self, message: &str);
 
+    /// Update mutagen sync status
+    fn on_mutagen_sync_status(&mut self, _sessions: &[crate::command::MutagenSessionProgress]) {}
+
+    /// Clear mutagen sync widget
+    fn on_mutagen_sync_clear(&mut self) {}
+
     /// Returns whether the UI should auto-quit when tasks complete
     fn should_auto_quit(&self) -> bool { true }
 

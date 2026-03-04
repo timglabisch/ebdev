@@ -12,6 +12,7 @@ pub use config::{PermissionsConfig, PollingConfig, SyncMode};
 pub mod status;
 pub mod state;
 
+pub use state::SessionStatus;
 use status::MutagenSession;
 
 #[derive(Debug, Error)]
@@ -228,7 +229,7 @@ impl MutagenBackend for RealMutagen {
 #[derive(Debug, Clone)]
 pub struct SessionStatusInfo {
     pub name: String,
-    pub status: String,
+    pub status: SessionStatus,
 }
 
 /// Pauses all mutagen sessions belonging to a project.
@@ -373,8 +374,8 @@ where
             .map(|name| {
                 let status = actual
                     .find_by_name(name)
-                    .map(|s| format!("{:?}", s.status).to_lowercase())
-                    .unwrap_or_else(|| "pending".to_string());
+                    .map(|s| s.status.clone())
+                    .unwrap_or(SessionStatus::Disconnected);
                 SessionStatusInfo {
                     name: name.clone(),
                     status,

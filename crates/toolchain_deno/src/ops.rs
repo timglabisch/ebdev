@@ -1,7 +1,7 @@
 use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
-use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, SessionStatusInfo, SyncMode};
-use ebdev_task_runner::{Command, OutputEvent, OutputStream, TaskRunnerHandle};
+use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, SessionStatus, SessionStatusInfo, SyncMode};
+use ebdev_task_runner::{Command, MutagenSessionProgress, MutagenSyncPhase, OutputEvent, OutputStream, TaskRunnerHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -495,19 +495,26 @@ pub async fn op_mutagen_reconcile(
         desired_sessions,
         project_crc32,
         move |statuses: Vec<SessionStatusInfo>| {
-            // Send status update to TUI if handle is available
             if let Some(h) = &handle_clone {
-                let status_str = statuses
+                let sessions: Vec<MutagenSessionProgress> = statuses
                     .iter()
-                    .map(|s| format!("{}:{}", s.name.split('-').next().unwrap_or(&s.name), &s.status))
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                let _ = h.log(&format!("[mutagen] {}", status_str));
+                    .map(|s| {
+                        let short_name = s.name.split('-').next().unwrap_or(&s.name).to_string();
+                        let (phase, status_label, percent) = map_session_status(&s.status);
+                        MutagenSessionProgress { name: short_name, phase, status_label, percent }
+                    })
+                    .collect();
+                let _ = h.mutagen_sync_status(sessions);
             }
         },
     )
     .await
     .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+
+    // Clear widget after completion
+    if let Some(h) = &handle {
+        let _ = h.mutagen_sync_clear();
+    }
 
     Ok(())
 }
@@ -537,6 +544,19 @@ pub async fn op_mutagen_pause_all(
         .map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
     Ok(paused as u32)
+}
+
+pub(crate) fn map_session_status(status: &SessionStatus) -> (MutagenSyncPhase, String, u8) {
+    match status {
+        SessionStatus::Watching => (MutagenSyncPhase::Ready, "watching".into(), 100),
+        SessionStatus::WaitingForRescan => (MutagenSyncPhase::Ready, "waiting for rescan".into(), 90),
+        SessionStatus::Scanning => (MutagenSyncPhase::Active, "scanning".into(), 40),
+        SessionStatus::Syncing => (MutagenSyncPhase::Active, "syncing".into(), 70),
+        SessionStatus::Connecting => (MutagenSyncPhase::Pending, "connecting".into(), 20),
+        SessionStatus::Disconnected => (MutagenSyncPhase::Pending, "disconnected".into(), 0),
+        SessionStatus::Halted(msg) => (MutagenSyncPhase::Halted(msg.clone()), format!("halted: {}", msg), 0),
+        SessionStatus::Unknown(s) => (MutagenSyncPhase::Pending, s.clone(), 10),
+    }
 }
 
 // =============================================================================
@@ -1041,6 +1061,75 @@ pub fn init_mutagen_state(
         mutagen_path,
         config_path,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_map_session_status_watching() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Watching);
+        assert_eq!(phase, MutagenSyncPhase::Ready);
+        assert_eq!(label, "watching");
+        assert_eq!(percent, 100);
+    }
+
+    #[test]
+    fn test_map_session_status_waiting_for_rescan() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::WaitingForRescan);
+        assert_eq!(phase, MutagenSyncPhase::Ready);
+        assert_eq!(label, "waiting for rescan");
+        assert_eq!(percent, 90);
+    }
+
+    #[test]
+    fn test_map_session_status_scanning() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Scanning);
+        assert_eq!(phase, MutagenSyncPhase::Active);
+        assert_eq!(label, "scanning");
+        assert_eq!(percent, 40);
+    }
+
+    #[test]
+    fn test_map_session_status_syncing() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Syncing);
+        assert_eq!(phase, MutagenSyncPhase::Active);
+        assert_eq!(label, "syncing");
+        assert_eq!(percent, 70);
+    }
+
+    #[test]
+    fn test_map_session_status_connecting() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Connecting);
+        assert_eq!(phase, MutagenSyncPhase::Pending);
+        assert_eq!(label, "connecting");
+        assert_eq!(percent, 20);
+    }
+
+    #[test]
+    fn test_map_session_status_disconnected() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Disconnected);
+        assert_eq!(phase, MutagenSyncPhase::Pending);
+        assert_eq!(label, "disconnected");
+        assert_eq!(percent, 0);
+    }
+
+    #[test]
+    fn test_map_session_status_halted() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Halted("root empty".into()));
+        assert_eq!(phase, MutagenSyncPhase::Halted("root empty".into()));
+        assert_eq!(label, "halted: root empty");
+        assert_eq!(percent, 0);
+    }
+
+    #[test]
+    fn test_map_session_status_unknown() {
+        let (phase, label, percent) = map_session_status(&SessionStatus::Unknown("custom-state".into()));
+        assert_eq!(phase, MutagenSyncPhase::Pending);
+        assert_eq!(label, "custom-state");
+        assert_eq!(percent, 10);
+    }
 }
 
 deno_core::extension!(

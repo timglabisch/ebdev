@@ -3,7 +3,7 @@
 use ebdev_mutagen_runner::{
     state::{DesiredSession, DesiredState},
     test_utils::{mock_session, MockMutagen},
-    MutagenBackend, SessionStatusInfo, SyncMode,
+    MutagenBackend, SessionStatus, SessionStatusInfo, SyncMode,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -182,19 +182,19 @@ async fn test_status_callback_receives_updates() {
     callback(vec![
         SessionStatusInfo {
             name: "frontend-12345678".to_string(),
-            status: "watching".to_string(),
+            status: SessionStatus::Watching,
         },
         SessionStatusInfo {
             name: "backend-12345678".to_string(),
-            status: "scanning".to_string(),
+            status: SessionStatus::Scanning,
         },
     ]);
 
     let received = statuses.lock().unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].len(), 2);
-    assert_eq!(received[0][0].status, "watching");
-    assert_eq!(received[0][1].status, "scanning");
+    assert_eq!(received[0][0].status, SessionStatus::Watching);
+    assert_eq!(received[0][1].status, SessionStatus::Scanning);
 }
 
 // ============================================================================

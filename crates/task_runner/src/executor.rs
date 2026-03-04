@@ -192,6 +192,16 @@ impl Executor {
                         self.log_debug(DebugMessage::Log { message: message.clone() });
                         ui.on_log(&message);
                     }
+                    ExecutorMessage::MutagenSyncStatus { sessions } => {
+                        self.log_debug(DebugMessage::MutagenSyncStatus {
+                            session_count: sessions.len(),
+                        });
+                        ui.on_mutagen_sync_status(&sessions);
+                    }
+                    ExecutorMessage::MutagenSyncClear => {
+                        self.log_debug(DebugMessage::MutagenSyncClear);
+                        ui.on_mutagen_sync_clear();
+                    }
                     ExecutorMessage::Shutdown => {
                         self.log_debug(DebugMessage::Shutdown);
                         if let Some(ref mut logger) = self.debug_logger {

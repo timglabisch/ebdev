@@ -15,6 +15,8 @@ pub use command::Command;
 pub use command::CommandResult;
 pub use command::OutputEvent;
 pub use command::RegisteredTask;
+pub use command::MutagenSessionProgress;
+pub use command::MutagenSyncPhase;
 pub use command::TuiEvent;
 pub use ebdev_remote::OutputStream;
 pub use ui::{HeadlessUI, TaskRunnerUI, TuiUI};
@@ -131,6 +133,23 @@ impl TaskRunnerHandle {
     pub fn log(&self, message: &str) -> Result<(), TaskRunnerError> {
         self.tx
             .send(ExecutorMessage::Log { message: message.to_string() })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Update mutagen sync status in the TUI
+    pub fn mutagen_sync_status(
+        &self,
+        sessions: Vec<command::MutagenSessionProgress>,
+    ) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::MutagenSyncStatus { sessions })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Clear the mutagen sync widget
+    pub fn mutagen_sync_clear(&self) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::MutagenSyncClear)
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
@@ -737,6 +756,96 @@ mod tests {
             "stdout should still be captured in result, got: {:?}",
             result.stdout,
         );
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_mutagen_sync_status_and_clear() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        // Sending sync status should not error
+        let sessions = vec![
+            command::MutagenSessionProgress {
+                name: "app".into(),
+                phase: command::MutagenSyncPhase::Active,
+                status_label: "scanning".into(),
+                percent: 40,
+            },
+            command::MutagenSessionProgress {
+                name: "worker".into(),
+                phase: command::MutagenSyncPhase::Ready,
+                status_label: "watching".into(),
+                percent: 100,
+            },
+        ];
+        handle.mutagen_sync_status(sessions).unwrap();
+
+        // Small delay so the executor processes the message
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Clearing should not error
+        handle.mutagen_sync_clear().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_mutagen_sync_status_empty_sessions() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        // Empty session list should work (no widget shown)
+        handle.mutagen_sync_status(vec![]).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Clear without prior status should also work
+        handle.mutagen_sync_clear().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let _ = handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_mutagen_sync_status_all_phases() {
+        let (handle, _thread) = run_headless(None, None, b"");
+
+        let sessions = vec![
+            command::MutagenSessionProgress {
+                name: "s1".into(),
+                phase: command::MutagenSyncPhase::Pending,
+                status_label: "disconnected".into(),
+                percent: 0,
+            },
+            command::MutagenSessionProgress {
+                name: "s2".into(),
+                phase: command::MutagenSyncPhase::Active,
+                status_label: "syncing".into(),
+                percent: 70,
+            },
+            command::MutagenSessionProgress {
+                name: "s3".into(),
+                phase: command::MutagenSyncPhase::Ready,
+                status_label: "watching".into(),
+                percent: 100,
+            },
+            command::MutagenSessionProgress {
+                name: "s4".into(),
+                phase: command::MutagenSyncPhase::Halted("root empty".into()),
+                status_label: "halted: root empty".into(),
+                percent: 0,
+            },
+        ];
+        handle.mutagen_sync_status(sessions).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        handle.mutagen_sync_clear().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let _ = handle.shutdown();
     }

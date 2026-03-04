@@ -171,8 +171,38 @@ pub enum ExecutorMessage {
     TaskUnregister { name: String },
     /// Log a message (works correctly in both headless and TUI mode)
     Log { message: String },
+    /// Update mutagen sync status in the TUI
+    MutagenSyncStatus { sessions: Vec<MutagenSessionProgress> },
+    /// Clear the mutagen sync widget
+    MutagenSyncClear,
     /// Shutdown the executor
     Shutdown,
+}
+
+/// Sync-Phase einer Mutagen-Session (vereinfacht für Display)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum MutagenSyncPhase {
+    /// Noch nicht verbunden (dim)
+    Pending,
+    /// Aktiv: scanning/syncing (gelb)
+    Active,
+    /// Fertig: watching/waiting-for-rescan (grün)
+    Ready,
+    /// Fehler: halted (rot)
+    Halted(String),
+}
+
+/// Progress-Info für eine einzelne Mutagen-Session
+#[derive(Debug, Clone, Serialize)]
+pub struct MutagenSessionProgress {
+    /// Kurzname (z.B. "app", nicht der volle Session-Name mit CRC)
+    pub name: String,
+    /// Aktuelle Phase
+    pub phase: MutagenSyncPhase,
+    /// Lesbarer Status-Text (z.B. "watching", "scanning", "connecting")
+    pub status_label: String,
+    /// Fortschritt in Prozent (0-100)
+    pub percent: u8,
 }
 
 /// Events from TUI back to TypeScript
@@ -207,6 +237,10 @@ pub enum DebugMessage {
     Log {
         message: String,
     },
+    MutagenSyncStatus {
+        session_count: usize,
+    },
+    MutagenSyncClear,
     Shutdown,
     /// PTY output event
     PtyOutput {
@@ -225,4 +259,20 @@ pub enum DebugMessage {
         id: CommandId,
         error: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mutagen_sync_phase_equality() {
+        assert_eq!(MutagenSyncPhase::Ready, MutagenSyncPhase::Ready);
+        assert_eq!(MutagenSyncPhase::Pending, MutagenSyncPhase::Pending);
+        assert_ne!(MutagenSyncPhase::Active, MutagenSyncPhase::Ready);
+        assert_ne!(
+            MutagenSyncPhase::Halted("a".into()),
+            MutagenSyncPhase::Halted("b".into())
+        );
+    }
 }

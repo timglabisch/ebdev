@@ -8,6 +8,7 @@ pub struct HeadlessUI {
     task_starts: std::collections::HashMap<CommandId, (String, std::time::Instant)>,
     current_stage: Option<String>,
     in_parallel: bool,
+    last_mutagen_summary: Option<String>,
 }
 
 impl HeadlessUI {
@@ -17,6 +18,7 @@ impl HeadlessUI {
             task_starts: std::collections::HashMap::new(),
             current_stage: None,
             in_parallel: false,
+            last_mutagen_summary: None,
         }
     }
 }
@@ -100,6 +102,27 @@ impl TaskRunnerUI for HeadlessUI {
 
     fn on_log(&mut self, message: &str) {
         println!("{}", message);
+    }
+
+    fn on_mutagen_sync_status(&mut self, sessions: &[crate::command::MutagenSessionProgress]) {
+        use crate::command::MutagenSyncPhase;
+        let ready = sessions.iter().filter(|s| s.phase == MutagenSyncPhase::Ready).count();
+        let summary = format!("{}/{} ready: {}",
+            ready, sessions.len(),
+            sessions.iter()
+                .map(|s| format!("{}:{}", s.name, s.status_label))
+                .collect::<Vec<_>>().join(", "));
+        if self.last_mutagen_summary.as_deref() != Some(&summary) {
+            println!("\x1b[33m[mutagen]\x1b[0m {}", summary);
+            self.last_mutagen_summary = Some(summary);
+        }
+    }
+
+    fn on_mutagen_sync_clear(&mut self) {
+        if self.last_mutagen_summary.is_some() {
+            println!("\x1b[32m[mutagen]\x1b[0m sync complete");
+            self.last_mutagen_summary = None;
+        }
     }
 
     fn check_quit(&mut self) -> io::Result<bool> {
