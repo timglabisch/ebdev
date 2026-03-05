@@ -203,6 +203,14 @@ pub struct MutagenSessionProgress {
     pub status_label: String,
     /// Fortschritt in Prozent (0-100)
     pub percent: u8,
+    /// Current file being staged (only during staging)
+    pub current_file: Option<String>,
+    /// Number of files received so far
+    pub files_done: u64,
+    /// Total number of files expected
+    pub files_total: u64,
+    /// Total bytes received so far
+    pub total_received_bytes: u64,
 }
 
 /// Events from TUI back to TypeScript

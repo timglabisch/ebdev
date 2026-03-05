@@ -136,6 +136,7 @@ mod tests {
             successful_cycles: 0,
             alpha: mock_endpoint("/local"),
             beta: mock_endpoint("/remote"),
+            staging_progress: None,
         }
     }
 

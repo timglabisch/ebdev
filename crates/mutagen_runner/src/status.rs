@@ -10,6 +10,25 @@ pub struct MutagenSession {
     pub successful_cycles: u64,
     pub alpha: EndpointStatus,
     pub beta: EndpointStatus,
+    #[serde(default)]
+    pub staging_progress: Option<StagingProgress>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagingProgress {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub received_files: u64,
+    #[serde(default)]
+    pub expected_files: u64,
+    #[serde(default)]
+    pub received_size: u64,
+    #[serde(default)]
+    pub expected_size: u64,
+    #[serde(default)]
+    pub total_received_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

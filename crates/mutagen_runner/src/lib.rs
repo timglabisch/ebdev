@@ -13,6 +13,7 @@ pub mod status;
 pub mod state;
 
 pub use state::SessionStatus;
+pub use status::StagingProgress;
 use status::MutagenSession;
 
 #[derive(Debug, Error)]
@@ -230,6 +231,7 @@ impl MutagenBackend for RealMutagen {
 pub struct SessionStatusInfo {
     pub name: String,
     pub status: SessionStatus,
+    pub staging_progress: Option<status::StagingProgress>,
 }
 
 /// Pauses all mutagen sessions belonging to a project.
@@ -376,9 +378,14 @@ where
                     .find_by_name(name)
                     .map(|s| s.status.clone())
                     .unwrap_or(SessionStatus::Disconnected);
+                let staging_progress = current_sessions
+                    .iter()
+                    .find(|s| s.name == *name)
+                    .and_then(|s| s.staging_progress.clone());
                 SessionStatusInfo {
                     name: name.clone(),
                     status,
+                    staging_progress,
                 }
             })
             .collect();
@@ -493,6 +500,7 @@ pub mod test_utils {
             successful_cycles: 0,
             alpha: mock_endpoint("/test"),
             beta: mock_endpoint("/target"),
+            staging_progress: None,
         }
     }
 

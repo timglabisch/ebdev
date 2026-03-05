@@ -110,7 +110,22 @@ impl TaskRunnerUI for HeadlessUI {
         let summary = format!("{}/{} ready: {}",
             ready, sessions.len(),
             sessions.iter()
-                .map(|s| format!("{}:{}", s.name, s.status_label))
+                .map(|s| {
+                    let mut info = format!("{}:{}", s.name, s.status_label);
+                    if s.files_total > 0 {
+                        info.push_str(&format!(" {}% ({}/{})",
+                            s.percent, s.files_done, s.files_total));
+                    }
+                    if let Some(ref file) = s.current_file {
+                        let display = if file.len() > 40 {
+                            format!("…{}", &file[file.len() - 39..])
+                        } else {
+                            file.clone()
+                        };
+                        info.push_str(&format!(" → {}", display));
+                    }
+                    info
+                })
                 .collect::<Vec<_>>().join(", "));
         if self.last_mutagen_summary.as_deref() != Some(&summary) {
             println!("\x1b[33m[mutagen]\x1b[0m {}", summary);

@@ -498,11 +498,7 @@ pub async fn op_mutagen_reconcile(
             if let Some(h) = &handle_clone {
                 let sessions: Vec<MutagenSessionProgress> = statuses
                     .iter()
-                    .map(|s| {
-                        let short_name = s.name.split('-').next().unwrap_or(&s.name).to_string();
-                        let (phase, status_label, percent) = map_session_status(&s.status);
-                        MutagenSessionProgress { name: short_name, phase, status_label, percent }
-                    })
+                    .map(map_status_info)
                     .collect();
                 let _ = h.mutagen_sync_status(sessions);
             }
@@ -544,6 +540,36 @@ pub async fn op_mutagen_pause_all(
         .map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
     Ok(paused as u32)
+}
+
+/// Convert a SessionStatusInfo (from mutagen_runner) into a MutagenSessionProgress (for task_runner UI).
+fn map_status_info(info: &SessionStatusInfo) -> MutagenSessionProgress {
+    let short_name = info.name.split('-').next().unwrap_or(&info.name).to_string();
+    let (phase, status_label, base_percent) = map_session_status(&info.status);
+
+    let (current_file, files_done, files_total, total_received_bytes, percent) =
+        if let Some(sp) = &info.staging_progress {
+            let p = if sp.expected_files > 0 {
+                (sp.received_files as f64 / sp.expected_files as f64 * 100.0) as u8
+            } else {
+                base_percent
+            };
+            let file = if sp.path.is_empty() { None } else { Some(sp.path.clone()) };
+            (file, sp.received_files, sp.expected_files, sp.total_received_size, p)
+        } else {
+            (None, 0, 0, 0, base_percent)
+        };
+
+    MutagenSessionProgress {
+        name: short_name,
+        phase,
+        status_label,
+        percent,
+        current_file,
+        files_done,
+        files_total,
+        total_received_bytes,
+    }
 }
 
 pub(crate) fn map_session_status(status: &SessionStatus) -> (MutagenSyncPhase, String, u8) {

@@ -87,8 +87,8 @@ pub struct TuiUI {
     task_list_area: Rc<Cell<Rect>>,
     /// Stored geometry of the output panel (for mouse hit-testing)
     output_area: Rc<Cell<Rect>>,
-    /// Current mutagen sync status (None = no sync in progress)
-    mutagen_sessions: Option<Vec<crate::command::MutagenSessionProgress>>,
+    /// Stateful mutagen sync widget
+    mutagen_widget: super::widgets::mutagen_sync::MutagenSyncWidget,
 }
 
 impl TuiUI {
@@ -122,7 +122,7 @@ impl TuiUI {
             pinned_task: None,
             task_list_area: Rc::new(Cell::new(Rect::default())),
             output_area: Rc::new(Cell::new(Rect::default())),
-            mutagen_sessions: None,
+            mutagen_widget: super::widgets::mutagen_sync::MutagenSyncWidget::new(),
         })
     }
 
@@ -303,15 +303,12 @@ impl TuiUI {
         let task_list_area_rc = self.task_list_area.clone();
         let output_area_rc = self.output_area.clone();
         let palette = &self.palette;
-        let mutagen_sessions = self.mutagen_sessions.clone();
-
+        let mutagen_widget = &self.mutagen_widget;
         let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| {
             let area = frame.area();
 
-            let mutagen_height = mutagen_sessions.as_ref()
-                .map(|s| if s.is_empty() { 0 } else { s.len() as u16 + 2 })
-                .unwrap_or(0)
+            let mutagen_height = mutagen_widget.height()
                 .min(area.height / 3);
 
             // Main layout: header + mutagen + tasks + help
@@ -329,10 +326,8 @@ impl TuiUI {
             header::draw_header(frame, chunks[0], task_name, tasks, completed_stages);
 
             // Mutagen Sync widget
-            if let Some(ref sessions) = mutagen_sessions {
-                if !sessions.is_empty() {
-                    super::widgets::mutagen_sync::draw_mutagen_sync(frame, chunks[1], sessions);
-                }
+            if !mutagen_widget.is_empty() {
+                mutagen_widget.draw(frame, chunks[1]);
             }
 
             // Tasks area
@@ -629,11 +624,11 @@ impl TaskRunnerUI for TuiUI {
     }
 
     fn on_mutagen_sync_status(&mut self, sessions: &[crate::command::MutagenSessionProgress]) {
-        self.mutagen_sessions = Some(sessions.to_vec());
+        self.mutagen_widget.update(sessions);
     }
 
     fn on_mutagen_sync_clear(&mut self) {
-        self.mutagen_sessions = None;
+        self.mutagen_widget.clear();
     }
 
     fn should_auto_quit(&self) -> bool {
