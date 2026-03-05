@@ -10,6 +10,21 @@ pub struct MutagenSession {
     pub successful_cycles: u64,
     pub alpha: EndpointStatus,
     pub beta: EndpointStatus,
+    /// Watch configuration reported by mutagen (contains mode and pollingInterval)
+    #[serde(default)]
+    pub watch: Option<WatchConfig>,
+}
+
+/// Watch configuration as reported by mutagen's JSON output
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchConfig {
+    /// Watch mode (e.g., "force-poll", "portable", "no-watch")
+    #[serde(default)]
+    pub mode: String,
+    /// Polling interval in seconds (only meaningful when mode is "force-poll")
+    #[serde(default)]
+    pub polling_interval: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +87,13 @@ impl MutagenSession {
         self.alpha.staging_progress.as_ref()
             .or(self.beta.staging_progress.as_ref())
     }
+
+    /// Returns the polling interval if this session uses force-poll watch mode.
+    pub fn polling_interval(&self) -> Option<u32> {
+        self.watch.as_ref()
+            .filter(|w| w.mode == "force-poll")
+            .map(|w| w.polling_interval)
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +139,9 @@ mod tests {
         assert!(s.alpha.staging_progress.is_none());
         assert!(s.beta.staging_progress.is_none());
         assert!(s.staging_progress().is_none());
+        // No watch field in JSON → polling_interval() returns None
+        assert!(s.watch.is_none());
+        assert_eq!(s.polling_interval(), None);
     }
 
     #[test]
@@ -254,5 +279,69 @@ mod tests {
         let sessions: Vec<MutagenSession> = serde_json::from_str(json).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "test-aabb");
+    }
+
+    #[test]
+    fn test_deserialize_watch_force_poll() {
+        let json = r#"[{
+            "identifier": "abc123",
+            "name": "app-12345678",
+            "status": "watching",
+            "alpha": {
+                "protocol": "local",
+                "path": "/test",
+                "connected": true,
+                "scanned": true
+            },
+            "beta": {
+                "protocol": "docker",
+                "path": "/app",
+                "host": "container-id",
+                "connected": true,
+                "scanned": true
+            },
+            "watch": {
+                "mode": "force-poll",
+                "pollingInterval": 5
+            }
+        }]"#;
+
+        let sessions: Vec<MutagenSession> = serde_json::from_str(json).unwrap();
+        let s = &sessions[0];
+        let watch = s.watch.as_ref().unwrap();
+        assert_eq!(watch.mode, "force-poll");
+        assert_eq!(watch.polling_interval, 5);
+        assert_eq!(s.polling_interval(), Some(5));
+    }
+
+    #[test]
+    fn test_deserialize_watch_portable() {
+        let json = r#"[{
+            "identifier": "abc123",
+            "name": "app-12345678",
+            "status": "watching",
+            "alpha": {
+                "protocol": "local",
+                "path": "/test",
+                "connected": true,
+                "scanned": true
+            },
+            "beta": {
+                "protocol": "docker",
+                "path": "/app",
+                "host": "container-id",
+                "connected": true,
+                "scanned": true
+            },
+            "watch": {
+                "mode": "portable",
+                "pollingInterval": 0
+            }
+        }]"#;
+
+        let sessions: Vec<MutagenSession> = serde_json::from_str(json).unwrap();
+        let s = &sessions[0];
+        // portable mode → not polling → polling_interval() returns None
+        assert_eq!(s.polling_interval(), None);
     }
 }

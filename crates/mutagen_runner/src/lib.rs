@@ -392,9 +392,7 @@ where
                         s.alpha.directories + s.beta.directories,
                     ))
                     .unwrap_or((0, 0));
-                let polling_interval = desired.sessions.iter()
-                    .find(|d| d.name == *name)
-                    .and_then(|d| if d.polling.enabled { Some(d.polling.interval) } else { None });
+                let polling_interval = raw.and_then(|s| s.polling_interval());
                 SessionStatusInfo {
                     name: name.clone(),
                     status,
@@ -517,6 +515,7 @@ pub mod test_utils {
             successful_cycles: 0,
             alpha: mock_endpoint("/test"),
             beta: mock_endpoint("/target"),
+            watch: None,
         }
     }
 
