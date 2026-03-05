@@ -51,6 +51,12 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
 
+    // Types braucht keine Config
+    if matches!(cli.command, Commands::Types) {
+        print!("{}", ebdev_toolchain_deno::EBDEV_TYPES);
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // Completions braucht keine Config
     if let Commands::Completions { shell } = &cli.command {
         return completions::handle_completions(shell.as_deref());
@@ -464,6 +470,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             }
         }
         // Handled earlier before config load
+        Commands::Types => unreachable!(),
         Commands::Completions { .. } => unreachable!(),
         Commands::RemoteBridge => unreachable!(),
         Commands::Remote { .. } => unreachable!(),

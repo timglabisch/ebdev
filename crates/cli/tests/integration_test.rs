@@ -232,6 +232,30 @@ export default defineConfig({
 }
 
 #[test]
+fn test_types_command() {
+    // types braucht keine Config — funktioniert überall
+    let temp_dir = TempDir::new().unwrap();
+
+    ebdev()
+        .current_dir(temp_dir.path())
+        .args(["types"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("declare module"))
+        .stdout(predicate::str::contains("defineConfig"));
+}
+
+#[test]
+fn test_types_shows_in_help() {
+    ebdev()
+        .args(["--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("types"))
+        .stdout(predicate::str::contains("TypeScript type definitions"));
+}
+
+#[test]
 fn test_missing_config() {
     let temp_dir = TempDir::new().unwrap();
 

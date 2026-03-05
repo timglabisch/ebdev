@@ -91,6 +91,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: RemoteCommands,
     },
+    /// Print TypeScript type definitions for .ebdev.ts to stdout
+    Types,
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for (zsh, bash, fish). Omit for setup instructions.
