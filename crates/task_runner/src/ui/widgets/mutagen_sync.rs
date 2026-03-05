@@ -172,9 +172,10 @@ struct SessionTracker {
 
 impl SessionTracker {
     fn new(session: MutagenSessionProgress) -> Self {
+        let expanded = session.phase == MutagenSyncPhase::Active && session.current_file.is_some();
         let mut tracker = Self {
             latest: session,
-            expanded: false,
+            expanded,
             dir_tracker: DirectoryTracker::new(),
         };
         tracker.dir_tracker.update(&tracker.latest);
@@ -222,12 +223,27 @@ impl SessionTracker {
         ];
         spans.extend(progress_bar(s.percent, BAR_WIDTH, ps.bar_style));
 
+        if let Some(interval) = s.polling_interval {
+            spans.push(Span::styled(
+                format!("  poll:{}s", interval),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
         if s.files_total > 0 {
             spans.push(Span::styled(
                 format!("  {:>3}%  {}/{}",
                     s.percent,
                     format_count(s.files_done),
                     format_count(s.files_total),
+                ),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else if s.endpoint_files > 0 || s.endpoint_dirs > 0 {
+            spans.push(Span::styled(
+                format!("  {} files, {} dirs",
+                    format_count(s.endpoint_files),
+                    format_count(s.endpoint_dirs),
                 ),
                 Style::default().fg(Color::DarkGray),
             ));
@@ -276,6 +292,24 @@ impl SessionTracker {
         }
 
         lines
+    }
+}
+
+/// Helper to create a MutagenSessionProgress for tests.
+#[cfg(test)]
+fn test_session(name: &str, phase: MutagenSyncPhase, status: &str, percent: u8) -> MutagenSessionProgress {
+    MutagenSessionProgress {
+        name: name.to_string(),
+        phase,
+        status_label: status.to_string(),
+        percent,
+        current_file: None,
+        files_done: 0,
+        files_total: 0,
+        total_received_bytes: 0,
+        endpoint_files: 0,
+        endpoint_dirs: 0,
+        polling_interval: None,
     }
 }
 
@@ -378,5 +412,256 @@ impl MutagenSyncWidget {
                 .title(title),
         );
         frame.render_widget(widget, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // Helper function tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_count_plain() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(1), "1");
+        assert_eq!(format_count(999), "999");
+    }
+
+    #[test]
+    fn test_format_count_thousands() {
+        assert_eq!(format_count(1_000), "1.0k");
+        assert_eq!(format_count(1_500), "1.5k");
+        assert_eq!(format_count(8_200), "8.2k");
+        assert_eq!(format_count(999_999), "1000.0k");
+    }
+
+    #[test]
+    fn test_format_count_millions() {
+        assert_eq!(format_count(1_000_000), "1.0M");
+        assert_eq!(format_count(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn test_first_dir_segment_nested() {
+        assert_eq!(first_dir_segment("vendor/autoload.php"), "vendor/");
+        assert_eq!(first_dir_segment(".phpstan/cache/file.php"), ".phpstan/");
+        assert_eq!(first_dir_segment("/src/main.rs"), "src/");
+    }
+
+    #[test]
+    fn test_first_dir_segment_root_file() {
+        assert_eq!(first_dir_segment("file.txt"), ".");
+        assert_eq!(first_dir_segment("Makefile"), ".");
+    }
+
+    #[test]
+    fn test_truncate_path_short() {
+        assert_eq!(truncate_path("src/main.rs", 30), "src/main.rs");
+    }
+
+    #[test]
+    fn test_truncate_path_long() {
+        let long = "vendor/composer/autoload_classmap.php";
+        let result = truncate_path(long, 20);
+        assert!(result.len() <= 20);
+        assert!(result.starts_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_path_zero_width() {
+        assert_eq!(truncate_path("anything", 0), "");
+    }
+
+    // ========================================================================
+    // DirectoryTracker tests
+    // ========================================================================
+
+    #[test]
+    fn test_directory_tracker_basic() {
+        let mut tracker = DirectoryTracker::new();
+        let mut session = test_session("app", MutagenSyncPhase::Active, "staging", 50);
+        session.current_file = Some("vendor/autoload.php".to_string());
+        session.files_done = 100;
+        session.files_total = 1000;
+
+        tracker.update(&session);
+
+        assert_eq!(tracker.total_attributed(), 100);
+        let dirs = tracker.top_dirs();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, "vendor/");
+        assert_eq!(dirs[0].1, 100);
+    }
+
+    #[test]
+    fn test_directory_tracker_delta_accumulation() {
+        let mut tracker = DirectoryTracker::new();
+        let mut session = test_session("app", MutagenSyncPhase::Active, "staging", 50);
+
+        // First update: 100 files in vendor/
+        session.current_file = Some("vendor/file1.php".to_string());
+        session.files_done = 100;
+        tracker.update(&session);
+
+        // Second update: 50 more files now in src/
+        session.current_file = Some("src/main.rs".to_string());
+        session.files_done = 150;
+        tracker.update(&session);
+
+        let dirs = tracker.top_dirs();
+        assert_eq!(dirs.len(), 2);
+        // vendor/ has 100, src/ has 50 → sorted by count desc
+        assert_eq!(dirs[0].0, "vendor/");
+        assert_eq!(dirs[0].1, 100);
+        assert_eq!(dirs[1].0, "src/");
+        assert_eq!(dirs[1].1, 50);
+    }
+
+    #[test]
+    fn test_directory_tracker_no_delta() {
+        let mut tracker = DirectoryTracker::new();
+        let mut session = test_session("app", MutagenSyncPhase::Active, "staging", 50);
+        session.current_file = Some("vendor/file.php".to_string());
+        session.files_done = 100;
+        tracker.update(&session);
+
+        // Same files_done → no delta
+        session.current_file = Some("src/main.rs".to_string());
+        tracker.update(&session);
+
+        assert_eq!(tracker.top_dirs().len(), 1); // only vendor/
+    }
+
+    #[test]
+    fn test_directory_tracker_clear() {
+        let mut tracker = DirectoryTracker::new();
+        let mut session = test_session("app", MutagenSyncPhase::Active, "staging", 50);
+        session.current_file = Some("vendor/file.php".to_string());
+        session.files_done = 100;
+        tracker.update(&session);
+
+        tracker.clear();
+        assert_eq!(tracker.total_attributed(), 0);
+        assert!(tracker.current_path.is_none());
+        assert!(tracker.top_dirs().is_empty());
+    }
+
+    // ========================================================================
+    // MutagenSyncWidget tests
+    // ========================================================================
+
+    #[test]
+    fn test_widget_empty() {
+        let widget = MutagenSyncWidget::new();
+        assert!(widget.is_empty());
+        assert_eq!(widget.height(), 0);
+    }
+
+    #[test]
+    fn test_widget_update_and_height() {
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[
+            test_session("app", MutagenSyncPhase::Ready, "watching", 100),
+            test_session("worker", MutagenSyncPhase::Ready, "watching", 100),
+        ]);
+        assert!(!widget.is_empty());
+        // 2 sessions (collapsed, 1 line each) + 2 border = 4
+        assert_eq!(widget.height(), 4);
+    }
+
+    #[test]
+    fn test_widget_removes_stale_sessions() {
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[
+            test_session("app", MutagenSyncPhase::Ready, "watching", 100),
+            test_session("worker", MutagenSyncPhase::Ready, "watching", 100),
+        ]);
+        assert_eq!(widget.height(), 4);
+
+        // Update with only one session → other is removed
+        widget.update(&[
+            test_session("app", MutagenSyncPhase::Ready, "watching", 100),
+        ]);
+        assert_eq!(widget.height(), 3); // 1 session + 2 border
+    }
+
+    #[test]
+    fn test_widget_auto_expand_on_staging() {
+        let mut widget = MutagenSyncWidget::new();
+        let mut staging = test_session("app", MutagenSyncPhase::Active, "staging-beta", 50);
+        staging.current_file = Some("vendor/file.php".to_string());
+        staging.files_done = 100;
+        staging.files_total = 1000;
+
+        widget.update(&[staging]);
+        // Expanded: 1 header + 1 dir + 1 current file + 2 border = 5
+        assert!(widget.height() > 3);
+    }
+
+    #[test]
+    fn test_widget_auto_collapse_on_ready() {
+        let mut widget = MutagenSyncWidget::new();
+
+        // First: staging with file info → auto-expand
+        let mut staging = test_session("app", MutagenSyncPhase::Active, "staging-beta", 50);
+        staging.current_file = Some("vendor/file.php".to_string());
+        staging.files_done = 100;
+        staging.files_total = 1000;
+        widget.update(&[staging]);
+        let expanded_height = widget.height();
+
+        // Then: ready → auto-collapse
+        widget.update(&[test_session("app", MutagenSyncPhase::Ready, "watching", 100)]);
+        assert!(widget.height() < expanded_height);
+        assert_eq!(widget.height(), 3); // 1 session + 2 border
+    }
+
+    #[test]
+    fn test_widget_clear() {
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[test_session("app", MutagenSyncPhase::Ready, "watching", 100)]);
+        assert!(!widget.is_empty());
+
+        widget.clear();
+        assert!(widget.is_empty());
+        assert_eq!(widget.height(), 0);
+    }
+
+    #[test]
+    fn test_widget_shows_polling_in_header() {
+        let mut session = test_session("app", MutagenSyncPhase::Ready, "watching", 100);
+        session.polling_interval = Some(10);
+
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[session]);
+
+        let tracker = widget.trackers.get("app").unwrap();
+        let line = tracker.render_header_line();
+
+        // Check that one of the spans contains "poll:10s"
+        let has_poll = line.spans.iter().any(|span| {
+            span.content.contains("poll:10s")
+        });
+        assert!(has_poll, "Expected 'poll:10s' in header line spans: {:?}",
+            line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_widget_no_polling_in_header() {
+        let session = test_session("app", MutagenSyncPhase::Ready, "watching", 100);
+
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[session]);
+
+        let tracker = widget.trackers.get("app").unwrap();
+        let line = tracker.render_header_line();
+
+        let has_poll = line.spans.iter().any(|span| {
+            span.content.contains("poll:")
+        });
+        assert!(!has_poll, "Should not contain 'poll:' in header line when polling is disabled");
     }
 }

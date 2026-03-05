@@ -112,9 +112,15 @@ impl TaskRunnerUI for HeadlessUI {
             sessions.iter()
                 .map(|s| {
                     let mut info = format!("{}:{}", s.name, s.status_label);
+                    if let Some(interval) = s.polling_interval {
+                        info.push_str(&format!("[poll:{}s]", interval));
+                    }
                     if s.files_total > 0 {
                         info.push_str(&format!(" {}% ({}/{})",
                             s.percent, s.files_done, s.files_total));
+                    } else if s.endpoint_files > 0 || s.endpoint_dirs > 0 {
+                        info.push_str(&format!(" {} files, {} dirs",
+                            s.endpoint_files, s.endpoint_dirs));
                     }
                     if let Some(ref file) = s.current_file {
                         let display = if file.len() > 40 {

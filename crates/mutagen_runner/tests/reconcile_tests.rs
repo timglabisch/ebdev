@@ -184,11 +184,17 @@ async fn test_status_callback_receives_updates() {
             name: "frontend-12345678".to_string(),
             status: SessionStatus::Watching,
             staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
         },
         SessionStatusInfo {
             name: "backend-12345678".to_string(),
             status: SessionStatus::Scanning,
             staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
         },
     ]);
 

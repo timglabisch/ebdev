@@ -1,6 +1,6 @@
 use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
-use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, SessionStatus, SessionStatusInfo, SyncMode};
+use ebdev_mutagen_runner::{reconcile_sessions, state::DesiredSession, PollingConfig, SessionStatus, SessionStatusInfo, StagingProgress, SyncMode};
 use ebdev_task_runner::{Command, MutagenSessionProgress, MutagenSyncPhase, OutputEvent, OutputStream, TaskRunnerHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -423,6 +423,19 @@ pub struct MutagenSessionArg {
     directory: String,
     mode: Option<String>,
     ignore: Option<Vec<String>>,
+    polling: Option<PollingArg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PollingArg {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_polling_interval")]
+    interval: u32,
+}
+
+fn default_polling_interval() -> u32 {
+    10
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,14 +490,21 @@ pub async fn op_mutagen_reconcile(
             let alpha = base_dir.join(&s.directory);
             let session_name = format!("{}-{:08x}", s.name, project_crc32);
 
-            DesiredSession::new(
+            let mut session = DesiredSession::new(
                 session_name,
                 s.name,
                 alpha,
                 s.target,
                 mode,
                 s.ignore.unwrap_or_default(),
-            )
+            );
+            if let Some(p) = s.polling {
+                session.polling = PollingConfig {
+                    enabled: p.enabled,
+                    interval: p.interval,
+                };
+            }
+            session
         })
         .collect();
 
@@ -569,6 +589,9 @@ fn map_status_info(info: &SessionStatusInfo) -> MutagenSessionProgress {
         files_done,
         files_total,
         total_received_bytes,
+        endpoint_files: info.endpoint_files,
+        endpoint_dirs: info.endpoint_dirs,
+        polling_interval: info.polling_interval,
     }
 }
 
@@ -1155,6 +1178,205 @@ mod tests {
         assert_eq!(phase, MutagenSyncPhase::Pending);
         assert_eq!(label, "custom-state");
         assert_eq!(percent, 10);
+    }
+
+    // ========================================================================
+    // map_status_info tests
+    // ========================================================================
+
+    #[test]
+    fn test_map_status_info_short_name_extraction() {
+        let info = SessionStatusInfo {
+            name: "frontend-12345678".to_string(),
+            status: SessionStatus::Watching,
+            staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.name, "frontend");
+    }
+
+    #[test]
+    fn test_map_status_info_without_staging() {
+        let info = SessionStatusInfo {
+            name: "app-aabb".to_string(),
+            status: SessionStatus::Scanning,
+            staging_progress: None,
+            endpoint_files: 1200,
+            endpoint_dirs: 50,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.phase, MutagenSyncPhase::Active);
+        assert_eq!(result.status_label, "scanning");
+        assert_eq!(result.percent, 40); // base_percent for scanning
+        assert!(result.current_file.is_none());
+        assert_eq!(result.files_done, 0);
+        assert_eq!(result.files_total, 0);
+        assert_eq!(result.endpoint_files, 1200);
+        assert_eq!(result.endpoint_dirs, 50);
+    }
+
+    #[test]
+    fn test_map_status_info_with_staging_progress() {
+        let info = SessionStatusInfo {
+            name: "allother-12345678".to_string(),
+            status: SessionStatus::Syncing,
+            staging_progress: Some(StagingProgress {
+                path: "vendor/autoload.php".to_string(),
+                received_files: 5000,
+                expected_files: 10000,
+                received_size: 1024,
+                expected_size: 1024,
+                total_received_size: 500_000,
+            }),
+            endpoint_files: 80000,
+            endpoint_dirs: 2000,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.name, "allother");
+        assert_eq!(result.percent, 50); // 5000/10000
+        assert_eq!(result.current_file, Some("vendor/autoload.php".to_string()));
+        assert_eq!(result.files_done, 5000);
+        assert_eq!(result.files_total, 10000);
+        assert_eq!(result.total_received_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_map_status_info_staging_empty_path() {
+        let info = SessionStatusInfo {
+            name: "src-aabb".to_string(),
+            status: SessionStatus::Syncing,
+            staging_progress: Some(StagingProgress {
+                path: "".to_string(),
+                received_files: 100,
+                expected_files: 200,
+                received_size: 0,
+                expected_size: 0,
+                total_received_size: 0,
+            }),
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert!(result.current_file.is_none()); // empty path → None
+        assert_eq!(result.percent, 50);
+    }
+
+    #[test]
+    fn test_map_status_info_staging_zero_expected() {
+        let info = SessionStatusInfo {
+            name: "x-1234".to_string(),
+            status: SessionStatus::Syncing,
+            staging_progress: Some(StagingProgress {
+                path: "foo.txt".to_string(),
+                received_files: 0,
+                expected_files: 0, // zero → use base_percent
+                received_size: 0,
+                expected_size: 0,
+                total_received_size: 0,
+            }),
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.percent, 70); // base_percent for Syncing
+    }
+
+    #[test]
+    fn test_map_status_info_with_polling() {
+        let info = SessionStatusInfo {
+            name: "app-12345678".to_string(),
+            status: SessionStatus::Watching,
+            staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: Some(10),
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.polling_interval, Some(10));
+    }
+
+    #[test]
+    fn test_map_status_info_without_polling() {
+        let info = SessionStatusInfo {
+            name: "app-12345678".to_string(),
+            status: SessionStatus::Watching,
+            staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.polling_interval, None);
+    }
+
+    // ========================================================================
+    // Pipeline tests: JSON → MutagenSessionArg → DesiredSession → build_create_args
+    // ========================================================================
+
+    /// Simulates the full pipeline: JSON → MutagenSessionArg → DesiredSession → build_create_args
+    fn pipeline_to_args(json: serde_json::Value) -> Vec<String> {
+        use ebdev_mutagen_runner::build_create_args;
+
+        let arg: MutagenSessionArg = serde_json::from_value(json).unwrap();
+        let mut session = DesiredSession::new(
+            format!("{}-{:08x}", arg.name, 0x12345678u32),
+            arg.name.clone(),
+            std::path::PathBuf::from("/base").join(&arg.directory),
+            arg.target.clone(),
+            SyncMode::TwoWay,
+            arg.ignore.unwrap_or_default(),
+        );
+        if let Some(p) = arg.polling {
+            session.polling = PollingConfig {
+                enabled: p.enabled,
+                interval: p.interval,
+            };
+        }
+        build_create_args(&session, false)
+    }
+
+    #[test]
+    fn test_polling_pipeline_enabled() {
+        let args = pipeline_to_args(serde_json::json!({
+            "name": "app",
+            "target": "docker://container/path",
+            "directory": "src",
+            "polling": { "enabled": true, "interval": 5 }
+        }));
+        assert!(args.contains(&"--watch-mode=force-poll".to_string()),
+            "Expected --watch-mode=force-poll in args: {:?}", args);
+        assert!(args.contains(&"--watch-polling-interval=5".to_string()),
+            "Expected --watch-polling-interval=5 in args: {:?}", args);
+    }
+
+    #[test]
+    fn test_polling_pipeline_default() {
+        let args = pipeline_to_args(serde_json::json!({
+            "name": "app",
+            "target": "docker://container/path",
+            "directory": "src"
+        }));
+        assert!(!args.iter().any(|a| a.starts_with("--watch-mode")),
+            "Expected no --watch-mode in args: {:?}", args);
+    }
+
+    #[test]
+    fn test_polling_pipeline_disabled() {
+        let args = pipeline_to_args(serde_json::json!({
+            "name": "app",
+            "target": "docker://container/path",
+            "directory": "src",
+            "polling": { "enabled": false }
+        }));
+        assert!(!args.iter().any(|a| a.starts_with("--watch-mode")),
+            "Expected no --watch-mode in args: {:?}", args);
     }
 }
 

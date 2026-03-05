@@ -232,6 +232,12 @@ pub struct SessionStatusInfo {
     pub name: String,
     pub status: SessionStatus,
     pub staging_progress: Option<status::StagingProgress>,
+    /// Sum of files across both endpoints (grows during scanning)
+    pub endpoint_files: u64,
+    /// Sum of directories across both endpoints (grows during scanning)
+    pub endpoint_dirs: u64,
+    /// Polling interval in seconds, if polling is enabled for this session
+    pub polling_interval: Option<u32>,
 }
 
 /// Pauses all mutagen sessions belonging to a project.
@@ -378,14 +384,24 @@ where
                     .find_by_name(name)
                     .map(|s| s.status.clone())
                     .unwrap_or(SessionStatus::Disconnected);
-                let staging_progress = current_sessions
-                    .iter()
-                    .find(|s| s.name == *name)
-                    .and_then(|s| s.staging_progress.clone());
+                let raw = current_sessions.iter().find(|s| s.name == *name);
+                let staging_progress = raw.and_then(|s| s.staging_progress().cloned());
+                let (endpoint_files, endpoint_dirs) = raw
+                    .map(|s| (
+                        s.alpha.files + s.beta.files,
+                        s.alpha.directories + s.beta.directories,
+                    ))
+                    .unwrap_or((0, 0));
+                let polling_interval = desired.sessions.iter()
+                    .find(|d| d.name == *name)
+                    .and_then(|d| if d.polling.enabled { Some(d.polling.interval) } else { None });
                 SessionStatusInfo {
                     name: name.clone(),
                     status,
                     staging_progress,
+                    endpoint_files,
+                    endpoint_dirs,
+                    polling_interval,
                 }
             })
             .collect();
@@ -488,6 +504,7 @@ pub mod test_utils {
             directories: 0,
             files: 0,
             total_file_size: 0,
+            staging_progress: None,
         }
     }
 
@@ -500,7 +517,6 @@ pub mod test_utils {
             successful_cycles: 0,
             alpha: mock_endpoint("/test"),
             beta: mock_endpoint("/target"),
-            staging_progress: None,
         }
     }
 

@@ -649,6 +649,8 @@ declare module "ebdev" {
     mode?: SyncMode;
     /** Patterns to ignore during sync */
     ignore?: string[];
+    /** Polling configuration (for network filesystems or when native watching doesn't work) */
+    polling?: PollingConfig;
   }
 
   /**

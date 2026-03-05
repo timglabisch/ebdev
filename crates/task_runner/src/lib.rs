@@ -775,6 +775,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
             command::MutagenSessionProgress {
                 name: "worker".into(),
@@ -785,6 +788,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
         ];
         handle.mutagen_sync_status(sessions).unwrap();
@@ -831,6 +837,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
             command::MutagenSessionProgress {
                 name: "s2".into(),
@@ -841,6 +850,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
             command::MutagenSessionProgress {
                 name: "s3".into(),
@@ -851,6 +863,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
             command::MutagenSessionProgress {
                 name: "s4".into(),
@@ -861,6 +876,9 @@ mod tests {
                 files_done: 0,
                 files_total: 0,
                 total_received_bytes: 0,
+                endpoint_files: 0,
+                endpoint_dirs: 0,
+                polling_interval: None,
             },
         ];
         handle.mutagen_sync_status(sessions).unwrap();

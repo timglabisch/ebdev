@@ -7,8 +7,8 @@
 //! Run with: cargo test -p ebdev-mutagen-runner --test integration_tests -- --ignored
 
 use ebdev_mutagen_runner::{
-    reconcile_sessions, state::DesiredSession, MutagenBackend, RealMutagen, SessionStatusInfo,
-    SyncMode,
+    reconcile_sessions, state::DesiredSession, MutagenBackend, PollingConfig, RealMutagen,
+    SessionStatusInfo, SyncMode,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -410,5 +410,61 @@ async fn test_real_sync_modes() {
 
     // Cleanup
     let _ = reconcile_sessions(&mutagen_bin, vec![], project_crc32, |_| {}).await;
+    remove_test_container(&container);
+}
+
+#[tokio::test]
+#[ignore = "requires mutagen binary and docker"]
+async fn test_real_polling_session() {
+    let mutagen_bin = match find_mutagen() {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping: mutagen not found");
+            return;
+        }
+    };
+
+    cleanup_test_sessions(&mutagen_bin).await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let alpha_path = temp_dir.path().join("polling");
+    std::fs::create_dir_all(&alpha_path).unwrap();
+
+    let container = match create_test_container("polling") {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Skipping: {}", e);
+            return;
+        }
+    };
+
+    let backend = RealMutagen::new(mutagen_bin.clone());
+    let project_crc32: u32 = 0xca_fe_00_11;
+
+    let mut session = DesiredSession::new(
+        format!("test-polling-{:08x}", project_crc32),
+        "test-polling".to_string(),
+        alpha_path,
+        format!("docker://{}//sync", container),
+        SyncMode::TwoWay,
+        vec![],
+    );
+    session.polling = PollingConfig {
+        enabled: true,
+        interval: 5,
+    };
+
+    let result = backend.create_session_from_desired(&session, false).await;
+    assert!(result.is_ok(), "Failed to create polling session: {:?}", result);
+
+    // Verify session exists
+    let sessions = backend.list_sessions().await.unwrap();
+    let found = sessions.iter().find(|s| s.name.contains("test-polling"));
+    assert!(found.is_some(), "Polling session not found after creation");
+
+    // Cleanup
+    if let Some(s) = found {
+        let _ = backend.terminate_session(&s.identifier).await;
+    }
     remove_test_container(&container);
 }

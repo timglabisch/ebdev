@@ -548,6 +548,50 @@ await log("message");  // preferred over console.log for TUI compatibility
 
 ### Mutagen Sync
 
+Declarative file synchronization between local directories and Docker containers via [Mutagen](https://mutagen.io/).
+
+#### Configuration
+
+Define sync sessions in `defineConfig` with optional defaults:
+
+```typescript
+import { defineConfig, presets, gitignore, mergeIgnore } from "ebdev";
+
+export default defineConfig({
+  toolchain: {
+    ebdev: "0.0.5",
+    node: "22.12.0",
+    mutagen: "0.18.1",
+  },
+  mutagen: {
+    defaults: {
+      mode: "two-way",
+      ignore: mergeIgnore(gitignore(), [".ebdev"]),
+      polling: { enabled: false },
+    },
+    sync: [
+      {
+        ...presets.php,
+        name: "app",
+        target: "docker://app/var/www",
+      },
+      {
+        ...presets.node,
+        name: "frontend",
+        target: "docker://app/var/www/frontend",
+        directory: "./frontend",
+        mode: "one-way-replica",
+        polling: { enabled: true, interval: 5 },
+      },
+    ],
+  },
+});
+```
+
+Defaults from `mutagen.defaults` are merged into each sync project automatically. Per-project values override defaults. Ignore patterns from defaults and project are combined (not replaced).
+
+#### Runtime API
+
 ```typescript
 import { mutagenReconcile, mutagenPauseAll, MutagenSession } from "ebdev";
 
@@ -556,12 +600,13 @@ const sessions: MutagenSession[] = [
     name: "app",
     target: "docker://container/var/www",
     directory: "./src",
-    mode: "two-way",             // "two-way" | "one-way-create" | "one-way-replica"
+    mode: "two-way",
     ignore: [".git", "node_modules", "dist"],
+    polling: { enabled: true, interval: 10 },
   },
 ];
 
-// Create/update sessions to match desired state
+// Create/update sessions to match desired state (waits until all are synced)
 await mutagenReconcile(sessions);
 
 // Terminate all sessions (cleanup)
@@ -571,7 +616,89 @@ await mutagenReconcile([]);
 await mutagenPauseAll();
 ```
 
-#### Safe shutdown pattern
+#### Sync Modes
+
+| Mode | Description |
+|------|-------------|
+| `"two-way"` | Bidirectional sync — changes on either side are propagated (default) |
+| `"one-way-create"` | Local to remote, only creates new files (does not delete or overwrite) |
+| `"one-way-replica"` | Local to remote, exact mirror (remote files not on local are deleted) |
+
+#### Polling
+
+By default, Mutagen uses native filesystem watching (fsevents/inotify). On network filesystems or in environments where native watching is unreliable, enable polling:
+
+```typescript
+{
+  polling: {
+    enabled: true,   // use polling instead of native filesystem watching
+    interval: 10,    // polling interval in seconds (default: 10)
+  },
+}
+```
+
+#### Presets
+
+Language-specific presets provide common ignore patterns:
+
+```typescript
+import { presets } from "ebdev";
+
+// Available presets:
+presets.node    // ignores: node_modules, .npm, .yarn, dist, build, .next, .nuxt, .cache, coverage, ...
+presets.php     // ignores: vendor, .phpunit.cache, storage/framework/*, bootstrap/cache, ...
+presets.rust    // ignores: target, Cargo.lock
+presets.python  // ignores: __pycache__, .venv, venv, .pytest_cache, *.pyc, ...
+presets.go      // ignores: vendor, bin
+```
+
+Spread presets into sync projects and override as needed:
+
+```typescript
+{
+  ...presets.php,
+  name: "app",
+  target: "docker://app/var/www",
+  ignore: mergeIgnore(presets.php.ignore, [".phpstan"]),
+}
+```
+
+#### Ignore Utilities
+
+```typescript
+import { gitignore, mergeIgnore } from "ebdev";
+
+// Common VCS/editor patterns (.git, .DS_Store, .idea, .vscode, *.swp, ...)
+gitignore()
+
+// Merge multiple ignore lists (deduplicates)
+mergeIgnore(gitignore(), presets.php.ignore, ["custom-dir"])
+```
+
+`.ebdev` is always ignored automatically — no need to add it manually.
+
+#### TUI Progress
+
+During sync, the TUI shows a live progress widget:
+
+```
+┌ Mutagen Sync ─── 57% ──────────────────────────────────────┐
+│  ✓ src          watching     ██████████                     │
+│  ● allother     staging-beta ████░░░░░░  14%  11.8k/81.3k  │
+│    vendor/               ████████████░░░░  68%  (8.2k)     │
+│    .phpstan/cache/       █████░░░░░░░░░░░  22%  (2.6k)     │
+│    public/               ██░░░░░░░░░░░░░░   8%  (940)      │
+│    → .phpstan/cache/PHPStan/…/082930abcdef.php              │
+│  ◌ worker       connecting   ░░░░░░░░░░                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Scanning** sessions show file/directory counts as they grow
+- **Staging** sessions auto-expand to show per-directory breakdown and current file
+- **Ready** sessions collapse to a single line
+- Border color reflects overall state: green (all ready), yellow (syncing), red (halted)
+
+#### Safe Shutdown
 
 Always pause mutagen sessions **before** removing Docker containers/volumes.
 Otherwise mutagen may see empty remote endpoints and sync deletions back to local.

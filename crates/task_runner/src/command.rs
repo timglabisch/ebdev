@@ -211,6 +211,12 @@ pub struct MutagenSessionProgress {
     pub files_total: u64,
     /// Total bytes received so far
     pub total_received_bytes: u64,
+    /// Sum of files across both endpoints (grows during scanning)
+    pub endpoint_files: u64,
+    /// Sum of directories across both endpoints (grows during scanning)
+    pub endpoint_dirs: u64,
+    /// Polling interval in seconds, if polling is enabled for this session
+    pub polling_interval: Option<u32>,
 }
 
 /// Events from TUI back to TypeScript
