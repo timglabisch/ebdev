@@ -111,6 +111,7 @@ Binaries are installed to `.ebdev/toolchain/binary/<name>/v<version>/` and added
 | `ebdev mutagen status` | Show mutagen sync sessions |
 | `ebdev mutagen terminate` | Terminate project's sync sessions |
 | `ebdev remote run <container> <cmd>` | Execute command in Docker container |
+| `ebdev types` | Print TypeScript type definitions (for IDE autocompletion) |
 | `ebdev completions zsh` | Generate shell completions |
 
 ### Run Flags
@@ -714,6 +715,16 @@ export async function down() {
 `mutagenReconcile(sessions)` automatically resumes previously paused sessions that
 match the desired state, so calling `mutagenPauseAll()` before `mutagenReconcile(sessions)`
 is always safe (e.g. on restart after Ctrl+C).
+
+## Type Definitions
+
+Export the embedded TypeScript type definitions for IDE autocompletion in `.ebdev.ts`:
+
+```bash
+ebdev types > ebdev.d.ts
+```
+
+The generated `ebdev.d.ts` provides types for `defineConfig`, `defineTask`, `arg`, `flag`, `exec`, `docker`, and all other ebdev APIs. Add it to `.gitignore` — it can be regenerated anytime and matches the installed ebdev version.
 
 ## Shell Completions
 
