@@ -8,6 +8,9 @@ pub struct MutagenSession {
     pub status: String,
     #[serde(default)]
     pub successful_cycles: u64,
+    /// Sync mode as reported by mutagen (e.g., "two-way-resolved", "one-way-safe", "one-way-replica")
+    #[serde(default)]
+    pub mode: String,
     pub alpha: EndpointStatus,
     pub beta: EndpointStatus,
     /// Watch configuration reported by mutagen (contains mode and pollingInterval)
@@ -88,6 +91,22 @@ impl MutagenSession {
             .or(self.beta.staging_progress.as_ref())
     }
 
+    /// Returns a short display label for the sync mode.
+    /// Converts mutagen's raw mode strings to compact labels.
+    pub fn sync_mode_label(&self) -> &str {
+        if self.mode.starts_with("two-way") {
+            "2way"
+        } else if self.mode == "one-way-safe" {
+            "1w-create"
+        } else if self.mode == "one-way-replica" {
+            "1w-replica"
+        } else if self.mode.is_empty() {
+            ""
+        } else {
+            &self.mode
+        }
+    }
+
     /// Returns the polling interval if this session uses force-poll watch mode.
     pub fn polling_interval(&self) -> Option<u32> {
         self.watch.as_ref()
@@ -142,6 +161,9 @@ mod tests {
         // No watch field in JSON → polling_interval() returns None
         assert!(s.watch.is_none());
         assert_eq!(s.polling_interval(), None);
+        // No mode field → default empty string → empty label
+        assert_eq!(s.mode, "");
+        assert_eq!(s.sync_mode_label(), "");
     }
 
     #[test]
@@ -312,6 +334,55 @@ mod tests {
         assert_eq!(watch.mode, "force-poll");
         assert_eq!(watch.polling_interval, 5);
         assert_eq!(s.polling_interval(), Some(5));
+    }
+
+    #[test]
+    fn test_deserialize_sync_mode() {
+        let json = r#"[{
+            "identifier": "abc123",
+            "name": "app-12345678",
+            "status": "watching",
+            "mode": "two-way-resolved",
+            "alpha": {
+                "protocol": "local",
+                "path": "/test",
+                "connected": true,
+                "scanned": true
+            },
+            "beta": {
+                "protocol": "docker",
+                "path": "/app",
+                "host": "container-id",
+                "connected": true,
+                "scanned": true
+            }
+        }]"#;
+
+        let sessions: Vec<MutagenSession> = serde_json::from_str(json).unwrap();
+        let s = &sessions[0];
+        assert_eq!(s.mode, "two-way-resolved");
+        assert_eq!(s.sync_mode_label(), "2way");
+    }
+
+    #[test]
+    fn test_sync_mode_labels() {
+        let make = |mode: &str| {
+            let json = format!(r#"[{{
+                "identifier": "x",
+                "name": "x",
+                "status": "watching",
+                "mode": "{}",
+                "alpha": {{ "protocol": "local", "path": "/a", "connected": true, "scanned": true }},
+                "beta": {{ "protocol": "docker", "path": "/b", "connected": true, "scanned": true }}
+            }}]"#, mode);
+            let sessions: Vec<MutagenSession> = serde_json::from_str(&json).unwrap();
+            sessions[0].sync_mode_label().to_string()
+        };
+
+        assert_eq!(make("two-way-safe"), "2way");
+        assert_eq!(make("two-way-resolved"), "2way");
+        assert_eq!(make("one-way-safe"), "1w-create");
+        assert_eq!(make("one-way-replica"), "1w-replica");
     }
 
     #[test]

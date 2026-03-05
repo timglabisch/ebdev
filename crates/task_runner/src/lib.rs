@@ -778,6 +778,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
             command::MutagenSessionProgress {
                 name: "worker".into(),
@@ -791,6 +792,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
         ];
         handle.mutagen_sync_status(sessions).unwrap();
@@ -840,6 +842,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
             command::MutagenSessionProgress {
                 name: "s2".into(),
@@ -853,6 +856,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
             command::MutagenSessionProgress {
                 name: "s3".into(),
@@ -866,6 +870,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
             command::MutagenSessionProgress {
                 name: "s4".into(),
@@ -879,6 +884,7 @@ mod tests {
                 endpoint_files: 0,
                 endpoint_dirs: 0,
                 polling_interval: None,
+                sync_mode: None,
             },
         ];
         handle.mutagen_sync_status(sessions).unwrap();

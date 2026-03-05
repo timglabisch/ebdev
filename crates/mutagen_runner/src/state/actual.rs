@@ -135,6 +135,7 @@ mod tests {
             name: name.to_string(),
             status: status.to_string(),
             successful_cycles: 0,
+            mode: String::new(),
             alpha: mock_endpoint("/local"),
             beta: mock_endpoint("/remote"),
             watch: None,

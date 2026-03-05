@@ -238,6 +238,8 @@ pub struct SessionStatusInfo {
     pub endpoint_dirs: u64,
     /// Polling interval in seconds, if polling is enabled for this session
     pub polling_interval: Option<u32>,
+    /// Short sync mode label from actual mutagen state (e.g., "2way", "1w-create", "1w-replica")
+    pub sync_mode: Option<String>,
 }
 
 /// Pauses all mutagen sessions belonging to a project.
@@ -393,6 +395,9 @@ where
                     ))
                     .unwrap_or((0, 0));
                 let polling_interval = raw.and_then(|s| s.polling_interval());
+                let sync_mode = raw
+                    .filter(|s| !s.mode.is_empty())
+                    .map(|s| s.sync_mode_label().to_string());
                 SessionStatusInfo {
                     name: name.clone(),
                     status,
@@ -400,6 +405,7 @@ where
                     endpoint_files,
                     endpoint_dirs,
                     polling_interval,
+                    sync_mode,
                 }
             })
             .collect();
@@ -513,6 +519,7 @@ pub mod test_utils {
             name: name.to_string(),
             status: "watching".to_string(),
             successful_cycles: 0,
+            mode: String::new(),
             alpha: mock_endpoint("/test"),
             beta: mock_endpoint("/target"),
             watch: None,

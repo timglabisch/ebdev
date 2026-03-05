@@ -223,6 +223,13 @@ impl SessionTracker {
         ];
         spans.extend(progress_bar(s.percent, BAR_WIDTH, ps.bar_style));
 
+        if let Some(ref mode) = s.sync_mode {
+            spans.push(Span::styled(
+                format!("  {}", mode),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
         if let Some(interval) = s.polling_interval {
             spans.push(Span::styled(
                 format!("  poll:{}s", interval),
@@ -310,6 +317,7 @@ fn test_session(name: &str, phase: MutagenSyncPhase, status: &str, percent: u8) 
         endpoint_files: 0,
         endpoint_dirs: 0,
         polling_interval: None,
+        sync_mode: None,
     }
 }
 
@@ -628,6 +636,22 @@ mod tests {
         widget.clear();
         assert!(widget.is_empty());
         assert_eq!(widget.height(), 0);
+    }
+
+    #[test]
+    fn test_widget_shows_sync_mode_in_header() {
+        let mut session = test_session("app", MutagenSyncPhase::Ready, "watching", 100);
+        session.sync_mode = Some("1w-create".to_string());
+
+        let mut widget = MutagenSyncWidget::new();
+        widget.update(&[session]);
+
+        let tracker = widget.trackers.get("app").unwrap();
+        let line = tracker.render_header_line();
+
+        let has_mode = line.spans.iter().any(|span| span.content.contains("1w-create"));
+        assert!(has_mode, "Expected '1w-create' in header line spans: {:?}",
+            line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>());
     }
 
     #[test]

@@ -187,6 +187,7 @@ async fn test_status_callback_receives_updates() {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         },
         SessionStatusInfo {
             name: "backend-12345678".to_string(),
@@ -195,6 +196,7 @@ async fn test_status_callback_receives_updates() {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         },
     ]);
 

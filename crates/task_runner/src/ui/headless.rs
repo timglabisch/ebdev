@@ -112,6 +112,9 @@ impl TaskRunnerUI for HeadlessUI {
             sessions.iter()
                 .map(|s| {
                     let mut info = format!("{}:{}", s.name, s.status_label);
+                    if let Some(ref mode) = s.sync_mode {
+                        info.push_str(&format!("[{}]", mode));
+                    }
                     if let Some(interval) = s.polling_interval {
                         info.push_str(&format!("[poll:{}s]", interval));
                     }

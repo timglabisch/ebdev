@@ -217,6 +217,8 @@ pub struct MutagenSessionProgress {
     pub endpoint_dirs: u64,
     /// Polling interval in seconds, if polling is enabled for this session
     pub polling_interval: Option<u32>,
+    /// Short sync mode label (e.g., "2way", "1w-create", "1w-replica")
+    pub sync_mode: Option<String>,
 }
 
 /// Events from TUI back to TypeScript

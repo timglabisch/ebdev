@@ -592,6 +592,7 @@ fn map_status_info(info: &SessionStatusInfo) -> MutagenSessionProgress {
         endpoint_files: info.endpoint_files,
         endpoint_dirs: info.endpoint_dirs,
         polling_interval: info.polling_interval,
+        sync_mode: info.sync_mode.clone(),
     }
 }
 
@@ -1193,6 +1194,7 @@ mod tests {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.name, "frontend");
@@ -1207,6 +1209,7 @@ mod tests {
             endpoint_files: 1200,
             endpoint_dirs: 50,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.phase, MutagenSyncPhase::Active);
@@ -1235,6 +1238,7 @@ mod tests {
             endpoint_files: 80000,
             endpoint_dirs: 2000,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.name, "allother");
@@ -1261,6 +1265,7 @@ mod tests {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert!(result.current_file.is_none()); // empty path → None
@@ -1283,6 +1288,7 @@ mod tests {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.percent, 70); // base_percent for Syncing
@@ -1297,6 +1303,7 @@ mod tests {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: Some(10),
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.polling_interval, Some(10));
@@ -1311,9 +1318,25 @@ mod tests {
             endpoint_files: 0,
             endpoint_dirs: 0,
             polling_interval: None,
+            sync_mode: None,
         };
         let result = map_status_info(&info);
         assert_eq!(result.polling_interval, None);
+    }
+
+    #[test]
+    fn test_map_status_info_with_sync_mode() {
+        let info = SessionStatusInfo {
+            name: "app-12345678".to_string(),
+            status: SessionStatus::Watching,
+            staging_progress: None,
+            endpoint_files: 0,
+            endpoint_dirs: 0,
+            polling_interval: None,
+            sync_mode: Some("1w-create".to_string()),
+        };
+        let result = map_status_info(&info);
+        assert_eq!(result.sync_mode, Some("1w-create".to_string()));
     }
 
     // ========================================================================
