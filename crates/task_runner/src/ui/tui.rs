@@ -123,6 +123,8 @@ pub struct TuiUI {
     flag_browser_selected: usize,
     /// Stored geometry + count for flag browser rows (for mouse hit-testing)
     flag_browser_area: Rc<Cell<(Rect, usize)>>,
+    /// Tick counter for brand animation
+    brand_tick: usize,
 }
 
 impl TuiUI {
@@ -168,6 +170,7 @@ impl TuiUI {
             flags: Vec::new(),
             flag_browser_selected: 0,
             flag_browser_area: Rc::new(Cell::new((Rect::default(), 0))),
+            brand_tick: 0,
         })
     }
 
@@ -313,6 +316,8 @@ impl TuiUI {
     }
 
     fn draw(&mut self) -> io::Result<()> {
+        self.brand_tick = self.brand_tick.wrapping_add(1);
+
         // Collect all data we need before borrowing terminal mutably
         let palette_open = self.palette.open;
         let filtered_tasks: Vec<RegisteredTask> = self.palette.filter_tasks(&self.registered_tasks)
@@ -366,6 +371,7 @@ impl TuiUI {
         let palette = &self.palette;
         let mutagen_widget = &self.mutagen_widget;
         let h_scroll = self.output_scroll.h_offset;
+        let brand_tick = self.brand_tick;
         let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| {
             let area = frame.area();
@@ -453,7 +459,7 @@ impl TuiUI {
             }
 
             // Help line
-            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, active_tab, &help_compact_area_rc);
+            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, active_tab, &help_compact_area_rc, brand_tick);
 
             // Command Palette overlay
             if palette_open {
