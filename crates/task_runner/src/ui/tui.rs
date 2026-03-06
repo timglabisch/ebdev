@@ -325,6 +325,7 @@ impl TuiUI {
             .cloned()
             .collect();
         let has_registered_tasks = !self.registered_tasks.is_empty();
+        let is_idle = self.tasks.is_empty();
         let auto_quit = self.auto_quit;
         let pinned_task = self.pinned_task;
         let compact_mode = self.compact_mode;
@@ -459,7 +460,7 @@ impl TuiUI {
             }
 
             // Help line
-            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, active_tab, &help_compact_area_rc, brand_tick);
+            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, active_tab, &help_compact_area_rc, brand_tick, is_idle);
 
             // Command Palette overlay
             if palette_open {

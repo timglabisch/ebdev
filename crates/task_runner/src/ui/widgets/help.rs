@@ -152,21 +152,32 @@ fn hue_to_rgb(tick: usize) -> Color {
     )
 }
 
-pub fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto_quit: bool, compact_mode: bool, active_tab: ActiveTab, compact_area: &Rc<Cell<Rect>>, tick: usize) {
+pub fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto_quit: bool, compact_mode: bool, active_tab: ActiveTab, compact_area: &Rc<Cell<Rect>>, tick: usize, is_idle: bool) {
     // Brand animation (left side, fixed reservation)
-    let sparkle = SPARKLE_FRAMES[(tick / SPARKLE_INTERVAL) % SPARKLE_FRAMES.len()];
-    let slot = tick / TEXT_INTERVAL;
-    let brand_text = BRAND_TEXTS[slot.wrapping_mul(2654435761) % BRAND_TEXTS.len()];
-    let dots = DOT_FRAMES[(tick / DOTS_INTERVAL) % DOT_FRAMES.len()];
     let brand_color = hue_to_rgb(tick);
     let brand_style = Style::default().fg(brand_color).add_modifier(Modifier::BOLD);
 
-    let mut spans = vec![
-        Span::styled(format!("{} ", sparkle), brand_style),
-        Span::styled("ebdev", brand_style),
-        Span::styled(" - ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}{}", brand_text, dots), brand_style),
-    ];
+    let mut spans = if is_idle && has_registered_tasks {
+        let sparkle = SPARKLE_FRAMES[(tick / SPARKLE_INTERVAL) % SPARKLE_FRAMES.len()];
+        vec![
+            Span::styled(format!("{} ", sparkle), brand_style),
+            Span::styled("ebdev", brand_style),
+            Span::styled(" - ", Style::default().fg(Color::DarkGray)),
+            Span::styled("waiting ", Style::default().fg(Color::DarkGray)),
+            Span::styled("(press /)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+        ]
+    } else {
+        let sparkle = SPARKLE_FRAMES[(tick / SPARKLE_INTERVAL) % SPARKLE_FRAMES.len()];
+        let slot = tick / TEXT_INTERVAL;
+        let brand_text = BRAND_TEXTS[slot.wrapping_mul(2654435761) % BRAND_TEXTS.len()];
+        let dots = DOT_FRAMES[(tick / DOTS_INTERVAL) % DOT_FRAMES.len()];
+        vec![
+            Span::styled(format!("{} ", sparkle), brand_style),
+            Span::styled("ebdev", brand_style),
+            Span::styled(" - ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}{}", brand_text, dots), brand_style),
+        ]
+    };
 
     // Pad brand to fixed width so help text doesn't jump
     let brand_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
