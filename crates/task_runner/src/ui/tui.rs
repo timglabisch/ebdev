@@ -5,7 +5,7 @@ use super::widgets::tab_bar::{self, ActiveTab};
 use super::widgets::{flag_browser, help, task_browser, task_list, task_output};
 use crate::command::{CommandId, CommandResult, FlagDisplay, RegisteredTask};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -489,6 +489,14 @@ impl TuiUI {
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Ignore keys with Ctrl/Alt modifiers — they shouldn't trigger
+                    // letter bindings (e.g. Ctrl+C must not toggle compact mode)
+                    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        if key.code == KeyCode::Char('c') {
+                            self.should_quit = true;
+                        }
+                        return Ok(false);
+                    }
                     if self.palette.open {
                         return self.handle_command_palette_input(key.code);
                     }
