@@ -153,6 +153,13 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
+    /// Set compact mode (hide/show sidebar)
+    pub fn set_compact_mode(&self, enabled: bool) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::CompactMode { enabled })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
     /// Poll for a task trigger event from the TUI (non-blocking)
     pub async fn poll_task_trigger(&self) -> Option<String> {
         let mut rx = self.tui_event_rx.lock().await;

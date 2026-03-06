@@ -371,6 +371,17 @@ declare module "ebdev" {
   export function disableInteractive(): void;
 
   // =============================================================================
+  // UI API
+  // =============================================================================
+
+  export const ui: {
+    /** Enable compact mode — hides sidebar, output uses full width */
+    enableCompactMode(): Promise<void>;
+    /** Disable compact mode — restores sidebar */
+    disableCompactMode(): Promise<void>;
+  };
+
+  // =============================================================================
   // Task Runner API
   // =============================================================================
 

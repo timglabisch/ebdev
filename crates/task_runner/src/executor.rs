@@ -77,6 +77,10 @@ pub struct Executor {
     backend: std::sync::Arc<ExecutionBackend>,
     /// Streaming output channels (for onOutput/onStdout/onStderr callbacks)
     streaming_outputs: HashMap<CommandId, tokio::sync::mpsc::UnboundedSender<OutputEvent>>,
+    /// Kill senders for running tasks (external kill via 'x' key)
+    kill_senders: HashMap<CommandId, tokio::sync::oneshot::Sender<()>>,
+    /// Tasks killed by the user (x key) — results get overridden to success
+    user_killed: std::collections::HashSet<CommandId>,
 }
 
 impl Executor {
@@ -101,6 +105,8 @@ impl Executor {
             debug_logger: None,
             backend: std::sync::Arc::new(backend),
             streaming_outputs: HashMap::new(),
+            kill_senders: HashMap::new(),
+            user_killed: std::collections::HashSet::new(),
         }
     }
 
@@ -202,6 +208,14 @@ impl Executor {
                         self.log_debug(DebugMessage::MutagenSyncClear);
                         ui.on_mutagen_sync_clear();
                     }
+                    ExecutorMessage::CompactMode { enabled } => {
+                        ui.on_compact_mode(enabled);
+                    }
+                    ExecutorMessage::Kill { id } => {
+                        if let Some(tx) = self.kill_senders.remove(&id) {
+                            let _ = tx.send(());
+                        }
+                    }
                     ExecutorMessage::Shutdown => {
                         self.log_debug(DebugMessage::Shutdown);
                         if let Some(ref mut logger) = self.debug_logger {
@@ -240,10 +254,22 @@ impl Executor {
                         }
                     }
                     PtyEvent::Completed { id, result } => {
+                        // If user killed this task, override result to success
+                        // so exec() in Deno doesn't throw and parallel() continues
+                        let result = if self.user_killed.remove(&id) {
+                            CommandResult {
+                                exit_code: 0,
+                                success: true,
+                                ..result
+                            }
+                        } else {
+                            result
+                        };
                         self.log_debug(DebugMessage::PtyCompleted {
                             id,
                             result: result.clone(),
                         });
+                        self.kill_senders.remove(&id);
                         ui.on_task_complete(id, &result);
                         // Send Done to streaming channel if present
                         if let Some(tx) = self.streaming_outputs.remove(&id) {
@@ -259,6 +285,25 @@ impl Executor {
                             id,
                             error: error.clone(),
                         });
+                        self.kill_senders.remove(&id);
+                        // If user killed this task, treat as successful completion
+                        if self.user_killed.remove(&id) {
+                            let success_result = CommandResult {
+                                exit_code: 0,
+                                success: true,
+                                timed_out: false,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            };
+                            ui.on_task_complete(id, &success_result);
+                            if let Some(tx) = self.streaming_outputs.remove(&id) {
+                                let _ = tx.send(OutputEvent::Done(success_result.clone()));
+                            }
+                            if let Some(tx) = self.pending_results.remove(&id) {
+                                let _ = tx.send(success_result);
+                            }
+                            continue;
+                        }
                         ui.on_task_error(id, &error);
                         let error_result = CommandResult {
                             exit_code: -1,
@@ -285,6 +330,14 @@ impl Executor {
             // 4. Check for triggered tasks from Command Palette
             if let Some(task_name) = ui.poll_triggered_task() {
                 self.trigger_task(&task_name);
+            }
+
+            // 4b. Check for kill requests from UI
+            if let Some(id) = ui.poll_kill_request() {
+                self.user_killed.insert(id);
+                if let Some(tx) = self.kill_senders.remove(&id) {
+                    let _ = tx.send(());
+                }
             }
 
             // 5. Check quit
@@ -314,6 +367,10 @@ impl Executor {
 
         let name = command.display_name();
         let timeout = command.timeout();
+
+        // Create kill channel: store sender, move receiver into thread
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+        self.kill_senders.insert(id, kill_tx);
 
         // Speichere den Result-Sender
         self.pending_results.insert(id, result_tx);
@@ -357,6 +414,7 @@ impl Executor {
                 cols,
                 timeout,
                 event_tx,
+                Some(kill_rx),
             );
 
             // Warte auf Event-Forwarder

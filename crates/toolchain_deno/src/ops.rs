@@ -412,6 +412,23 @@ pub async fn op_log(
     Ok(())
 }
 
+#[op2(async)]
+pub async fn op_compact_mode(
+    state: Rc<RefCell<OpState>>,
+    enabled: bool,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.set_compact_mode(enabled)
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // =============================================================================
 // Mutagen Reconcile Op
 // =============================================================================
@@ -1417,6 +1434,7 @@ deno_core::extension!(
         op_task_unregister,
         op_poll_task_trigger,
         op_log,
+        op_compact_mode,
         op_mutagen_reconcile,
         op_mutagen_pause_all,
         op_start_stream,

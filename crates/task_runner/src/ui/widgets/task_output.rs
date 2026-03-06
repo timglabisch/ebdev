@@ -3,17 +3,25 @@ use ratatui::prelude::*;
 use ratatui::layout::Margin;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
-pub fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_offset: u16) {
+pub fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_offset: u16, h_scroll: u16, focused: bool) {
     let text = task.screen_text();
 
-    let border_style = match &task.state {
-        TaskState::Running => Style::default().fg(Color::Yellow),
-        TaskState::Completed { exit_code, .. } if *exit_code == 0 => Style::default().fg(Color::Green),
-        TaskState::Completed { .. } | TaskState::Failed { .. } => Style::default().fg(Color::Red),
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        match &task.state {
+            TaskState::Running => Style::default().fg(Color::Yellow),
+            TaskState::Completed { exit_code, .. } if *exit_code == 0 => Style::default().fg(Color::Green),
+            TaskState::Completed { .. } | TaskState::Failed { .. } => Style::default().fg(Color::Red),
+        }
     };
 
     let inner_width = area.width.saturating_sub(2) as usize;
-    let title_text = format!(" {} ", task.name);
+    let title_text = if focused {
+        format!(" ▸ {} ", task.name)
+    } else {
+        format!(" {} ", task.name)
+    };
     let title_fits = title_text.len() <= inner_width;
 
     let mut all_lines: Vec<Line> = Vec::new();
@@ -47,6 +55,7 @@ pub fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_o
         .into_iter()
         .skip(scroll)
         .take(visible_height)
+        .map(|line| if h_scroll > 0 { h_scroll_line(line, h_scroll) } else { line })
         .collect();
 
     let output = Paragraph::new(visible_lines).block(
@@ -69,18 +78,19 @@ pub fn draw_task_output(frame: &mut Frame, area: Rect, task: &TaskInfo, scroll_o
     }
 }
 
-pub fn draw_stacked_outputs(frame: &mut Frame, area: Rect, tasks: &[TaskInfo]) {
-    // Collect running tasks (up to 3)
-    let mut display_tasks: Vec<&TaskInfo> = tasks
+pub fn draw_stacked_outputs(frame: &mut Frame, area: Rect, tasks: &[TaskInfo], h_scroll: u16, focused_idx: Option<usize>) {
+    // Collect running tasks (up to 3) with their original index
+    let mut display_tasks: Vec<(usize, &TaskInfo)> = tasks
         .iter()
-        .filter(|t| matches!(t.state, TaskState::Running))
+        .enumerate()
+        .filter(|(_, t)| matches!(t.state, TaskState::Running))
         .take(3)
         .collect();
 
     // If no running tasks but tasks exist, show the last task
     if display_tasks.is_empty() {
-        if let Some(last) = tasks.last() {
-            display_tasks.push(last);
+        if let Some((idx, last)) = tasks.iter().enumerate().last() {
+            display_tasks.push((idx, last));
         }
     }
 
@@ -98,8 +108,32 @@ pub fn draw_stacked_outputs(frame: &mut Frame, area: Rect, tasks: &[TaskInfo]) {
         .constraints(constraints)
         .split(area);
 
-    for (i, task) in display_tasks.iter().enumerate() {
+    for (i, (orig_idx, task)) in display_tasks.iter().enumerate() {
+        let is_focused = focused_idx == Some(*orig_idx);
         // Auto-scroll to bottom in stacked mode
-        draw_task_output(frame, chunks[i], task, u16::MAX);
+        draw_task_output(frame, chunks[i], task, u16::MAX, h_scroll, is_focused);
     }
+}
+
+/// Horizontally scroll a Line by trimming `offset` characters from the left of its spans.
+fn h_scroll_line(line: Line<'_>, offset: u16) -> Line<'_> {
+    let mut remaining = offset as usize;
+    let mut new_spans = Vec::new();
+    for span in line.spans {
+        if remaining == 0 {
+            new_spans.push(span);
+            continue;
+        }
+        let content_len = span.content.chars().count();
+        if remaining >= content_len {
+            remaining -= content_len;
+            // Skip entire span
+        } else {
+            // Trim `remaining` chars from the left
+            let trimmed: String = span.content.chars().skip(remaining).collect();
+            new_spans.push(Span::styled(trimmed, span.style));
+            remaining = 0;
+        }
+    }
+    Line::from(new_spans)
 }

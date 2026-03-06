@@ -134,6 +134,8 @@ pub struct TaskInfo {
     pub started_at: Instant,
     /// Raw output buffer for ANSI color rendering
     pub raw_output: Arc<Mutex<Vec<u8>>>,
+    /// Whether this task was killed by the user (x key)
+    pub killed: bool,
 }
 
 impl TaskInfo {
@@ -145,6 +147,7 @@ impl TaskInfo {
             parser: Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 500))),
             started_at: Instant::now(),
             raw_output: Arc::new(Mutex::new(Vec::new())),
+            killed: false,
         }
     }
 
@@ -164,6 +167,9 @@ impl TaskInfo {
 
     /// Get icon and style for this task's state
     pub fn icon_and_style(&self) -> (&'static str, Style) {
+        if self.killed {
+            return ("✗", Style::default().fg(Color::White).bg(Color::Red));
+        }
         match &self.state {
             TaskState::Running => ("●", Style::default().fg(Color::Yellow)),
             TaskState::Completed { exit_code, .. } => {

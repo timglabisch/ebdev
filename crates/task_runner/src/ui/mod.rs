@@ -40,6 +40,9 @@ pub trait TaskRunnerUI {
     /// Gibt zurück ob ein Task getriggert werden soll (von TUI Command Palette)
     fn poll_triggered_task(&mut self) -> Option<String> { None }
 
+    /// Returns the CommandId of a task the user wants to kill (via 'x' key)
+    fn poll_kill_request(&mut self) -> Option<CommandId> { None }
+
     /// Log a message (works correctly in both headless and TUI mode)
     fn on_log(&mut self, message: &str);
 
@@ -48,6 +51,9 @@ pub trait TaskRunnerUI {
 
     /// Clear mutagen sync widget
     fn on_mutagen_sync_clear(&mut self) {}
+
+    /// Set compact mode (hide/show sidebar)
+    fn on_compact_mode(&mut self, _enabled: bool) {}
 
     /// Returns whether the UI should auto-quit when tasks complete
     fn should_auto_quit(&self) -> bool { true }

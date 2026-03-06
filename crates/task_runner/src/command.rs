@@ -175,6 +175,10 @@ pub enum ExecutorMessage {
     MutagenSyncStatus { sessions: Vec<MutagenSessionProgress> },
     /// Clear the mutagen sync widget
     MutagenSyncClear,
+    /// Set compact mode (hide/show sidebar)
+    CompactMode { enabled: bool },
+    /// Kill a running task
+    Kill { id: CommandId },
     /// Shutdown the executor
     Shutdown,
 }

@@ -41,6 +41,7 @@ impl ExecutionBackend {
         cols: u16,
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
+        kill_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<(), String> {
         match command {
             Command::Exec { cmd, cwd, env, .. } => {
@@ -52,6 +53,7 @@ impl ExecutionBackend {
                     Some(PtyConfig { cols, rows }),
                     timeout,
                     event_tx,
+                    kill_rx,
                 )
             }
             Command::Shell { script, cwd, env, .. } => {
@@ -63,6 +65,7 @@ impl ExecutionBackend {
                     Some(PtyConfig { cols, rows }),
                     timeout,
                     event_tx,
+                    kill_rx,
                 )
             }
             Command::DockerExec {
@@ -72,7 +75,7 @@ impl ExecutionBackend {
                 env,
                 ..
             } => {
-                self.execute_docker_exec(container, cmd, user.as_deref(), env.clone(), rows, cols, timeout, event_tx)
+                self.execute_docker_exec(container, cmd, user.as_deref(), env.clone(), rows, cols, timeout, event_tx, kill_rx)
             }
             Command::DockerRun {
                 image,
@@ -95,6 +98,7 @@ impl ExecutionBackend {
                     cols,
                     timeout,
                     event_tx,
+                    kill_rx,
                 )
             }
         }
@@ -110,6 +114,7 @@ impl ExecutionBackend {
         pty: Option<PtyConfig>,
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
+        kill_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<(), String> {
         let options = ExecuteOptions {
             program: program.to_string(),
@@ -122,7 +127,7 @@ impl ExecutionBackend {
         };
 
         let mut executor = LocalExecutor::new();
-        self.run_executor(&mut executor, options, timeout, event_tx)
+        self.run_executor(&mut executor, options, timeout, event_tx, kill_rx)
     }
 
     /// Führt einen Befehl in einem Docker-Container aus (über Bridge)
@@ -136,6 +141,7 @@ impl ExecutionBackend {
         cols: u16,
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
+        kill_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<(), String> {
         if cmd.is_empty() {
             let _ = event_tx.send(BackendEvent::Error("Empty command".to_string()));
@@ -195,10 +201,20 @@ impl ExecutionBackend {
 
             // Collect events with timeout
             let timeout_at = tokio::time::Instant::now() + timeout;
+            let mut kill_tx_internal = handle.kill_tx;
             let mut exit_code = None;
             let mut timed_out = false;
             let mut stdout_buf = Vec::new();
             let mut stderr_buf = Vec::new();
+
+            // If no external kill_rx, create a dummy that never fires
+            let (_kill_guard, kill_rx_actual) = if let Some(rx) = kill_rx {
+                (None, rx)
+            } else {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                (Some(tx), rx)
+            };
+            tokio::pin!(kill_rx_actual);
 
             loop {
                 tokio::select! {
@@ -223,9 +239,14 @@ impl ExecutionBackend {
                     }
                     _ = tokio::time::sleep_until(timeout_at) => {
                         timed_out = true;
-                        // Kill the process
-                        if let Some(kill_tx) = handle.kill_tx {
-                            let _ = kill_tx.send(());
+                        if let Some(tx) = kill_tx_internal.take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
+                    _ = &mut kill_rx_actual => {
+                        if let Some(tx) = kill_tx_internal.take() {
+                            let _ = tx.send(());
                         }
                         break;
                     }
@@ -258,6 +279,7 @@ impl ExecutionBackend {
         cols: u16,
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
+        kill_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<(), String> {
         let mut docker_args = vec![
             "run".to_string(),
@@ -302,7 +324,7 @@ impl ExecutionBackend {
         };
 
         let mut executor = LocalExecutor::new();
-        self.run_executor(&mut executor, options, timeout, event_tx)
+        self.run_executor(&mut executor, options, timeout, event_tx, kill_rx)
     }
 
     /// Führt einen Executor aus und sendet Events
@@ -312,6 +334,7 @@ impl ExecutionBackend {
         options: ExecuteOptions,
         timeout: Duration,
         event_tx: std_mpsc::Sender<BackendEvent>,
+        kill_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Result<(), String>
     where
         E: Executor,
@@ -331,10 +354,20 @@ impl ExecutionBackend {
 
             // Sammle Events mit Timeout
             let timeout_at = tokio::time::Instant::now() + timeout;
+            let mut kill_tx_internal = handle.kill_tx;
             let mut exit_code = None;
             let mut timed_out = false;
             let mut stdout_buf = Vec::new();
             let mut stderr_buf = Vec::new();
+
+            // If no external kill_rx, create a dummy that never fires
+            let (_kill_guard, kill_rx_actual) = if let Some(rx) = kill_rx {
+                (None, rx)
+            } else {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                (Some(tx), rx)
+            };
+            tokio::pin!(kill_rx_actual);
 
             loop {
                 tokio::select! {
@@ -359,9 +392,14 @@ impl ExecutionBackend {
                     }
                     _ = tokio::time::sleep_until(timeout_at) => {
                         timed_out = true;
-                        // Kill the process
-                        if let Some(kill_tx) = handle.kill_tx {
-                            let _ = kill_tx.send(());
+                        if let Some(tx) = kill_tx_internal.take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
+                    _ = &mut kill_rx_actual => {
+                        if let Some(tx) = kill_tx_internal.take() {
+                            let _ = tx.send(());
                         }
                         break;
                     }

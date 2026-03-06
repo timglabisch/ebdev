@@ -8,6 +8,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEve
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::cursor;
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -22,12 +23,13 @@ pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 /// Scroll state for the output panel
 struct ScrollState {
     offset: u16,
+    h_offset: u16,
     auto_scroll: bool,
 }
 
 impl ScrollState {
     fn new() -> Self {
-        Self { offset: 0, auto_scroll: true }
+        Self { offset: 0, h_offset: 0, auto_scroll: true }
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -39,8 +41,17 @@ impl ScrollState {
         }
     }
 
+    fn scroll_h_by(&mut self, delta: i32) {
+        if delta < 0 {
+            self.h_offset = self.h_offset.saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.h_offset = self.h_offset.saturating_add(delta as u16);
+        }
+    }
+
     fn reset(&mut self) {
         self.offset = 0;
+        self.h_offset = 0;
         self.auto_scroll = true;
     }
 
@@ -89,6 +100,14 @@ pub struct TuiUI {
     output_area: Rc<Cell<Rect>>,
     /// Stateful mutagen sync widget
     mutagen_widget: super::widgets::mutagen_sync::MutagenSyncWidget,
+    /// Compact mode: hide sidebar, output uses full width
+    compact_mode: bool,
+    /// Stored geometry of the compact toggle area in help line (for mouse hit-testing)
+    help_compact_area: Rc<Cell<Rect>>,
+    /// Pending kill request from 'x' key
+    kill_request: Option<CommandId>,
+    /// True after user navigated with j/k — suppresses auto-focus until new task starts
+    user_navigated: bool,
 }
 
 impl TuiUI {
@@ -123,6 +142,10 @@ impl TuiUI {
             task_list_area: Rc::new(Cell::new(Rect::default())),
             output_area: Rc::new(Cell::new(Rect::default())),
             mutagen_widget: super::widgets::mutagen_sync::MutagenSyncWidget::new(),
+            compact_mode: false,
+            help_compact_area: Rc::new(Cell::new(Rect::default())),
+            kill_request: None,
+            user_navigated: false,
         })
     }
 
@@ -164,6 +187,7 @@ impl TuiUI {
             (current + delta as usize).min(focusable.len() - 1)
         };
         self.focus = focusable[new_idx];
+        self.user_navigated = true;
         self.output_scroll.reset();
         self.ensure_focused_visible();
     }
@@ -237,6 +261,12 @@ impl TuiUI {
         col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
     }
 
+    /// Check if a mouse position is over the compact toggle in the help line
+    fn is_over_help_compact(&self, col: u16, row: u16) -> bool {
+        let area = self.help_compact_area.get();
+        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+    }
+
     /// Scroll the task list by delta lines, clamped to valid range
     fn scroll_task_list(&mut self, delta: i32) {
         let total_lines = self.build_visual_rows().len();
@@ -273,6 +303,7 @@ impl TuiUI {
         let has_registered_tasks = !self.registered_tasks.is_empty();
         let auto_quit = self.auto_quit;
         let pinned_task = self.pinned_task;
+        let compact_mode = self.compact_mode;
 
         // Compute auto-scroll when showing single task output (pinned or focused)
         let output_content_height = self.resolve_output_task()
@@ -302,8 +333,10 @@ impl TuiUI {
         let current_stage = &self.current_stage;
         let task_list_area_rc = self.task_list_area.clone();
         let output_area_rc = self.output_area.clone();
+        let help_compact_area_rc = self.help_compact_area.clone();
         let palette = &self.palette;
         let mutagen_widget = &self.mutagen_widget;
+        let h_scroll = self.output_scroll.h_offset;
         let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| {
             let area = frame.area();
@@ -337,23 +370,29 @@ impl TuiUI {
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
                 frame.render_widget(waiting, chunks[2]);
             } else {
-                // Split area: task list on left, output on right
-                let task_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(40.min(chunks[2].width / 3)),
-                        Constraint::Min(20),
-                    ])
-                    .split(chunks[2]);
+                // Compute layout: compact = full width, normal = sidebar + output
+                let output_rect = if compact_mode {
+                    task_list_area_rc.set(Rect::default());
+                    output_area_rc.set(chunks[2]);
+                    chunks[2]
+                } else {
+                    let task_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(40.min(chunks[2].width / 3)),
+                            Constraint::Min(20),
+                        ])
+                        .split(chunks[2]);
 
-                // Store areas for mouse hit-testing
-                task_list_area_rc.set(task_chunks[0]);
-                output_area_rc.set(task_chunks[1]);
+                    task_list_area_rc.set(task_chunks[0]);
+                    output_area_rc.set(task_chunks[1]);
 
-                // Task list with completed stages
-                task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
+                    task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
 
-                // Right panel: pinned > focused completed task > stacked mode
+                    task_chunks[1]
+                };
+
+                // Resolve output task: pinned > focused completed task > stacked mode
                 let output_task: Option<&TaskInfo> = if let Some(ref pin) = pinned_task {
                     pin.resolve_task(completed_stages, tasks)
                 } else if let FocusTarget::CompletedTask { stage: si, task: ti } = focus {
@@ -363,14 +402,19 @@ impl TuiUI {
                 };
 
                 if let Some(task) = output_task {
-                    task_output::draw_task_output(frame, task_chunks[1], task, output_scroll_offset);
+                    task_output::draw_task_output(frame, output_rect, task, output_scroll_offset, h_scroll, false);
                 } else {
-                    task_output::draw_stacked_outputs(frame, task_chunks[1], tasks);
+                    let focused_idx = if compact_mode {
+                        if let FocusTarget::CurrentTask(idx) = focus { Some(idx) } else { None }
+                    } else {
+                        None
+                    };
+                    task_output::draw_stacked_outputs(frame, output_rect, tasks, h_scroll, focused_idx);
                 }
             }
 
             // Help line
-            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit);
+            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, &help_compact_area_rc);
 
             // Command Palette overlay
             if palette_open {
@@ -453,6 +497,26 @@ impl TuiUI {
                     self.output_scroll.jump_to_start();
                 }
             }
+            KeyCode::Char('x') => {
+                // Kill the focused running task
+                if let FocusTarget::CurrentTask(idx) = self.focus {
+                    if let Some(task) = self.tasks.get_mut(idx) {
+                        if task.state == TaskState::Running {
+                            self.kill_request = Some(task.id);
+                            task.killed = true;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('c') => {
+                self.compact_mode = !self.compact_mode;
+            }
+            KeyCode::Left => {
+                self.output_scroll.scroll_h_by(-4);
+            }
+            KeyCode::Right => {
+                self.output_scroll.scroll_h_by(4);
+            }
             _ => {}
         }
         Ok(())
@@ -464,7 +528,9 @@ impl TuiUI {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(target) = self.focus_target_from_click(col, row) {
+                if self.is_over_help_compact(col, row) {
+                    self.compact_mode = !self.compact_mode;
+                } else if let Some(target) = self.focus_target_from_click(col, row) {
                     self.focus = target;
                     self.handle_enter();
                 }
@@ -481,6 +547,16 @@ impl TuiUI {
                     self.scroll_task_list(3);
                 } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
                     self.output_scroll.scroll_by(3);
+                }
+            }
+            MouseEventKind::ScrollLeft => {
+                if self.is_over_output(col, row) {
+                    self.output_scroll.scroll_h_by(-4);
+                }
+            }
+            MouseEventKind::ScrollRight => {
+                if self.is_over_output(col, row) {
+                    self.output_scroll.scroll_h_by(4);
                 }
             }
             _ => {}
@@ -536,6 +612,7 @@ impl TaskRunnerUI for TuiUI {
         // Auto-focus on new task only when not pinned
         if self.pinned_task.is_none() {
             self.focus = FocusTarget::CurrentTask(idx);
+            self.user_navigated = false;
         }
     }
 
@@ -555,6 +632,11 @@ impl TaskRunnerUI for TuiUI {
                     exit_code: result.exit_code,
                     duration,
                 };
+            }
+            // If the completed task was focused, resume auto-focus
+            // so the next running task gets tracked
+            if self.focus == FocusTarget::CurrentTask(idx) {
+                self.user_navigated = false;
             }
         }
     }
@@ -611,6 +693,10 @@ impl TaskRunnerUI for TuiUI {
         self.triggered_task.take()
     }
 
+    fn poll_kill_request(&mut self) -> Option<CommandId> {
+        self.kill_request.take()
+    }
+
     fn on_log(&mut self, message: &str) {
         // Route logs to the focused current task (not completed tasks)
         if let FocusTarget::CurrentTask(idx) = self.focus {
@@ -631,6 +717,10 @@ impl TaskRunnerUI for TuiUI {
         self.mutagen_widget.clear();
     }
 
+    fn on_compact_mode(&mut self, enabled: bool) {
+        self.compact_mode = enabled;
+    }
+
     fn should_auto_quit(&self) -> bool {
         self.auto_quit
     }
@@ -643,9 +733,9 @@ impl TaskRunnerUI for TuiUI {
         self.draw()?;
         self.handle_input()?;
 
-        // Auto-focus on running task only when not pinned and focus is on current tasks
-        // (don't override user navigation to completed stages)
-        if self.pinned_task.is_none() && matches!(self.focus, FocusTarget::CurrentTask(_)) {
+        // Auto-focus on running task only when not pinned, not manually navigated,
+        // and focus is on current tasks (don't override user navigation)
+        if self.pinned_task.is_none() && !self.user_navigated && matches!(self.focus, FocusTarget::CurrentTask(_)) {
             if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
                 self.focus = FocusTarget::CurrentTask(idx);
             }
@@ -661,6 +751,7 @@ impl TaskRunnerUI for TuiUI {
 
     fn suspend(&mut self) -> io::Result<()> {
         if self.terminal.is_some() {
+            io::stdout().execute(cursor::Show)?;
             io::stdout().execute(DisableMouseCapture)?;
             io::stdout().execute(LeaveAlternateScreen)?;
             disable_raw_mode()?;
@@ -673,6 +764,7 @@ impl TaskRunnerUI for TuiUI {
             enable_raw_mode()?;
             io::stdout().execute(EnterAlternateScreen)?;
             io::stdout().execute(EnableMouseCapture)?;
+            io::stdout().execute(cursor::Hide)?;
             self.terminal.as_mut().unwrap().clear()?;
         }
         Ok(())

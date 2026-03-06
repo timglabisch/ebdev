@@ -1,4 +1,4 @@
-import { defineConfig, defineTask, arg, flag, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession } from "ebdev";
+import { defineConfig, defineTask, arg, flag, exec, shell, parallel, tryExec, tryShell, stage, task, untask, mutagenReconcile, MutagenSession, ui } from "ebdev";
 
 const config = defineConfig({
     toolchain: {
@@ -780,4 +780,17 @@ export async function test_docker_smoke() {
     }
 
     console.log("Docker smoke test passed ✓");
+}
+
+// =============================================================================
+// Compact Mode Example — two vim instances side by side (full width, no sidebar)
+// =============================================================================
+
+export async function compact_vim() {
+    await ui.enableCompactMode();
+    await parallel(
+        () => shell("i=0; while [ $i -lt 60 ]; do echo \"[left]  tick $i  $(date)\"; sleep 1; i=$((i+1)); done", { name: "watch (left)" }),
+        () => shell("i=0; while [ $i -lt 60 ]; do echo \"[right] tick $i  $(date)\"; sleep 1; i=$((i+1)); done", { name: "watch (right)" }),
+    );
+    await ui.disableCompactMode();
 }
