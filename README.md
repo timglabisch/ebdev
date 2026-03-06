@@ -541,6 +541,57 @@ await task("seed-db", "Seed the database", async () => {
 await untask("seed-db");
 ```
 
+#### TUI Keybindings
+
+**Global:**
+
+| Key | Action |
+|-----|--------|
+| `1` / `2` / `3` | Switch tab (Output / Tasks / Flags) |
+| `/` | Open Command Palette |
+| `q` / `Esc` | Quit (or back to Output tab) |
+
+**Output tab:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate task list |
+| `Enter` | Expand/collapse stage, pin/unpin task |
+| `↑` / `↓` | Scroll pinned output |
+| `PageUp` / `PageDown` | Scroll output (±10 lines) |
+| `Home` / `End` | Jump to start/end of output |
+| `←` / `→` | Horizontal scroll |
+| `c` | Toggle compact mode (hide/show sidebar) |
+| `C` | Clear completed stages |
+| `x` | Kill focused running task |
+
+**Tasks tab:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate |
+| `Enter` | Run selected task |
+
+**Flags tab:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate |
+| `Space` | Toggle flag |
+
+#### UI
+
+Programmatic control over the TUI from task code:
+
+```typescript
+// Compact mode — hide sidebar, output uses full width
+await ui.enableCompactMode();
+await ui.disableCompactMode();
+
+// Clear all completed stages from the task list
+await ui.clearCompleted();
+```
+
 #### Logging
 
 ```typescript
