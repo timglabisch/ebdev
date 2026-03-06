@@ -161,6 +161,13 @@ impl TaskRunnerHandle {
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 
+    /// Clear all completed stages from the task list
+    pub fn clear_completed(&self) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::ClearCompleted)
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
     /// Set feature flags for the Flags tab in the TUI
     pub fn set_flags(&self, flags: Vec<command::FlagDisplay>) -> Result<(), TaskRunnerError> {
         self.tx

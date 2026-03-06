@@ -189,6 +189,8 @@ pub enum ExecutorMessage {
     MutagenSyncClear,
     /// Set compact mode (hide/show sidebar)
     CompactMode { enabled: bool },
+    /// Clear all completed stages from the task list
+    ClearCompleted,
     /// Kill a running task
     Kill { id: CommandId },
     /// Set feature flags for the Flags tab

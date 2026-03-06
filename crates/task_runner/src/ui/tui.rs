@@ -932,6 +932,10 @@ impl TaskRunnerUI for TuiUI {
         self.compact_mode = enabled;
     }
 
+    fn on_clear_completed(&mut self) {
+        self.clear_completed();
+    }
+
     fn on_flags_set(&mut self, flags: &[FlagDisplay]) {
         self.flags = flags.to_vec();
         if self.flag_browser_selected >= self.flags.len() {

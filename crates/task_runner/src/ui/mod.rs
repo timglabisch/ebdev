@@ -55,6 +55,9 @@ pub trait TaskRunnerUI {
     /// Set compact mode (hide/show sidebar)
     fn on_compact_mode(&mut self, _enabled: bool) {}
 
+    /// Clear all completed stages from the task list
+    fn on_clear_completed(&mut self) {}
+
     /// Set feature flags for display/toggling in the TUI
     fn on_flags_set(&mut self, _flags: &[crate::command::FlagDisplay]) {}
 

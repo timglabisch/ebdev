@@ -429,6 +429,22 @@ pub async fn op_compact_mode(
     Ok(())
 }
 
+#[op2(async)]
+pub async fn op_clear_completed(
+    state: Rc<RefCell<OpState>>,
+) -> Result<(), JsErrorBox> {
+    let handle = {
+        let state = state.borrow();
+        state.borrow::<TaskRunnerState>().handle.clone()
+    };
+
+    if let Some(h) = handle {
+        h.clear_completed()
+            .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // =============================================================================
 // Mutagen Reconcile Op
 // =============================================================================
@@ -1435,6 +1451,7 @@ deno_core::extension!(
         op_poll_task_trigger,
         op_log,
         op_compact_mode,
+        op_clear_completed,
         op_mutagen_reconcile,
         op_mutagen_pause_all,
         op_start_stream,

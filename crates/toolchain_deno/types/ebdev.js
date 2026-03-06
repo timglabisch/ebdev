@@ -1010,6 +1010,7 @@ console.error = (...args) => {
 export const ui = {
   async enableCompactMode() { await Deno.core.ops.op_compact_mode(true); },
   async disableCompactMode() { await Deno.core.ops.op_compact_mode(false); },
+  async clearCompleted() { await Deno.core.ops.op_clear_completed(); },
 };
 
 // =============================================================================

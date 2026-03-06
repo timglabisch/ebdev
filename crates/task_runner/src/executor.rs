@@ -211,6 +211,9 @@ impl Executor {
                     ExecutorMessage::CompactMode { enabled } => {
                         ui.on_compact_mode(enabled);
                     }
+                    ExecutorMessage::ClearCompleted => {
+                        ui.on_clear_completed();
+                    }
                     ExecutorMessage::SetFlags { flags } => {
                         ui.on_flags_set(&flags);
                     }

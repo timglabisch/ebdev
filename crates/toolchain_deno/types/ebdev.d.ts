@@ -379,6 +379,8 @@ declare module "ebdev" {
     enableCompactMode(): Promise<void>;
     /** Disable compact mode — restores sidebar */
     disableCompactMode(): Promise<void>;
+    /** Clear all completed stages from the task list */
+    clearCompleted(): Promise<void>;
   };
 
   // =============================================================================
