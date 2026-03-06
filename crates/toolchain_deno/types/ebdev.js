@@ -856,16 +856,13 @@ async function startTriggerLoop() {
         if (triggeredName) {
           const task = taskRegistry.get(triggeredName);
           if (task) {
-            // Start the task as a new stage
-            await Deno.core.ops.op_stage(`${triggeredName} (triggered)`);
-            try {
-              await task.fn();
-            } catch (e) {
+            // Fire-and-forget: run the task immediately without blocking the trigger loop.
+            // No stage is created so the task's commands appear alongside existing tasks.
+            task.fn().catch((e) => {
               console.error(`Task "${triggeredName}" failed:`, e);
-            }
+            });
           }
         }
-        // Yield to other tasks - the op itself is async so this provides backpressure
       } catch (e) {
         // Ignore errors during polling (e.g., if runtime is shutting down)
         break;

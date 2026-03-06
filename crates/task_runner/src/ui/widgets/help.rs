@@ -157,15 +157,18 @@ pub fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto
     let brand_color = hue_to_rgb(tick);
     let brand_style = Style::default().fg(brand_color).add_modifier(Modifier::BOLD);
 
-    let mut spans = if is_idle && has_registered_tasks {
+    let mut spans = if is_idle {
         let sparkle = SPARKLE_FRAMES[(tick / SPARKLE_INTERVAL) % SPARKLE_FRAMES.len()];
-        vec![
+        let mut v = vec![
             Span::styled(format!("{} ", sparkle), brand_style),
             Span::styled("ebdev", brand_style),
             Span::styled(" - ", Style::default().fg(Color::DarkGray)),
-            Span::styled("waiting ", Style::default().fg(Color::DarkGray)),
-            Span::styled("(press /)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-        ]
+            Span::styled("waiting", Style::default().fg(Color::DarkGray)),
+        ];
+        if has_registered_tasks {
+            v.push(Span::styled(" (press /)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)));
+        }
+        v
     } else {
         let sparkle = SPARKLE_FRAMES[(tick / SPARKLE_INTERVAL) % SPARKLE_FRAMES.len()];
         let slot = tick / TEXT_INTERVAL;
@@ -209,6 +212,7 @@ pub fn draw_help(frame: &mut Frame, area: Rect, has_registered_tasks: bool, auto
 
             let compact_label = if compact_mode { "c: sidebar" } else { "c: compact" };
             spans.push(Span::styled(compact_label, dim));
+            spans.push(Span::styled(" | C: clear", dim));
             spans.push(Span::styled(" | x: kill", dim));
 
             compact_area.set(Rect::new(x_before_compact, area.y, compact_label.len() as u16, 1));

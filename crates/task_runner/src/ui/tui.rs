@@ -217,6 +217,18 @@ impl TuiUI {
         self.ensure_focused_visible();
     }
 
+    /// Clear all completed stages and reset related state
+    fn clear_completed(&mut self) {
+        self.completed_stages.clear();
+        // If pinned to a completed task, unpin
+        if matches!(self.pinned_task, Some(PinTarget::CompletedTask { .. })) {
+            self.pinned_task = None;
+        }
+        self.task_list_scroll = 0;
+        self.focus = FocusTarget::CurrentTask(0);
+        self.user_navigated = false;
+    }
+
     /// Toggle pin on a target. If already pinned to the same target, unpin.
     fn toggle_pin(&mut self, pin: PinTarget) {
         if self.pinned_task == Some(pin) {
@@ -325,7 +337,8 @@ impl TuiUI {
             .cloned()
             .collect();
         let has_registered_tasks = !self.registered_tasks.is_empty();
-        let is_idle = self.tasks.is_empty();
+        let is_idle = self.tasks.is_empty()
+            || self.tasks.iter().all(|t| t.state != TaskState::Running);
         let auto_quit = self.auto_quit;
         let pinned_task = self.pinned_task;
         let compact_mode = self.compact_mode;
@@ -589,6 +602,9 @@ impl TuiUI {
                     }
                     KeyCode::Char('c') => {
                         self.compact_mode = !self.compact_mode;
+                    }
+                    KeyCode::Char('C') => {
+                        self.clear_completed();
                     }
                     KeyCode::Left => {
                         self.output_scroll.scroll_h_by(-4);
@@ -940,6 +956,7 @@ impl TaskRunnerUI for TuiUI {
         if self.pinned_task.is_none() && !self.user_navigated && matches!(self.focus, FocusTarget::CurrentTask(_)) {
             if let Some(idx) = self.tasks.iter().position(|t| t.state == TaskState::Running) {
                 self.focus = FocusTarget::CurrentTask(idx);
+                self.ensure_focused_visible();
             }
         }
 
