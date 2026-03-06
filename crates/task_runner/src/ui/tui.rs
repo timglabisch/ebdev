@@ -1,7 +1,7 @@
 use super::TaskRunnerUI;
 use super::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, TaskState, format_bytes};
 use super::widgets::command_palette::{self, CommandPaletteState};
-use super::widgets::{header, help, task_list, task_output};
+use super::widgets::{help, task_list, task_output};
 use crate::command::{CommandId, CommandResult, RegisteredTask};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
@@ -344,23 +344,19 @@ impl TuiUI {
             let mutagen_height = mutagen_widget.height()
                 .min(area.height / 3);
 
-            // Main layout: header + mutagen + tasks + help
+            // Main layout: mutagen + tasks + help
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),              // Header [0]
-                    Constraint::Length(mutagen_height), // Mutagen Sync [1]
-                    Constraint::Min(5),                // Tasks [2]
-                    Constraint::Length(1),              // Help [3]
+                    Constraint::Length(mutagen_height), // Mutagen Sync [0]
+                    Constraint::Min(5),                // Tasks [1]
+                    Constraint::Length(1),              // Help [2]
                 ])
                 .split(area);
 
-            // Header
-            header::draw_header(frame, chunks[0], task_name, tasks, completed_stages);
-
             // Mutagen Sync widget
             if !mutagen_widget.is_empty() {
-                mutagen_widget.draw(frame, chunks[1]);
+                mutagen_widget.draw(frame, chunks[0]);
             }
 
             // Tasks area
@@ -368,26 +364,26 @@ impl TuiUI {
                 let waiting = Paragraph::new("Waiting for tasks...")
                     .style(Style::default().fg(Color::DarkGray))
                     .block(Block::default().borders(Borders::ALL).title(" Tasks "));
-                frame.render_widget(waiting, chunks[2]);
+                frame.render_widget(waiting, chunks[1]);
             } else {
                 // Compute layout: compact = full width, normal = sidebar + output
                 let output_rect = if compact_mode {
                     task_list_area_rc.set(Rect::default());
-                    output_area_rc.set(chunks[2]);
-                    chunks[2]
+                    output_area_rc.set(chunks[1]);
+                    chunks[1]
                 } else {
                     let task_chunks = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([
-                            Constraint::Length(40.min(chunks[2].width / 3)),
+                            Constraint::Length(40.min(chunks[1].width / 3)),
                             Constraint::Min(20),
                         ])
-                        .split(chunks[2]);
+                        .split(chunks[1]);
 
                     task_list_area_rc.set(task_chunks[0]);
                     output_area_rc.set(task_chunks[1]);
 
-                    task_list::draw_task_list(frame, task_chunks[0], tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
+                    task_list::draw_task_list(frame, task_chunks[0], task_name, tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
 
                     task_chunks[1]
                 };
@@ -414,7 +410,7 @@ impl TuiUI {
             }
 
             // Help line
-            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, &help_compact_area_rc);
+            help::draw_help(frame, chunks[2], has_registered_tasks, auto_quit, compact_mode, &help_compact_area_rc);
 
             // Command Palette overlay
             if palette_open {

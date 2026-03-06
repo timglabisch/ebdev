@@ -1,12 +1,38 @@
-use crate::ui::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, truncate_string, MAX_STAGE_NAME_LEN, MAX_TASK_NAME_LEN};
+use crate::ui::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, TaskState, truncate_string, MAX_STAGE_NAME_LEN, MAX_TASK_NAME_LEN};
 use ratatui::layout::Margin;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+/// Build a compact title line with task counts: " task_name 3✓ 1● 1✗ "
+fn build_title(task_name: &str, tasks: &[TaskInfo], completed_stages: &[CompletedStage]) -> Line<'static> {
+    let running = tasks.iter().filter(|t| matches!(t.state, TaskState::Running)).count();
+    let completed = tasks.iter().filter(|t| t.state.is_success()).count()
+        + completed_stages.iter().map(|s| s.task_count() - s.failed_count).sum::<usize>();
+    let failed = tasks.iter().filter(|t| t.state.is_failed()).count()
+        + completed_stages.iter().map(|s| s.failed_count).sum::<usize>();
+
+    let mut spans = vec![
+        Span::raw(format!(" {} ", task_name)),
+    ];
+
+    if completed > 0 {
+        spans.push(Span::styled(format!("{}✓ ", completed), Style::default().fg(Color::Green)));
+    }
+    if running > 0 {
+        spans.push(Span::styled(format!("{}● ", running), Style::default().fg(Color::Yellow)));
+    }
+    if failed > 0 {
+        spans.push(Span::styled(format!("{}✗ ", failed), Style::default().fg(Color::Red)));
+    }
+
+    Line::from(spans)
+}
 
 /// Draw task list with expandable completed stages and current tasks.
 pub fn draw_task_list(
     frame: &mut Frame,
     area: Rect,
+    task_name: &str,
     tasks: &[TaskInfo],
     completed_stages: &[CompletedStage],
     current_stage: Option<&str>,
@@ -131,8 +157,9 @@ pub fn draw_task_list(
     let max_scroll = content_height.saturating_sub(visible_height);
     let scroll = scroll_offset.min(max_scroll);
 
+    let title = build_title(task_name, tasks, completed_stages);
     let task_list = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Tasks "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .scroll((scroll as u16, 0));
     frame.render_widget(task_list, area);
 

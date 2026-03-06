@@ -794,3 +794,29 @@ export async function compact_vim() {
     );
     await ui.disableCompactMode();
 }
+
+// =============================================================================
+// Dynamic Tasks Example — register tasks, then run a long process
+// =============================================================================
+
+export async function test_dynamic() {
+    await task("fixtures", "Load test fixtures into database", async () => {
+        await shell("echo 'Loading fixtures...' && sleep 1 && echo 'Done!'");
+    });
+
+    await task("clear-cache", "Clear all application caches", async () => {
+        await shell("echo 'Clearing caches...' && sleep 0.5 && echo 'Caches cleared!'");
+    });
+
+    await task("migrate", "Run database migrations", async () => {
+        await shell("echo 'Running migrations...' && sleep 1.5 && echo 'Migrations complete!'");
+    });
+
+    await stage("Running");
+    console.log("Press '/' to open the Command Palette and trigger a task!");
+    await shell("i=0; while [ $i -lt 120 ]; do echo \"tick $i $(date)\"; sleep 1; i=$((i+1)); done", { name: "main loop" });
+
+    await untask("fixtures");
+    await untask("clear-cache");
+    await untask("migrate");
+}
