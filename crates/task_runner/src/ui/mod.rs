@@ -55,6 +55,9 @@ pub trait TaskRunnerUI {
     /// Set compact mode (hide/show sidebar)
     fn on_compact_mode(&mut self, _enabled: bool) {}
 
+    /// Set feature flags for display/toggling in the TUI
+    fn on_flags_set(&mut self, _flags: &[crate::command::FlagDisplay]) {}
+
     /// Returns whether the UI should auto-quit when tasks complete
     fn should_auto_quit(&self) -> bool { true }
 

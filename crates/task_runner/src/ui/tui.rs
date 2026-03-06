@@ -1,8 +1,9 @@
 use super::TaskRunnerUI;
-use super::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, TaskState, format_bytes};
+use super::types::{CompletedStage, FocusTarget, PinTarget, TaskInfo, TaskState, format_bytes, row_from_click};
 use super::widgets::command_palette::{self, CommandPaletteState};
-use super::widgets::{help, task_list, task_output};
-use crate::command::{CommandId, CommandResult, RegisteredTask};
+use super::widgets::tab_bar::{self, ActiveTab};
+use super::widgets::{flag_browser, help, task_browser, task_list, task_output};
+use crate::command::{CommandId, CommandResult, FlagDisplay, RegisteredTask};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
@@ -108,6 +109,20 @@ pub struct TuiUI {
     kill_request: Option<CommandId>,
     /// True after user navigated with j/k — suppresses auto-focus until new task starts
     user_navigated: bool,
+    /// Active tab (Output, Tasks, or Flags)
+    active_tab: ActiveTab,
+    /// Stored geometry of tab bar labels (for mouse hit-testing)
+    tab_areas: [Rc<Cell<Rect>>; 3],
+    /// Selected index in the task browser
+    task_browser_selected: usize,
+    /// Stored geometry + count for task browser rows (for mouse hit-testing)
+    task_browser_area: Rc<Cell<(Rect, usize)>>,
+    /// Feature flags for the Flags tab
+    flags: Vec<FlagDisplay>,
+    /// Selected index in the flag browser
+    flag_browser_selected: usize,
+    /// Stored geometry + count for flag browser rows (for mouse hit-testing)
+    flag_browser_area: Rc<Cell<(Rect, usize)>>,
 }
 
 impl TuiUI {
@@ -146,6 +161,13 @@ impl TuiUI {
             help_compact_area: Rc::new(Cell::new(Rect::default())),
             kill_request: None,
             user_navigated: false,
+            active_tab: ActiveTab::Output,
+            tab_areas: [Rc::new(Cell::new(Rect::default())), Rc::new(Cell::new(Rect::default())), Rc::new(Cell::new(Rect::default()))],
+            task_browser_selected: 0,
+            task_browser_area: Rc::new(Cell::new((Rect::default(), 0))),
+            flags: Vec::new(),
+            flag_browser_selected: 0,
+            flag_browser_area: Rc::new(Cell::new((Rect::default(), 0))),
         })
     }
 
@@ -251,20 +273,17 @@ impl TuiUI {
 
     /// Check if a mouse position is over the task list panel
     fn is_over_task_list(&self, col: u16, row: u16) -> bool {
-        let area = self.task_list_area.get();
-        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+        self.task_list_area.get().contains(Position::new(col, row))
     }
 
     /// Check if a mouse position is over the output panel
     fn is_over_output(&self, col: u16, row: u16) -> bool {
-        let area = self.output_area.get();
-        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+        self.output_area.get().contains(Position::new(col, row))
     }
 
     /// Check if a mouse position is over the compact toggle in the help line
     fn is_over_help_compact(&self, col: u16, row: u16) -> bool {
-        let area = self.help_compact_area.get();
-        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+        self.help_compact_area.get().contains(Position::new(col, row))
     }
 
     /// Scroll the task list by delta lines, clamped to valid range
@@ -334,6 +353,16 @@ impl TuiUI {
         let task_list_area_rc = self.task_list_area.clone();
         let output_area_rc = self.output_area.clone();
         let help_compact_area_rc = self.help_compact_area.clone();
+        let active_tab = self.active_tab;
+        let task_count = self.registered_tasks.len();
+        let flag_count = self.flags.len();
+        let tab_areas = self.tab_areas.clone();
+        let task_browser_selected = self.task_browser_selected;
+        let task_browser_area_rc = self.task_browser_area.clone();
+        let registered_tasks = &self.registered_tasks;
+        let flags = &self.flags;
+        let flag_browser_selected = self.flag_browser_selected;
+        let flag_browser_area_rc = self.flag_browser_area.clone();
         let palette = &self.palette;
         let mutagen_widget = &self.mutagen_widget;
         let h_scroll = self.output_scroll.h_offset;
@@ -344,73 +373,87 @@ impl TuiUI {
             let mutagen_height = mutagen_widget.height()
                 .min(area.height / 3);
 
-            // Main layout: mutagen + tasks + help
+            // Main layout: tab bar + mutagen + tasks + help
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(mutagen_height), // Mutagen Sync [0]
-                    Constraint::Min(5),                // Tasks [1]
-                    Constraint::Length(1),              // Help [2]
+                    Constraint::Length(1),              // Tab bar [0]
+                    Constraint::Length(mutagen_height), // Mutagen Sync [1]
+                    Constraint::Min(5),                // Tasks [2]
+                    Constraint::Length(1),              // Help [3]
                 ])
                 .split(area);
 
+            // Tab bar
+            tab_bar::draw_tab_bar(frame, chunks[0], active_tab, task_count, flag_count, &tab_areas);
+
             // Mutagen Sync widget
             if !mutagen_widget.is_empty() {
-                mutagen_widget.draw(frame, chunks[0]);
+                mutagen_widget.draw(frame, chunks[1]);
             }
 
-            // Tasks area
-            if tasks.is_empty() && completed_stages.is_empty() {
-                let waiting = Paragraph::new("Waiting for tasks...")
-                    .style(Style::default().fg(Color::DarkGray))
-                    .block(Block::default().borders(Borders::ALL).title(" Tasks "));
-                frame.render_widget(waiting, chunks[1]);
-            } else {
-                // Compute layout: compact = full width, normal = sidebar + output
-                let output_rect = if compact_mode {
-                    task_list_area_rc.set(Rect::default());
-                    output_area_rc.set(chunks[1]);
-                    chunks[1]
-                } else {
-                    let task_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Length(40.min(chunks[1].width / 3)),
-                            Constraint::Min(20),
-                        ])
-                        .split(chunks[1]);
-
-                    task_list_area_rc.set(task_chunks[0]);
-                    output_area_rc.set(task_chunks[1]);
-
-                    task_list::draw_task_list(frame, task_chunks[0], task_name, tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
-
-                    task_chunks[1]
-                };
-
-                // Resolve output task: pinned > focused completed task > stacked mode
-                let output_task: Option<&TaskInfo> = if let Some(ref pin) = pinned_task {
-                    pin.resolve_task(completed_stages, tasks)
-                } else if let FocusTarget::CompletedTask { stage: si, task: ti } = focus {
-                    completed_stages.get(si).and_then(|s| s.tasks.get(ti))
-                } else {
-                    None
-                };
-
-                if let Some(task) = output_task {
-                    task_output::draw_task_output(frame, output_rect, task, output_scroll_offset, h_scroll, false);
-                } else {
-                    let focused_idx = if compact_mode {
-                        if let FocusTarget::CurrentTask(idx) = focus { Some(idx) } else { None }
+            match active_tab {
+                ActiveTab::Output => {
+                    // Tasks area
+                    if tasks.is_empty() && completed_stages.is_empty() {
+                        let waiting = Paragraph::new("Waiting for tasks...")
+                            .style(Style::default().fg(Color::DarkGray))
+                            .block(Block::default().borders(Borders::ALL).title(" Tasks "));
+                        frame.render_widget(waiting, chunks[2]);
                     } else {
-                        None
-                    };
-                    task_output::draw_stacked_outputs(frame, output_rect, tasks, h_scroll, focused_idx);
+                        // Compute layout: compact = full width, normal = sidebar + output
+                        let output_rect = if compact_mode {
+                            task_list_area_rc.set(Rect::default());
+                            output_area_rc.set(chunks[2]);
+                            chunks[2]
+                        } else {
+                            let task_chunks = Layout::default()
+                                .direction(Direction::Horizontal)
+                                .constraints([
+                                    Constraint::Length(40.min(chunks[2].width / 3)),
+                                    Constraint::Min(20),
+                                ])
+                                .split(chunks[2]);
+
+                            task_list_area_rc.set(task_chunks[0]);
+                            output_area_rc.set(task_chunks[1]);
+
+                            task_list::draw_task_list(frame, task_chunks[0], task_name, tasks, completed_stages, current_stage.as_deref(), focus, pinned_task, task_list_scroll);
+
+                            task_chunks[1]
+                        };
+
+                        // Resolve output task: pinned > focused completed task > stacked mode
+                        let output_task: Option<&TaskInfo> = if let Some(ref pin) = pinned_task {
+                            pin.resolve_task(completed_stages, tasks)
+                        } else if let FocusTarget::CompletedTask { stage: si, task: ti } = focus {
+                            completed_stages.get(si).and_then(|s| s.tasks.get(ti))
+                        } else {
+                            None
+                        };
+
+                        if let Some(task) = output_task {
+                            task_output::draw_task_output(frame, output_rect, task, output_scroll_offset, h_scroll, false);
+                        } else {
+                            let focused_idx = if compact_mode {
+                                if let FocusTarget::CurrentTask(idx) = focus { Some(idx) } else { None }
+                            } else {
+                                None
+                            };
+                            task_output::draw_stacked_outputs(frame, output_rect, tasks, h_scroll, focused_idx);
+                        }
+                    }
+                }
+                ActiveTab::Tasks => {
+                    task_browser::draw_task_browser(frame, chunks[2], registered_tasks, task_browser_selected, &task_browser_area_rc);
+                }
+                ActiveTab::Flags => {
+                    flag_browser::draw_flag_browser(frame, chunks[2], flags, flag_browser_selected, &flag_browser_area_rc);
                 }
             }
 
             // Help line
-            help::draw_help(frame, chunks[2], has_registered_tasks, auto_quit, compact_mode, &help_compact_area_rc);
+            help::draw_help(frame, chunks[3], has_registered_tasks, auto_quit, compact_mode, active_tab, &help_compact_area_rc);
 
             // Command Palette overlay
             if palette_open {
@@ -441,81 +484,192 @@ impl TuiUI {
     }
 
     fn handle_key(&mut self, code: KeyCode) -> io::Result<()> {
+        // Global keys (always available outside command palette)
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
+                if self.active_tab != ActiveTab::Output {
+                    self.active_tab = ActiveTab::Output;
+                    return Ok(());
+                }
                 self.should_quit = true;
+                return Ok(());
             }
             KeyCode::Char('/') => {
                 if !self.registered_tasks.is_empty() {
+                    self.active_tab = ActiveTab::Output;
                     self.palette.open();
                     self.auto_quit = false;
                 }
+                return Ok(());
             }
-            // j / Tab: next item
-            KeyCode::Char('j') | KeyCode::Tab => {
-                self.move_focus(1);
+            KeyCode::Char('1') => {
+                self.active_tab = ActiveTab::Output;
+                return Ok(());
             }
-            // k / Shift+Tab: previous item
-            KeyCode::Char('k') | KeyCode::BackTab => {
-                self.move_focus(-1);
-            }
-            // Enter: expand/collapse stage or toggle pin on task
-            KeyCode::Enter => {
-                self.handle_enter();
-            }
-            KeyCode::Up => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(-1);
+            KeyCode::Char('2') => {
+                if !self.registered_tasks.is_empty() {
+                    self.active_tab = ActiveTab::Tasks;
+                    self.auto_quit = false;
                 }
+                return Ok(());
             }
-            KeyCode::Down => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(1);
+            KeyCode::Char('3') => {
+                if !self.flags.is_empty() {
+                    self.active_tab = ActiveTab::Flags;
+                    self.auto_quit = false;
                 }
-            }
-            KeyCode::PageUp => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(-10);
-                }
-            }
-            KeyCode::PageDown => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(10);
-                }
-            }
-            KeyCode::End => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.jump_to_end();
-                }
-            }
-            KeyCode::Home => {
-                if self.resolve_output_task().is_some() {
-                    self.output_scroll.jump_to_start();
-                }
-            }
-            KeyCode::Char('x') => {
-                // Kill the focused running task
-                if let FocusTarget::CurrentTask(idx) = self.focus {
-                    if let Some(task) = self.tasks.get_mut(idx) {
-                        if task.state == TaskState::Running {
-                            self.kill_request = Some(task.id);
-                            task.killed = true;
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('c') => {
-                self.compact_mode = !self.compact_mode;
-            }
-            KeyCode::Left => {
-                self.output_scroll.scroll_h_by(-4);
-            }
-            KeyCode::Right => {
-                self.output_scroll.scroll_h_by(4);
+                return Ok(());
             }
             _ => {}
         }
+
+        // Tab-specific keys
+        match self.active_tab {
+            ActiveTab::Output => {
+                match code {
+                    // j / Tab: next item
+                    KeyCode::Char('j') | KeyCode::Tab => {
+                        self.move_focus(1);
+                    }
+                    // k / Shift+Tab: previous item
+                    KeyCode::Char('k') | KeyCode::BackTab => {
+                        self.move_focus(-1);
+                    }
+                    // Enter: expand/collapse stage or toggle pin on task
+                    KeyCode::Enter => {
+                        self.handle_enter();
+                    }
+                    KeyCode::Up => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.scroll_by(-1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.scroll_by(1);
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.scroll_by(-10);
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.scroll_by(10);
+                        }
+                    }
+                    KeyCode::End => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.jump_to_end();
+                        }
+                    }
+                    KeyCode::Home => {
+                        if self.resolve_output_task().is_some() {
+                            self.output_scroll.jump_to_start();
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        // Kill the focused running task
+                        if let FocusTarget::CurrentTask(idx) = self.focus {
+                            if let Some(task) = self.tasks.get_mut(idx) {
+                                if task.state == TaskState::Running {
+                                    self.kill_request = Some(task.id);
+                                    task.killed = true;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        self.compact_mode = !self.compact_mode;
+                    }
+                    KeyCode::Left => {
+                        self.output_scroll.scroll_h_by(-4);
+                    }
+                    KeyCode::Right => {
+                        self.output_scroll.scroll_h_by(4);
+                    }
+                    _ => {}
+                }
+            }
+            ActiveTab::Tasks => {
+                match code {
+                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                        if !self.registered_tasks.is_empty() {
+                            self.task_browser_selected = (self.task_browser_selected + 1)
+                                .min(self.registered_tasks.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                        self.task_browser_selected = self.task_browser_selected.saturating_sub(1);
+                    }
+                    KeyCode::Enter => {
+                        self.trigger_registered_task(self.task_browser_selected);
+                    }
+                    _ => {}
+                }
+            }
+            ActiveTab::Flags => {
+                match code {
+                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                        if !self.flags.is_empty() {
+                            self.flag_browser_selected = (self.flag_browser_selected + 1)
+                                .min(self.flags.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                        self.flag_browser_selected = self.flag_browser_selected.saturating_sub(1);
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        self.toggle_flag(self.flag_browser_selected);
+                    }
+                    _ => {}
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Trigger a registered task by index, switching back to Output tab
+    fn trigger_registered_task(&mut self, idx: usize) {
+        if let Some(task) = self.registered_tasks.get(idx) {
+            self.triggered_task = Some(task.name.clone());
+            self.active_tab = ActiveTab::Output;
+        }
+    }
+
+    /// Check if a mouse position is over a tab bar label
+    fn tab_from_click(&self, col: u16, row: u16) -> Option<ActiveTab> {
+        let pos = Position::new(col, row);
+        if self.tab_areas[0].get().contains(pos) {
+            return Some(ActiveTab::Output);
+        }
+        if self.tab_areas[1].get().contains(pos) {
+            return Some(ActiveTab::Tasks);
+        }
+        if self.tab_areas[2].get().contains(pos) {
+            return Some(ActiveTab::Flags);
+        }
+        None
+    }
+
+    /// Check if a mouse position is over the task browser, returns the row index
+    fn task_browser_row_from_click(&self, col: u16, row: u16) -> Option<usize> {
+        let (area, count) = self.task_browser_area.get();
+        row_from_click(area, count, col, row)
+    }
+
+    /// Check if a mouse position is over the flag browser, returns the row index
+    fn flag_browser_row_from_click(&self, col: u16, row: u16) -> Option<usize> {
+        let (area, count) = self.flag_browser_area.get();
+        row_from_click(area, count, col, row)
+    }
+
+    /// Toggle a flag at the given index, handling dependency cascades and saving
+    fn toggle_flag(&mut self, idx: usize) {
+        if flag_browser::toggle_flag(&mut self.flags, idx) {
+            flag_browser::save_flags(&self.flags);
+        }
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -524,6 +678,40 @@ impl TuiUI {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Tab bar click
+                if let Some(tab) = self.tab_from_click(col, row) {
+                    if tab == ActiveTab::Tasks && self.registered_tasks.is_empty() {
+                        return;
+                    }
+                    if tab == ActiveTab::Flags && self.flags.is_empty() {
+                        return;
+                    }
+                    self.active_tab = tab;
+                    if tab != ActiveTab::Output {
+                        self.auto_quit = false;
+                    }
+                    return;
+                }
+
+                // Task browser click (when Tasks tab active)
+                if self.active_tab == ActiveTab::Tasks {
+                    if let Some(idx) = self.task_browser_row_from_click(col, row) {
+                        self.task_browser_selected = idx;
+                        self.trigger_registered_task(idx);
+                    }
+                    return;
+                }
+
+                // Flag browser click (when Flags tab active)
+                if self.active_tab == ActiveTab::Flags {
+                    if let Some(idx) = self.flag_browser_row_from_click(col, row) {
+                        self.flag_browser_selected = idx;
+                        self.toggle_flag(idx);
+                    }
+                    return;
+                }
+
+                // Output tab: existing behavior
                 if self.is_over_help_compact(col, row) {
                     self.compact_mode = !self.compact_mode;
                 } else if let Some(target) = self.focus_target_from_click(col, row) {
@@ -532,26 +720,30 @@ impl TuiUI {
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.is_over_task_list(col, row) {
-                    self.scroll_task_list(-3);
-                } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(-3);
+                if self.active_tab == ActiveTab::Output {
+                    if self.is_over_task_list(col, row) {
+                        self.scroll_task_list(-3);
+                    } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
+                        self.output_scroll.scroll_by(-3);
+                    }
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.is_over_task_list(col, row) {
-                    self.scroll_task_list(3);
-                } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
-                    self.output_scroll.scroll_by(3);
+                if self.active_tab == ActiveTab::Output {
+                    if self.is_over_task_list(col, row) {
+                        self.scroll_task_list(3);
+                    } else if self.is_over_output(col, row) && self.resolve_output_task().is_some() {
+                        self.output_scroll.scroll_by(3);
+                    }
                 }
             }
             MouseEventKind::ScrollLeft => {
-                if self.is_over_output(col, row) {
+                if self.active_tab == ActiveTab::Output && self.is_over_output(col, row) {
                     self.output_scroll.scroll_h_by(-4);
                 }
             }
             MouseEventKind::ScrollRight => {
-                if self.is_over_output(col, row) {
+                if self.active_tab == ActiveTab::Output && self.is_over_output(col, row) {
                     self.output_scroll.scroll_h_by(4);
                 }
             }
@@ -715,6 +907,13 @@ impl TaskRunnerUI for TuiUI {
 
     fn on_compact_mode(&mut self, enabled: bool) {
         self.compact_mode = enabled;
+    }
+
+    fn on_flags_set(&mut self, flags: &[FlagDisplay]) {
+        self.flags = flags.to_vec();
+        if self.flag_browser_selected >= self.flags.len() {
+            self.flag_browser_selected = 0;
+        }
     }
 
     fn should_auto_quit(&self) -> bool {

@@ -211,6 +211,9 @@ impl Executor {
                     ExecutorMessage::CompactMode { enabled } => {
                         ui.on_compact_mode(enabled);
                     }
+                    ExecutorMessage::SetFlags { flags } => {
+                        ui.on_flags_set(&flags);
+                    }
                     ExecutorMessage::Kill { id } => {
                         if let Some(tx) = self.kill_senders.remove(&id) {
                             let _ = tx.send(());

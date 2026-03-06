@@ -216,3 +216,14 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
         s.to_string()
     }
 }
+
+/// Hit-test a mouse click against a bordered list widget.
+/// Returns the item index if the click is inside the widget content area.
+/// `area` = widget Rect, `count` = number of items in the list.
+pub fn row_from_click(area: ratatui::prelude::Rect, count: usize, col: u16, row: u16) -> Option<usize> {
+    if count == 0 || !area.contains(ratatui::prelude::Position::new(col, row)) {
+        return None;
+    }
+    let idx = (row.saturating_sub(area.y + 1)) as usize; // -1 for top border
+    if idx < count { Some(idx) } else { None }
+}

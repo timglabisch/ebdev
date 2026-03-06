@@ -17,6 +17,7 @@ pub use command::OutputEvent;
 pub use command::RegisteredTask;
 pub use command::MutagenSessionProgress;
 pub use command::MutagenSyncPhase;
+pub use command::FlagDisplay;
 pub use command::TuiEvent;
 pub use ebdev_remote::OutputStream;
 pub use ui::{HeadlessUI, TaskRunnerUI, TuiUI};
@@ -157,6 +158,13 @@ impl TaskRunnerHandle {
     pub fn set_compact_mode(&self, enabled: bool) -> Result<(), TaskRunnerError> {
         self.tx
             .send(ExecutorMessage::CompactMode { enabled })
+            .map_err(|_| TaskRunnerError::ChannelClosed)
+    }
+
+    /// Set feature flags for the Flags tab in the TUI
+    pub fn set_flags(&self, flags: Vec<command::FlagDisplay>) -> Result<(), TaskRunnerError> {
+        self.tx
+            .send(ExecutorMessage::SetFlags { flags })
             .map_err(|_| TaskRunnerError::ChannelClosed)
     }
 

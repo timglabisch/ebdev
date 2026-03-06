@@ -155,6 +155,18 @@ pub struct RegisteredTask {
     pub description: String,
 }
 
+/// Display data for a feature flag in the TUI
+#[derive(Debug, Clone)]
+pub struct FlagDisplay {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub default_enabled: bool,
+    pub requires: Vec<String>,
+    /// Original saved value from flags.json (preserved for round-trip fidelity)
+    pub saved_value: Option<serde_json::Value>,
+}
+
 /// Control messages from Deno to the executor
 pub enum ExecutorMessage {
     /// Execute a command
@@ -179,6 +191,8 @@ pub enum ExecutorMessage {
     CompactMode { enabled: bool },
     /// Kill a running task
     Kill { id: CommandId },
+    /// Set feature flags for the Flags tab
+    SetFlags { flags: Vec<FlagDisplay> },
     /// Shutdown the executor
     Shutdown,
 }

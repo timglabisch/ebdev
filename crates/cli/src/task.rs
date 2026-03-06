@@ -69,6 +69,9 @@ async fn run_task_with_runner(
     task_args: Vec<String>,
     flag_overrides: std::collections::HashMap<String, serde_json::Value>,
 ) -> anyhow::Result<ExitCode> {
+    // Load flags and send to TUI before starting the task
+    send_flags_to_tui(config_path, &handle).await;
+
     let handle_for_shutdown = handle.clone();
 
     let deno_result = ebdev_toolchain_deno::run_task(
@@ -89,4 +92,46 @@ async fn run_task_with_runner(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Load feature flags and send them to the TUI for display.
+async fn send_flags_to_tui(config_path: &std::path::Path, handle: &TaskRunnerHandle) {
+    let flags = match ebdev_toolchain_deno::list_flags(config_path).await {
+        Ok(f) => f,
+        Err(_) => return, // No flags or config error — skip silently
+    };
+
+    if flags.is_empty() {
+        return;
+    }
+
+    let saved = crate::flags::load_saved_flags();
+
+    let flag_displays: Vec<ebdev_task_runner::FlagDisplay> = flags.iter().map(|f| {
+        let default_enabled = match &f.default {
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Object(_) => true, // config object = enabled
+            _ => false,
+        };
+
+        let saved_val = saved.get(&f.name);
+        let enabled = match saved_val {
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(serde_json::Value::Object(_)) => true,
+            Some(serde_json::Value::Null) => false,
+            None => default_enabled,
+            _ => default_enabled,
+        };
+
+        ebdev_task_runner::FlagDisplay {
+            name: f.name.clone(),
+            description: f.description.clone(),
+            enabled,
+            default_enabled,
+            requires: f.requires.clone(),
+            saved_value: saved_val.cloned(),
+        }
+    }).collect();
+
+    let _ = handle.set_flags(flag_displays);
 }
