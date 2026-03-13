@@ -489,18 +489,15 @@ impl TuiUI {
             let ev = event::read()?;
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    // Ignore keys with Ctrl/Alt modifiers — they shouldn't trigger
-                    // letter bindings (e.g. Ctrl+C must not toggle compact mode)
-                    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-                        if key.code == KeyCode::Char('c') {
-                            self.should_quit = true;
-                        }
+                    // Ctrl+C → quit
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        self.should_quit = true;
                         return Ok(false);
                     }
                     if self.palette.open {
                         return self.handle_command_palette_input(key.code);
                     }
-                    self.handle_key(key.code)?;
+                    self.handle_key(key.code, key.modifiers)?;
                 }
                 Event::Mouse(mouse) => {
                     self.handle_mouse(mouse);
@@ -511,7 +508,7 @@ impl TuiUI {
         Ok(false)
     }
 
-    fn handle_key(&mut self, code: KeyCode) -> io::Result<()> {
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> io::Result<()> {
         // Global keys (always available outside command palette)
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -608,11 +605,14 @@ impl TuiUI {
                             }
                         }
                     }
-                    KeyCode::Char('c') => {
-                        self.compact_mode = !self.compact_mode;
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::SHIFT) => {
+                        self.clear_completed();
                     }
                     KeyCode::Char('C') => {
                         self.clear_completed();
+                    }
+                    KeyCode::Char('c') => {
+                        self.compact_mode = !self.compact_mode;
                     }
                     KeyCode::Left => {
                         self.output_scroll.scroll_h_by(-4);
