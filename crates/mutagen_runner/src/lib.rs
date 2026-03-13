@@ -25,6 +25,14 @@ pub enum MutagenRunnerError {
     CommandFailed(String),
 }
 
+/// Checks whether a session name belongs to a project identified by its CRC32 suffix.
+///
+/// Session names follow the format `{name}-{crc32:08x}`. The CRC32 suffix is
+/// always exactly 8 hex chars preceded by a `-`.
+fn is_project_session(session_name: &str, crc32_suffix: &str) -> bool {
+    session_name.ends_with(&format!("-{}", crc32_suffix))
+}
+
 // ============================================================================
 // MutagenBackend Trait - abstrahiert Mutagen-Interaktion für Tests
 // ============================================================================
@@ -260,7 +268,7 @@ pub async fn pause_project_sessions(
 
     let sessions = backend.list_sessions().await?;
     let mut paused = 0;
-    for session in sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+    for session in sessions.iter().filter(|s| is_project_session(&s.name, &suffix)) {
         if backend.pause_session(&session.identifier).await.is_ok() {
             paused += 1;
         }
@@ -311,7 +319,7 @@ where
         let current_sessions = backend.list_sessions().await?;
         let project_sessions: Vec<_> = current_sessions
             .iter()
-            .filter(|s| s.name.ends_with(&suffix))
+            .filter(|s| is_project_session(&s.name, &suffix))
             .collect();
 
         // First: pause all sessions to stop syncing immediately.
@@ -330,29 +338,31 @@ where
         return Ok(());
     }
 
-    // SAFETY: Pause ALL existing project sessions immediately.
-    // This prevents data loss when:
-    // - Process was interrupted (Ctrl+C) and restarted: old sessions may still
-    //   be running while Docker containers are being recreated
-    // - Docker containers are recreated: sessions might briefly see empty remote
-    //   state and sync deletions back to local
-    // Sessions that match the desired state will be resumed in the reconcile loop.
+    // SAFETY: Terminate ALL existing project sessions immediately.
+    // A resumed session carries prior state — if beta was emptied (e.g. container
+    // recreated), mutagen would interpret "files gone on beta" as deletions and
+    // propagate them back to alpha, deleting the host directory.
+    // By always creating fresh sessions we ensure mutagen has no prior state and
+    // syncs alpha → beta cleanly.
     {
         let current_sessions = backend.list_sessions().await?;
-        for session in current_sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+        for session in current_sessions.iter().filter(|s| is_project_session(&s.name, &suffix)) {
             let _ = backend.pause_session(&session.identifier).await;
+        }
+        for session in current_sessions.iter().filter(|s| is_project_session(&s.name, &suffix)) {
+            let _ = backend.terminate_session(&session.identifier).await;
         }
     }
 
     // Run the reconcile loop, but on ANY error, pause all project sessions
     // first to prevent data loss from syncing empty remote state.
-    match reconcile_loop(&backend, &desired, &suffix, project_crc32, &mut status_callback).await {
+    match reconcile_loop(&backend, &desired, &mut status_callback).await {
         Ok(()) => Ok(()),
         Err(e) => {
             // Safety: pause all project sessions before propagating error
             eprintln!("[mutagen] Error during reconcile, pausing all sessions for safety: {}", e);
             if let Ok(current_sessions) = backend.list_sessions().await {
-                for session in current_sessions.iter().filter(|s| s.name.ends_with(&suffix)) {
+                for session in current_sessions.iter().filter(|s| is_project_session(&s.name, &suffix)) {
                     let _ = backend.pause_session(&session.identifier).await;
                 }
             }
@@ -365,8 +375,6 @@ where
 async fn reconcile_loop<F>(
     backend: &RealMutagen,
     desired: &state::DesiredState,
-    suffix: &str,
-    _project_crc32: u32,
     status_callback: &mut F,
 ) -> Result<(), MutagenRunnerError>
 where
@@ -416,31 +424,12 @@ where
             break;
         }
 
-        // Reconcile: Create missing sessions, terminate changed ones
+        // Create any desired sessions that don't exist yet.
+        // All old project sessions were already terminated before the loop,
+        // so this only fires on the first iteration (or if creation failed previously).
         for session in &desired.sessions {
-            let prefix = format!("{}-", session.project_name);
-
-            // Find existing sessions for this project
-            let existing: Vec<_> = actual
-                .sessions
-                .iter()
-                .filter(|s| s.name.starts_with(&prefix) && s.name.ends_with(suffix))
-                .collect();
-
-            let mut found_match = false;
-            for existing_session in &existing {
-                if existing_session.name == session.name {
-                    // Perfect match - resume it (was paused at start for safety)
-                    found_match = true;
-                    let _ = backend.resume_session(&existing_session.identifier).await;
-                } else {
-                    // Config changed - terminate old session (already paused at start)
-                    let _ = backend.terminate_session(&existing_session.identifier).await;
-                }
-            }
-
-            if !found_match {
-                // Create new session
+            let exists = actual.find_by_name(&session.name).is_some();
+            if !exists {
                 backend.create_session_from_desired(session, false).await?;
             }
         }
@@ -575,6 +564,38 @@ pub mod test_utils {
 mod tests {
     use super::*;
     use test_utils::*;
+
+    #[test]
+    fn test_is_project_session() {
+        let suffix = "aabbccdd";
+
+        // Valid: {name}-{suffix}
+        assert!(is_project_session("frontend-aabbccdd", suffix));
+        assert!(is_project_session("backend-aabbccdd", suffix));
+
+        // Valid: {name}-{hash}-{suffix} (config hash in name)
+        assert!(is_project_session("frontend-deadbeef-aabbccdd", suffix));
+
+        // Valid: name with dashes
+        assert!(is_project_session("my-app-aabbccdd", suffix));
+        assert!(is_project_session("my-app-deadbeef-aabbccdd", suffix));
+
+        // Invalid: no dash before suffix
+        assert!(!is_project_session("frontendaabbccdd", suffix));
+
+        // Invalid: suffix alone (no name part)
+        assert!(!is_project_session("aabbccdd", suffix));
+
+        // Invalid: different suffix
+        assert!(!is_project_session("frontend-11223344", suffix));
+
+        // Invalid: different project (suffix only happens to share trailing chars)
+        assert!(!is_project_session("other-11aabbccdd", suffix));
+
+        // Prefix overlap: "src" vs "src-frontend" - both valid, distinct sessions
+        assert!(is_project_session("src-aabbccdd", suffix));
+        assert!(is_project_session("src-frontend-aabbccdd", suffix));
+    }
 
     #[tokio::test]
     async fn test_mock_backend_create_session() {

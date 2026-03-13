@@ -3,8 +3,6 @@
 //! Der DesiredState wird aus der Projekt-Konfiguration berechnet und repräsentiert
 //! den Soll-Zustand des Systems.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use crate::config::{PermissionsConfig, PollingConfig, SyncMode};
@@ -47,8 +45,6 @@ pub struct DesiredSession {
     pub polling: PollingConfig,
     /// Permissions-Konfiguration
     pub permissions: PermissionsConfig,
-    /// Hash der relevanten Config-Felder (für Change Detection)
-    pub config_hash: u64,
 }
 
 impl DesiredSession {
@@ -61,7 +57,6 @@ impl DesiredSession {
         mode: SyncMode,
         ignore: Vec<String>,
     ) -> Self {
-        let config_hash = Self::compute_hash(&alpha, &beta, &mode, &ignore);
         Self {
             name: session_name,
             project_name,
@@ -71,23 +66,7 @@ impl DesiredSession {
             ignore,
             polling: PollingConfig::default(),
             permissions: PermissionsConfig::default(),
-            config_hash,
         }
-    }
-
-    /// Berechnet einen Hash für die Session-Konfiguration.
-    fn compute_hash(alpha: &PathBuf, beta: &str, mode: &SyncMode, ignore: &[String]) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        alpha.hash(&mut hasher);
-        beta.hash(&mut hasher);
-        format!("{:?}", mode).hash(&mut hasher);
-        ignore.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Prefix für Session-Namen (project_name + "-")
-    pub fn name_prefix(&self) -> String {
-        format!("{}-", self.project_name)
     }
 }
 
@@ -130,49 +109,4 @@ mod tests {
         assert_eq!(state.root_crc32, 0x12345678);
     }
 
-    #[test]
-    fn test_config_hash_differs_for_different_config() {
-        let s1 = DesiredSession::new(
-            "test-1".to_string(),
-            "test".to_string(),
-            PathBuf::from("/test"),
-            "docker://target-v1".to_string(),
-            SyncMode::TwoWay,
-            vec![],
-        );
-
-        let s2 = DesiredSession::new(
-            "test-2".to_string(),
-            "test".to_string(),
-            PathBuf::from("/test"),
-            "docker://target-v2".to_string(),
-            SyncMode::TwoWay,
-            vec![],
-        );
-
-        assert_ne!(s1.config_hash, s2.config_hash);
-    }
-
-    #[test]
-    fn test_config_hash_same_for_identical_config() {
-        let s1 = DesiredSession::new(
-            "test-1".to_string(),
-            "test".to_string(),
-            PathBuf::from("/test"),
-            "docker://target".to_string(),
-            SyncMode::TwoWay,
-            vec![],
-        );
-
-        let s2 = DesiredSession::new(
-            "test-2".to_string(),
-            "test".to_string(),
-            PathBuf::from("/test"),
-            "docker://target".to_string(),
-            SyncMode::TwoWay,
-            vec![],
-        );
-
-        assert_eq!(s1.config_hash, s2.config_hash);
-    }
 }
