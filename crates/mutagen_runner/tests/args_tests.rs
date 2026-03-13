@@ -15,7 +15,7 @@ fn basic_session() -> DesiredSession {
         "test".to_string(),
         PathBuf::from("/local/path"),
         "docker://container/remote".to_string(),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     )
 }
@@ -47,7 +47,7 @@ fn test_build_args_sync_mode_two_way() {
 #[test]
 fn test_build_args_sync_mode_one_way_create() {
     let mut session = basic_session();
-    session.mode = SyncMode::OneWayCreate;
+    session.mode = SyncMode::OneWaySafe;
     let args = build_create_args(&session, false);
 
     assert!(args.contains(&"--sync-mode=one-way-safe".to_string()));
@@ -190,7 +190,7 @@ fn test_build_args_full_command() {
         "myapp".to_string(),
         PathBuf::from("/home/user/project"),
         "docker://webserver/var/www".to_string(),
-        SyncMode::OneWayCreate,
+        SyncMode::OneWaySafe,
         vec![".git".to_string(), "node_modules".to_string()],
     );
     session.polling = PollingConfig {

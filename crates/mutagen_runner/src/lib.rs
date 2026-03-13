@@ -89,12 +89,8 @@ pub fn build_create_args(session: &state::DesiredSession, no_watch: bool) -> Vec
         format!("--name={}", session.name),
     ];
 
-    let mode_str = match session.mode {
-        SyncMode::TwoWay => "two-way-safe",
-        SyncMode::OneWayCreate => "one-way-safe",
-        SyncMode::OneWayReplica => "one-way-replica",
-    };
-    args.push(format!("--sync-mode={}", mode_str));
+    args.push(format!("--sync-mode={}", session.mode.as_str()));
+
 
     // Always exclude the .ebdev toolchain directory
     args.push("--ignore=.ebdev".to_string());
@@ -606,7 +602,7 @@ mod tests {
             "test".to_string(),
             PathBuf::from("/test"),
             "docker://container/path".to_string(),
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
             vec![],
         );
 

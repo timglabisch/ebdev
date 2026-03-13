@@ -156,7 +156,7 @@ async fn test_real_backend_create_and_terminate() {
         "test-create".to_string(),
         temp_dir.path().to_path_buf(),
         format!("docker://{}//sync", container),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![".git".to_string()],
     );
 
@@ -220,7 +220,7 @@ async fn test_real_reconcile_full_cycle() {
         "test-reconcile".to_string(),
         alpha_path,
         format!("docker://{}//sync", container),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     )];
 
@@ -290,7 +290,7 @@ async fn test_real_reconcile_recreates_changed_session() {
         "test-recreate".to_string(),
         alpha_path.clone(),
         format!("docker://{}//sync1", container),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     )];
 
@@ -325,7 +325,7 @@ async fn test_real_reconcile_recreates_changed_session() {
         "test-recreate".to_string(),
         alpha_path,
         format!("docker://{}//sync2", container),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     )];
 
@@ -377,8 +377,8 @@ async fn test_real_sync_modes() {
 
     // Test each sync mode
     for (mode, mode_name) in [
-        (SyncMode::TwoWay, "twoway"),
-        (SyncMode::OneWayCreate, "oneway-create"),
+        (SyncMode::TwoWaySafe, "twoway"),
+        (SyncMode::OneWaySafe, "oneway-create"),
         (SyncMode::OneWayReplica, "oneway-replica"),
     ] {
         let alpha_path = temp_dir.path().join(mode_name);
@@ -446,7 +446,7 @@ async fn test_real_polling_session() {
         "test-polling".to_string(),
         alpha_path,
         format!("docker://{}//sync", container),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     );
     session.polling = PollingConfig {

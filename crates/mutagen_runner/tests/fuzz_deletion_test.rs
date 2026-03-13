@@ -282,7 +282,7 @@ async fn fuzz_rapid_reconcile_cycles() {
     println!("Files: {}", files.len());
 
     // Initial reconcile to establish session
-    let session = make_desired_session("fuzz-rapid", &alpha, &container, "rapid", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-rapid", &alpha, &container, "rapid", project_crc32, SyncMode::TwoWaySafe);
     let session_name = session.name.clone();
 
     let result = reconcile_sessions(&mutagen_bin, vec![session.clone()], project_crc32, |_| {}).await;
@@ -350,7 +350,7 @@ async fn fuzz_beta_emptied_during_sync() {
     println!("=== Fuzz: Beta emptied during sync ===");
 
     // Initial reconcile
-    let session = make_desired_session("fuzz-betaempty", &alpha, &container, "betaempty", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-betaempty", &alpha, &container, "betaempty", project_crc32, SyncMode::TwoWaySafe);
     let session_name = session.name.clone();
 
     let result = reconcile_sessions(&mutagen_bin, vec![session.clone()], project_crc32, |_| {}).await;
@@ -452,7 +452,7 @@ async fn fuzz_rapid_session_recreation() {
             &container,
             &beta_subdir,
             project_crc32,
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
         );
 
         let result =
@@ -502,7 +502,7 @@ async fn fuzz_concurrent_reconciles() {
 
     println!("=== Fuzz: Concurrent reconcile calls ===");
 
-    let session = make_desired_session("fuzz-concurrent", &alpha, &container, "concurrent", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-concurrent", &alpha, &container, "concurrent", project_crc32, SyncMode::TwoWaySafe);
 
     // Launch multiple concurrent reconcile calls
     let mut handles = Vec::new();
@@ -582,9 +582,9 @@ async fn fuzz_shrink_session_count() {
 
     println!("=== Fuzz: Shrink session count ===");
 
-    let s1 = make_desired_session("fuzz-shrink1", &alpha1, &container, "shrink1", project_crc32, SyncMode::TwoWay);
-    let s2 = make_desired_session("fuzz-shrink2", &alpha2, &container, "shrink2", project_crc32, SyncMode::TwoWay);
-    let s3 = make_desired_session("fuzz-shrink3", &alpha3, &container, "shrink3", project_crc32, SyncMode::TwoWay);
+    let s1 = make_desired_session("fuzz-shrink1", &alpha1, &container, "shrink1", project_crc32, SyncMode::TwoWaySafe);
+    let s2 = make_desired_session("fuzz-shrink2", &alpha2, &container, "shrink2", project_crc32, SyncMode::TwoWaySafe);
+    let s3 = make_desired_session("fuzz-shrink3", &alpha3, &container, "shrink3", project_crc32, SyncMode::TwoWaySafe);
 
     // Phase 1: All three sessions
     println!("  Phase 1: Create 3 sessions");
@@ -669,7 +669,7 @@ async fn fuzz_alpha_modifications_during_reconcile() {
 
     println!("=== Fuzz: Alpha modifications during reconcile ===");
 
-    let session = make_desired_session("fuzz-alphamod", &alpha, &container, "alphamod", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-alphamod", &alpha, &container, "alphamod", project_crc32, SyncMode::TwoWaySafe);
     let session_name = session.name.clone();
 
     // Initial reconcile
@@ -749,7 +749,7 @@ async fn fuzz_container_restart_during_sync() {
 
     println!("=== Fuzz: Container restart during sync ===");
 
-    let session = make_desired_session("fuzz-restart", &alpha, &container, "restart", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-restart", &alpha, &container, "restart", project_crc32, SyncMode::TwoWaySafe);
     let session_name = session.name.clone();
 
     // Initial reconcile and sync
@@ -859,7 +859,7 @@ async fn fuzz_terminate_without_pause_then_reconcile() {
             &container,
             &beta_subdir,
             project_crc32,
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
         );
 
         // Create session via reconcile
@@ -931,7 +931,7 @@ async fn fuzz_new_session_to_empty_beta() {
         .args(["exec", &container, "mkdir", "-p", "/sync/newempty"])
         .output();
 
-    let session = make_desired_session("fuzz-newempty", &alpha, &container, "newempty", project_crc32, SyncMode::TwoWay);
+    let session = make_desired_session("fuzz-newempty", &alpha, &container, "newempty", project_crc32, SyncMode::TwoWaySafe);
     let session_name = session.name.clone();
 
     let result = reconcile_sessions(&mutagen_bin, vec![session.clone()], project_crc32, |_| {}).await;
@@ -1021,7 +1021,7 @@ async fn fuzz_combined_stress() {
             &container,
             &beta_sub,
             project_crc32,
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
         );
 
         let result =
@@ -1129,7 +1129,7 @@ async fn fuzz_resume_session_to_empty_beta() {
         &container,
         "resume-empty",
         project_crc32,
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
     );
     let session_name = session.name.clone();
 
@@ -1264,7 +1264,7 @@ async fn fuzz_multiple_sessions_empty_betas() {
                 &container,
                 &format!("multi{}", i),
                 project_crc32,
-                SyncMode::TwoWay,
+                SyncMode::TwoWaySafe,
             )
         })
         .collect();
@@ -1368,7 +1368,7 @@ async fn fuzz_rapid_create_to_empty_beta() {
             &container,
             &beta_sub,
             project_crc32,
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
         );
 
         // Create session to empty beta
@@ -1441,7 +1441,7 @@ async fn fuzz_container_recreate_same_name() {
         &container,
         "data",
         project_crc32,
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
     );
     let session_name = session.name.clone();
 
@@ -1552,7 +1552,7 @@ async fn fuzz_observe_initial_sync_to_empty_beta() {
         &container,
         "observe",
         project_crc32,
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
     );
     let session_name = session.name.clone();
 

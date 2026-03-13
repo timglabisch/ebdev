@@ -2,17 +2,45 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Sync mode for mutagen synchronization
+/// Sync mode for mutagen synchronization.
+///
+/// Maps to mutagen's `--sync-mode` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncMode {
-    /// Two-way synchronization (default)
     #[default]
-    TwoWay,
-    /// One-way synchronization, create files on beta
-    OneWayCreate,
-    /// One-way synchronization, replicate alpha to beta
+    TwoWaySafe,
+    TwoWayResolved,
+    OneWaySafe,
     OneWayReplica,
+}
+
+impl SyncMode {
+    /// Parses a mode string from the .ebdev.ts config.
+    /// Returns None for unknown modes.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "two-way-safe" | "two-way" => Some(Self::TwoWaySafe),
+            "two-way-resolved" => Some(Self::TwoWayResolved),
+            "one-way-safe" | "one-way-create" => Some(Self::OneWaySafe),
+            "one-way-replica" => Some(Self::OneWayReplica),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TwoWaySafe => "two-way-safe",
+            Self::TwoWayResolved => "two-way-resolved",
+            Self::OneWaySafe => "one-way-safe",
+            Self::OneWayReplica => "one-way-replica",
+        }
+    }
+
+    /// All known mode strings, for error messages.
+    pub fn known_modes() -> &'static [&'static str] {
+        &["two-way-safe", "two-way-resolved", "one-way-safe", "one-way-replica"]
+    }
 }
 
 /// Polling configuration for mutagen sync
@@ -73,18 +101,26 @@ mod tests {
 
     #[test]
     fn test_sync_mode_default() {
-        assert_eq!(SyncMode::default(), SyncMode::TwoWay);
+        assert_eq!(SyncMode::default(), SyncMode::TwoWaySafe);
     }
 
     #[test]
-    fn test_parse_sync_mode() {
-        let json_str = r#"{"mode": "one-way-create"}"#;
-        #[derive(Deserialize)]
-        struct Test {
-            mode: SyncMode,
-        }
-        let t: Test = serde_json::from_str(json_str).unwrap();
-        assert_eq!(t.mode, SyncMode::OneWayCreate);
+    fn test_sync_mode_parse() {
+        assert_eq!(SyncMode::parse("two-way-safe"), Some(SyncMode::TwoWaySafe));
+        assert_eq!(SyncMode::parse("two-way"), Some(SyncMode::TwoWaySafe));
+        assert_eq!(SyncMode::parse("two-way-resolved"), Some(SyncMode::TwoWayResolved));
+        assert_eq!(SyncMode::parse("one-way-safe"), Some(SyncMode::OneWaySafe));
+        assert_eq!(SyncMode::parse("one-way-create"), Some(SyncMode::OneWaySafe));
+        assert_eq!(SyncMode::parse("one-way-replica"), Some(SyncMode::OneWayReplica));
+        assert_eq!(SyncMode::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_sync_mode_as_str() {
+        assert_eq!(SyncMode::TwoWaySafe.as_str(), "two-way-safe");
+        assert_eq!(SyncMode::TwoWayResolved.as_str(), "two-way-resolved");
+        assert_eq!(SyncMode::OneWaySafe.as_str(), "one-way-safe");
+        assert_eq!(SyncMode::OneWayReplica.as_str(), "one-way-replica");
     }
 
     #[test]

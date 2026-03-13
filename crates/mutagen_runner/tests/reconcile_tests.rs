@@ -15,7 +15,7 @@ fn desired_session(name: &str, project_crc32: u32) -> DesiredSession {
         name.to_string(),
         PathBuf::from("/test"),
         "docker://container/path".to_string(),
-        SyncMode::TwoWay,
+        SyncMode::TwoWaySafe,
         vec![],
     )
 }

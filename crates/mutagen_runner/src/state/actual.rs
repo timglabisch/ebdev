@@ -103,9 +103,10 @@ impl SessionStatus {
         }
     }
 
-    /// Prüft ob die Session "complete" ist (watching oder waiting-for-rescan).
+    /// Prüft ob die Session einen Endzustand erreicht hat und der reconcile loop
+    /// nicht mehr warten muss.
     pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Watching | Self::WaitingForRescan)
+        matches!(self, Self::Watching | Self::WaitingForRescan | Self::Halted(_))
     }
 }
 

@@ -510,36 +510,38 @@ pub async fn op_mutagen_reconcile(
 
     // Build DesiredSessions from args
     let base_dir = config_path.parent().unwrap_or(&config_path);
-    let desired_sessions: Vec<DesiredSession> = args
-        .sessions
-        .into_iter()
-        .map(|s| {
-            let mode = match s.mode.as_deref() {
-                Some("one-way-create") => SyncMode::OneWayCreate,
-                Some("one-way-replica") => SyncMode::OneWayReplica,
-                _ => SyncMode::TwoWay,
+    let mut desired_sessions: Vec<DesiredSession> = Vec::new();
+    for s in args.sessions {
+        let mode = match s.mode.as_deref() {
+            Some(m) => SyncMode::parse(m).ok_or_else(|| {
+                JsErrorBox::generic(format!(
+                    "Unknown sync mode '{}'. Valid modes: {}",
+                    m,
+                    SyncMode::known_modes().join(", ")
+                ))
+            })?,
+            None => SyncMode::default(),
+        };
+
+        let alpha = base_dir.join(&s.directory);
+        let session_name = format!("{}-{:08x}", s.name, project_crc32);
+
+        let mut session = DesiredSession::new(
+            session_name,
+            s.name,
+            alpha,
+            s.target,
+            mode,
+            s.ignore.unwrap_or_default(),
+        );
+        if let Some(p) = s.polling {
+            session.polling = PollingConfig {
+                enabled: p.enabled,
+                interval: p.interval,
             };
-
-            let alpha = base_dir.join(&s.directory);
-            let session_name = format!("{}-{:08x}", s.name, project_crc32);
-
-            let mut session = DesiredSession::new(
-                session_name,
-                s.name,
-                alpha,
-                s.target,
-                mode,
-                s.ignore.unwrap_or_default(),
-            );
-            if let Some(p) = s.polling {
-                session.polling = PollingConfig {
-                    enabled: p.enabled,
-                    interval: p.interval,
-                };
-            }
-            session
-        })
-        .collect();
+        }
+        desired_sessions.push(session);
+    }
 
     // Run reconcile with status updates
     let handle_clone = handle.clone();
@@ -1386,7 +1388,7 @@ mod tests {
             arg.name.clone(),
             std::path::PathBuf::from("/base").join(&arg.directory),
             arg.target.clone(),
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
             arg.ignore.unwrap_or_default(),
         );
         if let Some(p) = arg.polling {

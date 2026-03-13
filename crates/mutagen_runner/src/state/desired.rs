@@ -81,14 +81,14 @@ mod tests {
             "test".to_string(),
             PathBuf::from("/test"),
             "docker://container/path".to_string(),
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
             vec!["node_modules".to_string()],
         );
 
         assert_eq!(session.name, "test-12345678");
         assert_eq!(session.project_name, "test");
         assert_eq!(session.beta, "docker://container/path");
-        assert_eq!(session.mode, SyncMode::TwoWay);
+        assert_eq!(session.mode, SyncMode::TwoWaySafe);
         assert_eq!(session.ignore, vec!["node_modules"]);
     }
 
@@ -99,7 +99,7 @@ mod tests {
             "test".to_string(),
             PathBuf::from("/test"),
             "docker://container/path".to_string(),
-            SyncMode::TwoWay,
+            SyncMode::TwoWaySafe,
             vec![],
         );
 
