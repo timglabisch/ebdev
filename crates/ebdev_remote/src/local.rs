@@ -8,6 +8,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+// ioctl-Request-Typ ist plattformabhängig:
+//   macOS / Linux glibc / Linux uclibc → c_ulong
+//   Linux musl / Android              → c_int
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_env = "gnu", target_env = "uclibc"))
+))]
+type IoctlReq = libc::c_ulong;
+#[cfg(all(target_os = "linux", any(target_env = "musl", target_env = "ohos")))]
+type IoctlReq = libc::c_int;
+
 /// Executor der Prozesse lokal ausführt
 #[derive(Default)]
 pub struct LocalExecutor;
@@ -208,16 +219,9 @@ impl Pty {
         };
 
         unsafe {
-            #[cfg(target_os = "macos")]
             let ret = libc::ioctl(
                 self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_ulong,
-                &size,
-            );
-            #[cfg(target_os = "linux")]
-            let ret = libc::ioctl(
-                self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_int,
+                libc::TIOCSWINSZ as IoctlReq,
                 &size,
             );
             if ret != 0 {
@@ -327,10 +331,7 @@ async fn start_pty_process(
             libc::setsid();
 
             // Slave als controlling terminal setzen
-            #[cfg(target_os = "macos")]
-            libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
-            #[cfg(target_os = "linux")]
-            libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_int, 0);
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as IoctlReq, 0);
 
             // Stdio auf slave umleiten
             libc::dup2(slave_fd, libc::STDIN_FILENO);
@@ -442,10 +443,7 @@ async fn start_pty_process(
                         ws_ypixel: 0,
                     };
                     unsafe {
-                        #[cfg(target_os = "macos")]
-                        libc::ioctl(async_fd.as_raw_fd(), libc::TIOCSWINSZ as libc::c_ulong, &size);
-                        #[cfg(target_os = "linux")]
-                        libc::ioctl(async_fd.as_raw_fd(), libc::TIOCSWINSZ as libc::c_int, &size);
+                        libc::ioctl(async_fd.as_raw_fd(), libc::TIOCSWINSZ as IoctlReq, &size);
                     }
                 }
 
