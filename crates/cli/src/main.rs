@@ -120,7 +120,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         return remote::handle_remote_command(command, EMBEDDED_LINUX_BINARY).await;
     }
 
-    let base_path = PathBuf::from(".");
+    let base_path = std::env::current_dir()?;
 
     // Self-update: try early version extraction from raw source text first.
     // This handles the case where a newer .ebdev.ts uses API features that
